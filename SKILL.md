@@ -1,5 +1,5 @@
 ---
-name: route-project-models
+name: codex-model-router
 description: Analyze, apply, and tune project model routing inside Codex, use native same-task model and reasoning overrides when available, use a local fast path for usage queries and records, save a Markdown report, and persist validated per-model history. Prefer GPT-5.6 Sol medium for normal assessment, allow Sol, Terra, Luna and low, medium, high, or xhigh overrides, execute routed task segments in the same Codex task, adjust effort to difficulty, and fall back honestly when a route is unavailable. Use when the user asks which model should handle project tasks, invokes the skill with implementation work, queries actual or recommended usage proportions, records outcomes, retunes assignments from history, or wants a speed-first routing plan. Invoking this skill authorizes same-task routed continuations and dedicated report and history writes, never a new top-level task.
 ---
 
@@ -28,7 +28,7 @@ With neither recursion marker present, act only as the coordinator:
    - **Record:** when the user supplies a completed task's model, effort, outcome, or duration. Validate and append it, then summarize current proportions.
    - **Retune:** when the user asks to adjust or optimize assignments. Compare actual history with the current recommendation and inspect only evidence needed to revise it.
 3. For Query or Record, use the fast path and do not spawn an agent:
-   - Before running the local fast path, show one concise commentary line: `路由提示｜<task segment>｜模型：local-script｜推理：none｜<reason>`.
+   - Before running the local fast path, show one concise commentary line: `Codex 自动路由｜任务段：<task segment>｜模型：local-script｜推理：none｜<reason>`.
    - First record the invocation as `skill_run` with `analysis_model=local-script` and `effort=none`.
    - Query: run `summary`, then `render` to update only the marked report section.
    - Record: append the user-confirmed execution with `record`, then run `summary` and `render`.
@@ -52,7 +52,7 @@ With neither recursion marker present, act only as the coordinator:
 | Luna | `project_model_router_luna_low` | `project_model_router_luna` | `project_model_router_luna_high` | `project_model_router_luna_xhigh` |
 
 8. If the user names multiple conflicting models, multiple conflicting efforts, or an unsupported value, ask for one supported value instead of guessing.
-9. For Assess or Retune, before dispatching, show one concise commentary line in the current Codex conversation: `路由提示｜<task segment>｜模型：<model>｜推理：<effort>｜<short reason>`.
+9. For Assess or Retune, before dispatching, show one concise commentary line in the current Codex conversation: `Codex 自动路由｜任务段：<task segment>｜模型：<model>｜推理：<effort>｜<short reason>`.
 10. In Codex Desktop, identify the current active thread with the thread-list capability, then send a follow-up to that same thread with the selected native `model` and `thinking`. Never call the thread-creation capability. Pass a prompt containing:
    - `ROUTE_PROJECT_MODELS_ROUTED_TURN=1`
    - `ROUTED_MODE=ASSESS` or `ROUTED_MODE=RETUNE`
@@ -91,7 +91,8 @@ Keep the chat response to about six bullets or fewer. Do not duplicate the detai
 Make model routing visible in the current Codex conversation whenever this skill controls a distinct task segment:
 
 - Announce the route immediately before starting repository assessment, retuning, a local Query/Record fast path, or a follow-on segment explicitly coordinated under this skill.
-- Use exactly one compact commentary line per segment: `路由提示｜<task segment>｜模型：<model>｜推理：<low|medium|high|xhigh|none>｜<reason>`.
+- Use exactly one compact commentary line per segment: `Codex 自动路由｜任务段：<task segment>｜模型：<model>｜推理：<low|medium|high|xhigh|none>｜<reason>`.
+- The wording must explicitly identify that Codex selected the route; do not show a bare `路由提示` label that could be mistaken for a user instruction.
 - For a multi-segment switching sequence, announce again only when the model or reasoning effort changes, or when the next segment has a materially different responsibility. Do not repeat the line for every command or file.
 - Label configured-but-not-yet-verified presets as `配置模型`; do not present them as observed runtime metadata.
 - If fallback occurs, immediately show: `回退提示｜原配置：<model/effort>｜实际：<verified model/effort or available-default (unverified)>｜<reason>`.

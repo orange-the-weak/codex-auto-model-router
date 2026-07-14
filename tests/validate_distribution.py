@@ -13,7 +13,7 @@ skill_text = (ROOT / "SKILL.md").read_text()
 if not skill_text.startswith("---\n"):
     fail("SKILL.md frontmatter is missing")
 frontmatter = skill_text.split("---", 2)[1]
-if "\nname: route-project-models\n" not in "\n" + frontmatter or "\ndescription: " not in "\n" + frontmatter:
+if "\nname: codex-model-router\n" not in "\n" + frontmatter or "\ndescription: " not in "\n" + frontmatter:
     fail("SKILL.md frontmatter is invalid")
 
 ui_text = (ROOT / "agents" / "openai.yaml").read_text()
@@ -25,9 +25,9 @@ for line in ui_text.splitlines():
         values[key] = value.strip().strip('"')
 if not 25 <= len(values.get("short_description", "")) <= 64:
     fail("openai.yaml short_description length is invalid")
-if "$route-project-models" not in values.get("default_prompt", ""):
+if "$codex-model-router" not in values.get("default_prompt", ""):
     fail("openai.yaml default prompt does not invoke the skill")
-if "## Visible routing protocol" not in skill_text or "路由提示｜<task segment>" not in skill_text:
+if "## Visible routing protocol" not in skill_text or "Codex 自动路由｜任务段：<task segment>" not in skill_text:
     fail("visible routing protocol is missing")
 if "## Path dispatch" not in skill_text or "ROUTE_PROJECT_MODELS_EXECUTOR=1`" not in skill_text:
     fail("coordinator/router/executor path dispatch is missing")

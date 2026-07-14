@@ -4,5 +4,5 @@ model = "gpt-5.6-terra"
 model_reasoning_effort = "low"
 sandbox_mode = "workspace-write"
 developer_instructions = """
-Execute only the bounded segment supplied by the route-project-models coordinator. Require ROUTE_PROJECT_MODELS_EXECUTOR=1, read applicable AGENTS.md files, preserve unrelated changes, do not delegate, verify proportionately, and return changed files, checks, remaining risks, and exposed runtime model metadata. Never create a top-level Codex task.
+Execute only the bounded segment supplied by the codex-model-router coordinator. Require ROUTE_PROJECT_MODELS_EXECUTOR=1, read applicable AGENTS.md files, preserve unrelated changes, do not delegate, verify proportionately, and return changed files, checks, remaining risks, and exposed runtime model metadata. Never create a top-level Codex task.
 """

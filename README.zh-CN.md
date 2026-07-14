@@ -30,18 +30,18 @@ cd codex-model-router
 ## 使用示例
 
 ```text
-$route-project-models 分析当前项目并优化模型分配
-$route-project-models 查询各模型实际使用比例
-$route-project-models 记录：Terra low 完成 UI 调整，耗时 90 秒
-$route-project-models 根据历史成功率、返工和耗时微调任务分配
-$route-project-models 用 Terra high 分析当前项目
-$route-project-models 按照已保存的路由规划实现这个功能
+$codex-model-router 分析当前项目并优化模型分配
+$codex-model-router 查询各模型实际使用比例
+$codex-model-router 记录：Terra low 完成 UI 调整，耗时 90 秒
+$codex-model-router 根据历史成功率、返工和耗时微调任务分配
+$codex-model-router 用 Terra high 分析当前项目
+$codex-model-router 按照已保存的路由规划实现这个功能
 ```
 
 任务段开始前会显示一条简洁提示；只有模型、推理强度或职责明显变化时才再次显示：
 
 ```text
-路由提示｜项目分析｜配置模型：GPT-5.6 Sol｜推理：medium｜常规仓库评估
+Codex 自动路由｜任务段：项目分析｜模型：GPT-5.6 Sol｜推理：medium｜Codex 根据项目范围自动选择
 ```
 
 在 Codex Desktop 中，任务段通过带有明确模型和推理字段的续接消息回到当前任务，不会新开任务。不能把普通子任务名称当成模型已经切换的证据。这项约束覆盖该次 Skill 调用所协调的工作；以后另开的独立任务需要再次调用 Skill，或明确要求沿用已保存的路由报告。

@@ -46,7 +46,7 @@ cd codex-model-router
 
 The installer copies:
 
-- this skill to `${CODEX_HOME:-~/.codex}/skills/route-project-models`
+- this skill to `${CODEX_HOME:-~/.codex}/skills/codex-model-router`
 - the twelve router and twelve executor agents to `${CODEX_HOME:-~/.codex}/agents`
 
 Restart Codex after installation so it refreshes skills and custom agents.
@@ -55,26 +55,26 @@ The installer only copies files into `CODEX_HOME`; it does not modify project co
 
 ## Usage
 
-Invoke the skill in Codex with `$route-project-models`.
+Invoke the skill in Codex with `$codex-model-router`.
 
 ```text
-$route-project-models Analyze this repository and optimize model routing.
+$codex-model-router Analyze this repository and optimize model routing.
 
-$route-project-models Query the actual model usage ratio.
+$codex-model-router Query the actual model usage ratio.
 
-$route-project-models Record: Terra low completed a UI task in 90 seconds.
+$codex-model-router Record: Terra low completed a UI task in 90 seconds.
 
-$route-project-models Retune task allocation from the observed history.
+$codex-model-router Retune task allocation from the observed history.
 
-$route-project-models Use GPT-5.6 Terra high for this assessment.
+$codex-model-router Use GPT-5.6 Terra high for this assessment.
 
-$route-project-models Apply the saved routing plan and implement the requested feature.
+$codex-model-router Apply the saved routing plan and implement the requested feature.
 ```
 
 Before each distinct routed segment, the skill shows a compact notice such as:
 
 ```text
-路由提示｜Repository assessment｜配置模型：GPT-5.6 Sol｜推理：medium｜Normal repository-wide assessment
+Codex 自动路由｜任务段：Repository assessment｜模型：GPT-5.6 Sol｜推理：medium｜Codex 根据项目范围自动选择
 ```
 
 It announces again only when the route or responsibility materially changes, so the conversation stays readable. In Codex Desktop, routed work is sent back to the same task with explicit model and reasoning fields; it never creates a separate task. A separate future Codex task must invoke the skill again or explicitly continue under the saved report.
@@ -82,9 +82,9 @@ It announces again only when the route or responsibility materially changes, so 
 Chinese prompts work too:
 
 ```text
-$route-project-models 分析当前项目并优化模型分配
-$route-project-models 查询各模型实际使用比例
-$route-project-models 根据历史成功率和耗时微调任务分配
+$codex-model-router 分析当前项目并优化模型分配
+$codex-model-router 查询各模型实际使用比例
+$codex-model-router 根据历史成功率和耗时微调任务分配
 ```
 
 ## Outputs

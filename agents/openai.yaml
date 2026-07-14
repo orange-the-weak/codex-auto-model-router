@@ -1,4 +1,4 @@
 interface:
   display_name: "Project Model Router"
   short_description: "快速查询模型使用比例并基于可靠历史自动微调任务分配"
-  default_prompt: "Use $route-project-models to assess, apply, or retune this project with native same-task model and reasoning overrides, use the local fast path for usage queries and records, and persist validated model-effort history."
+  default_prompt: "Use $codex-model-router to assess, apply, or retune this project with native same-task model and reasoning overrides, use the local fast path for usage queries and records, and persist validated model-effort history."
