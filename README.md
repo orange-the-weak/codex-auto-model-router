@@ -5,7 +5,7 @@
 
 **Task-aware model routing and execution for OpenAI Codex.** Analyze a repository, execute bounded task segments across GPT-5.6 Sol, Terra, and Luna, tune reasoning effort from `low` to `xhigh`, track actual usage, and continuously improve the allocation from observed outcomes.
 
-[中文说明](README.zh-CN.md)
+[Chinese README](README.zh-CN.md)
 
 Codex Model Router is a reusable Codex skill for developers who want faster AI-assisted engineering without sending requests through an external API. It combines repository analysis, LLM model routing, adaptive reasoning effort, multi-agent orchestration, usage analytics, safe fallback behavior, and Markdown efficiency reports inside Codex.
 
@@ -23,11 +23,11 @@ The generated report estimates productivity improvement against an all-Sol/mediu
 ## Features
 
 - Repository-aware model and reasoning-effort recommendations.
-- Apply mode executes work requested in the same invocation through Codex's native same-task `model` × `thinking` override instead of leaving the routing plan as documentation only.
+- Apply mode executes work requested in the same invocation through Codex's native same-task `model` x `thinking` override instead of leaving the routing plan as documentation only.
 - Visible per-segment route notices in the Codex conversation, including model, reasoning effort, purpose, and fallback status.
 - Same-task routed continuations; no new top-level Codex task.
 - Fast local Query and Record modes that do not start an analysis agent.
-- Persistent model × effort usage ratios in `.codex/model-routing-history.jsonl`.
+- Persistent model x effort usage ratios in `.codex/model-routing-history.jsonl`.
 - Evidence-based Retune mode using success, failure, escalation, rework, median duration, and P75 duration.
 - Deterministic report updates that preserve unrelated Markdown content.
 - GPT-5.6 availability fallback with honest model labeling.
@@ -86,7 +86,7 @@ $codex-model-router Apply the saved routing plan and implement the requested fea
 Before each distinct routed segment, the skill shows a compact notice such as:
 
 ```text
-Codex 自动路由｜任务段：Repository assessment｜模型：GPT-5.6 Sol｜推理：medium｜Codex 根据项目范围自动选择
+Codex automatic routing | Segment: Repository assessment | Model: GPT-5.6 Sol | Reasoning: medium | Selected automatically from repository scope
 ```
 
 It announces again only when the route or responsibility materially changes, so the conversation stays readable. In Codex Desktop, routed work is sent back to the same task with explicit model and reasoning fields; it never creates a separate task. A separate future Codex task must invoke the skill again or explicitly continue under the saved report.
@@ -94,9 +94,9 @@ It announces again only when the route or responsibility materially changes, so 
 Chinese prompts work too:
 
 ```text
-$codex-model-router 分析当前项目并优化模型分配
-$codex-model-router 查询各模型实际使用比例
-$codex-model-router 根据历史成功率和耗时微调任务分配
+$codex-model-router Analyze this repository and optimize model routing.
+$codex-model-router Query actual model usage ratios.
+$codex-model-router Retune task allocation from success, failure, and duration history.
 ```
 
 ## Outputs
