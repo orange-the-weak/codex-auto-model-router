@@ -113,9 +113,14 @@ Apply mode makes the routing plan operational for implementation requested in th
 
 1. Read `docs/codex-model-routing-report.md` and match the requested work to its task rows, upgrade triggers, and switching sequence.
 2. If no report exists, it is materially stale, or it does not cover the requested responsibility, run Assess first and save the refreshed report before implementation.
-3. Decompose the request into the fewest independently verifiable task segments that justify distinct routes. Do not split work merely to demonstrate model switching.
-4. Assign each segment the report's model and effort. An explicit user override wins for the named segment or, if no segment is named, for the whole Apply request. Never silently replace a user override with the recommendation.
-5. Select the native model ID and effort for the segment. Use the matching executor preset below only on a Codex surface whose spawn interface explicitly supports selecting named custom agents:
+3. Apply the speed gate before any extra routed turn:
+   - If the report covers the responsibility, no major architecture or model-picker change is known, and the request is bounded with an obvious verification path, reuse the report without a new Assess turn.
+   - If the request is one bounded responsibility, keep it as one segment. Do not split it merely to demonstrate model switching.
+   - For low-risk work, prefer the current task when its available model is already sufficient; a same-task continuation is justified only when the selected model/effort differs materially or the expected quality/risk benefit exceeds one extra turn.
+   - Reserve an extra Sol analysis or review turn for ambiguity, cross-subsystem coupling, security/privacy/money/production risk, migration/data-loss risk, or a failed lower-tier attempt.
+4. Decompose the request into the fewest independently verifiable task segments that justify distinct routes. Do not split work merely to demonstrate model switching.
+5. Assign each segment the report's model and effort. An explicit user override wins for the named segment or, if no segment is named, for the whole Apply request. Never silently replace a user override with the recommendation.
+6. Select the native model ID and effort for the segment. Use the matching executor preset below only on a Codex surface whose spawn interface explicitly supports selecting named custom agents:
 
 | Model | low | medium | high | xhigh |
 |---|---|---|---|---|
@@ -123,12 +128,12 @@ Apply mode makes the routing plan operational for implementation requested in th
 | Terra | `project_model_executor_terra_low` | `project_model_executor_terra` | `project_model_executor_terra_high` | `project_model_executor_terra_xhigh` |
 | Luna | `project_model_executor_luna_low` | `project_model_executor_luna` | `project_model_executor_luna_high` | `project_model_executor_luna_xhigh` |
 
-6. Before each segment, show the visible route line. Dispatch the segment to the current Codex thread with explicit `model` and `thinking`, marker `ROUTE_PROJECT_MODELS_ROUTED_TURN=1`, and `ROUTED_MODE=APPLY_SEGMENT`. Never create another top-level task.
-7. Pass the routed turn the exact segment scope, acceptance criteria, applicable report row, repository path, user override, validation budget, current thread ID, and remaining ordered segments. Instruct it to read applicable `AGENTS.md` files.
-8. Run dependent segments one at a time. After a successful segment, the routed turn dispatches the next segment to the same thread with its own explicit model and effort. Stop the chain on failure and report it instead of blindly queuing dependent work.
-9. Record a confirmed execution event only when runtime task metadata exposes the route or the user confirms it. Otherwise record the configured route separately without presenting it as actual usage.
-10. On failure, diagnose the cause before changing routes. Retry once only when a more capable model or higher effort directly addresses that cause; change one dimension at a time when practical. Show the new route or fallback line before retrying.
-11. Do not claim that this routing persists into unrelated future Codex tasks. A later independent task must invoke the skill again, or explicitly ask to continue under the saved routing report.
+7. Before each segment, show the visible route line. Use the current task for a sufficient low-risk route; otherwise dispatch the segment to the current Codex thread with explicit `model` and `thinking`, marker `ROUTE_PROJECT_MODELS_ROUTED_TURN=1`, and `ROUTED_MODE=APPLY_SEGMENT`. Never create another top-level task.
+8. Pass the routed turn the exact segment scope, acceptance criteria, applicable report row, repository path, user override, validation budget, current thread ID, and remaining ordered segments. Instruct it to read applicable `AGENTS.md` files.
+9. Run dependent segments one at a time. After a successful segment, the routed turn dispatches the next segment to the same thread with its own explicit model and effort. Stop the chain on failure and report it instead of blindly queuing dependent work.
+10. Record a confirmed execution event only when runtime task metadata exposes the route or the user confirms it. Otherwise record the configured route separately without presenting it as actual usage.
+11. On failure, diagnose the cause before changing routes. Retry once only when a more capable model or higher effort directly addresses that cause; change one dimension at a time when practical. Show the new route or fallback line before retrying.
+12. Do not claim that this routing persists into unrelated future Codex tasks. A later independent task must invoke the skill again, or explicitly ask to continue under the saved routing report.
 
 When the prompt contains `ROUTE_PROJECT_MODELS_EXECUTOR=1` or `ROUTE_PROJECT_MODELS_ROUTED_TURN=1` with `ROUTED_MODE=APPLY_SEGMENT`, execute only the supplied bounded segment. Do not assess routing, delegate, or create another task. Read applicable repository instructions, preserve unrelated changes, implement the segment, verify proportionately, record exposed runtime metadata, and dispatch the next same-thread segment only after success.
 
