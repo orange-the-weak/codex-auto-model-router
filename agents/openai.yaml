@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Auto Model Router"
-  short_description: "快速查询模型使用比例并基于可靠历史自动微调任务分配"
-  default_prompt: "Use $codex-auto-model-router to choose one deterministic route for this request, verify the current task from local Codex settings metadata, skip costly switching for tiny work, restore the original route after a real switch, and persist validated model-effort history."
+  short_description: "为 GPT-5.6 Sol、Terra、Luna 自动选择模型与推理强度"
+  default_prompt: "Use $codex-auto-model-router to build the smallest useful segment plan with adaptive bounded budgets, choose GPT-5.6 model and reasoning per segment, switch within the same verified Codex task, stop on failure, restore the original route once, and record only verified segment usage."

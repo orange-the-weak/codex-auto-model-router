@@ -43,20 +43,101 @@ class LedgerTests(unittest.TestCase):
         LEDGER.append_event(self.ledger, {
             "event": "execution", "model": "GPT-5.6 Terra", "effort": "low",
             "task_class": "ui", "outcome": "completed", "source": "user-confirmed",
+            "route_id": "route-1", "segment_id": "implement",
         })
         events, warnings = LEDGER.read_events(self.ledger)
         summary = LEDGER.build_summary(events, warnings)
         self.assertEqual(summary["actual_execution"]["items"]["GPT-5.6 Terra"]["percent"], 100.0)
         self.assertEqual(summary["model_effort_usage"]["items"]["GPT-5.6 Terra | low"]["count"], 1)
 
+    def test_records_segment_identifiers(self):
+        parser = LEDGER.parser()
+        args = parser.parse_args([
+            "record", "--ledger", str(self.ledger), "--event", "execution",
+            "--route-id", "route-1", "--segment-id", "verify", "--model", "gpt-5.6-luna",
+            "--effort", "low", "--task-class", "tests", "--outcome", "completed",
+            "--source", "task-metadata", "--verification", "deterministic",
+        ])
+        with redirect_stdout(io.StringIO()):
+            args.func(args)
+        events, warnings = LEDGER.read_events(self.ledger)
+        self.assertEqual(warnings, [])
+        self.assertEqual(events[0]["route_id"], "route-1")
+        self.assertEqual(events[0]["segment_id"], "verify")
+
+    def test_segment_replay_is_idempotent_by_route_and_segment(self):
+        event = {
+            "event": "execution", "route_id": "route-1", "segment_id": "implement",
+            "model": "Terra", "effort": "medium", "task_class": "code",
+            "outcome": "completed", "source": "task-metadata", "verification": "deterministic",
+        }
+        self.assertTrue(LEDGER.append_event(self.ledger, event.copy()))
+        self.assertFalse(LEDGER.append_event(self.ledger, event.copy()))
+        events, _ = LEDGER.read_events(self.ledger)
+        self.assertEqual(len(events), 1)
+
+    def test_segment_claim_blocks_replay_before_execution(self):
+        parser = LEDGER.parser()
+        command = [
+            "claim", "--ledger", str(self.ledger), "--route-id", "route-1",
+            "--segment-id", "implement", "--attempt-id", "attempt-1",
+        ]
+        outputs = []
+        for _ in range(2):
+            args = parser.parse_args(command)
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                args.func(args)
+            outputs.append(json.loads(buffer.getvalue()))
+        self.assertTrue(outputs[0]["claimed"])
+        self.assertFalse(outputs[1]["claimed"])
+        events, warnings = LEDGER.read_events(self.ledger)
+        self.assertEqual(warnings, [])
+        self.assertEqual([item["event"] for item in events], ["segment_claim"])
+
+    def test_rejects_empty_segment_identifier(self):
+        event = {
+            "event": "execution", "model": "Terra", "effort": "medium",
+            "task_class": "docs", "outcome": "completed", "source": "task-metadata",
+            "segment_id": "",
+        }
+        with self.assertRaisesRegex(ValueError, "segment_id must be a non-empty string"):
+            LEDGER.validate_event(event)
+
+    def test_requires_route_and_segment_identifiers_together(self):
+        event = {
+            "event": "execution", "route_id": "route-1", "model": "Terra",
+            "effort": "medium", "task_class": "docs", "outcome": "completed",
+            "source": "task-metadata",
+        }
+        with self.assertRaisesRegex(ValueError, "requires both route_id and segment_id"):
+            LEDGER.validate_event(event)
+
+    def test_legacy_whole_task_records_do_not_distort_segment_ratio(self):
+        events = [
+            {"event": "execution", "model": "Sol", "effort": "high", "task_class": "legacy", "outcome": "completed", "source": "user-confirmed"},
+            {"event": "execution", "route_id": "route-1", "segment_id": "verify", "model": "Luna", "effort": "low", "task_class": "tests", "outcome": "completed", "source": "task-metadata"},
+        ]
+        summary = LEDGER.build_summary(events, [])
+        self.assertEqual(summary["actual_execution"]["items"]["Luna"]["percent"], 100.0)
+        self.assertEqual(summary["legacy_execution"]["items"]["Sol"]["count"], 1)
+
+    def test_segment_without_reliable_source_is_not_counted(self):
+        summary = LEDGER.build_summary([{
+            "event": "execution", "route_id": "route-1", "segment_id": "configured-only",
+            "model": "Sol", "effort": "high", "task_class": "code", "outcome": "completed",
+        }], [])
+        self.assertEqual(summary["actual_execution"]["total"], 0)
+        self.assertEqual(summary["route_performance"], {})
+
     def test_retune_signals_use_thresholds(self):
         events = []
-        for outcome in ("failed", "escalated", "reworked", "completed", "completed"):
-            events.append({"event": "execution", "model": "Luna", "effort": "low", "task_class": "auth", "outcome": outcome})
-        for _ in range(10):
+        for index, outcome in enumerate(("failed", "escalated", "reworked", "completed", "completed")):
+            events.append({"event": "execution", "route_id": "auth-route", "segment_id": f"auth-{index}", "model": "Luna", "effort": "low", "task_class": "auth", "outcome": outcome, "source": "task-metadata"})
+        for index in range(10):
             events.append({
-                "event": "execution", "model": "Terra", "effort": "medium",
-                "task_class": "docs", "outcome": "completed", "verification": "deterministic",
+                "event": "execution", "route_id": "docs-route", "segment_id": f"docs-{index}", "model": "Terra", "effort": "medium",
+                "task_class": "docs", "outcome": "completed", "verification": "deterministic", "source": "task-metadata",
             })
         summary = LEDGER.build_summary(events, [])
         self.assertEqual(summary["route_performance"]["auth | Luna | low"]["retune_signal"], "raise_candidate")
@@ -79,18 +160,18 @@ class LedgerTests(unittest.TestCase):
     def test_lowering_requires_deterministic_verification(self):
         events = [
             {
-                "event": "execution", "model": "Terra", "effort": "medium",
-                "task_class": "docs", "outcome": "completed", "verification": "manual",
+                "event": "execution", "route_id": "docs-route", "segment_id": f"docs-{index}", "model": "Terra", "effort": "medium",
+                "task_class": "docs", "outcome": "completed", "verification": "manual", "source": "task-metadata",
             }
-            for _ in range(10)
+            for index in range(10)
         ]
         summary = LEDGER.build_summary(events, [])
         self.assertEqual(summary["route_performance"]["docs | Terra | medium"]["retune_signal"], "hold")
 
     def test_cancelled_duration_is_excluded(self):
         events = [
-            {"event": "execution", "model": "Terra", "effort": "medium", "task_class": "docs", "outcome": "completed", "duration_seconds": 10},
-            {"event": "execution", "model": "Terra", "effort": "medium", "task_class": "docs", "outcome": "cancelled", "duration_seconds": 1000},
+            {"event": "execution", "route_id": "route", "segment_id": "done", "model": "Terra", "effort": "medium", "task_class": "docs", "outcome": "completed", "duration_seconds": 10, "source": "task-metadata"},
+            {"event": "execution", "route_id": "route", "segment_id": "cancelled", "model": "Terra", "effort": "medium", "task_class": "docs", "outcome": "cancelled", "duration_seconds": 1000, "source": "task-metadata"},
         ]
         summary = LEDGER.build_summary(events, [])
         performance = summary["route_performance"]["docs | Terra | medium"]

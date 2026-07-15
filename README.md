@@ -3,43 +3,15 @@
 [![Codex Skill](https://img.shields.io/badge/OpenAI%20Codex-Skill-111827)](https://github.com/openai/skills)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Task-aware model routing and execution for OpenAI Codex.** Analyze a repository, select one GPT-5.6 Sol, Terra, or Luna route per request, tune reasoning effort from `low` to `xhigh`, track actual usage, and continuously improve the allocation from observed outcomes.
+**Automatic GPT-5.6 model and reasoning selection for OpenAI Codex.** Split a request into the few useful execution segments, switch Sol, Terra, or Luna at segment boundaries, and use only the reasoning effort each stage needs—without an external API or API key.
 
-[Chinese README](README.zh-CN.md)
+[中文说明](README.zh-CN.md)
 
-Codex Auto Model Router is a reusable Codex skill for developers who want faster AI-assisted engineering without sending requests through an external API. It combines repository analysis, deterministic model routing, adaptive reasoning effort, usage analytics, safe fallback behavior, and Markdown efficiency reports inside Codex.
+## Why this tool?
 
-## Why use it?
+GPT-5.6 gives Codex users Sol, Terra, Luna, and several reasoning levels. Choosing the right combination repeatedly—and deciding when a switch is worth the delay—becomes work of its own. This Skill creates the smallest useful segment plan, selects a route for each stage, switches inside the same Codex task, and restores the original settings at the end.
 
-Using the strongest model at high reasoning for every task is usually unnecessary. This skill routes work by ambiguity, scope, coupling, verification difficulty, and consequence of error:
-
-- **Luna** for mechanical, repetitive, high-volume work with deterministic checks.
-- **Terra** for ordinary features, localized bugs, UI iteration, tests, and bounded refactors.
-- **Sol** for architecture, security, migrations, concurrency, cross-system diagnosis, and high-risk review.
-- **Adaptive reasoning** uses `medium` as the normal default, then moves to `low`, `high`, or `xhigh` only when task scope, risk, and verification difficulty justify it.
-
-The generated report estimates productivity improvement against an all-Sol/medium baseline. Repository-specific measurements replace the heuristic after enough comparable history exists.
-
-## Features
-
-- Repository-aware model and reasoning-effort recommendations.
-- Apply mode selects one route for the whole request and, when the current Codex surface exposes a same-task `model` x `thinking` override, executes it there and restores the original route afterward.
-- A missing or stale report no longer inserts a separate Assess turn; bounded work uses a deterministic fallback route to reduce latency.
-- Tiny mechanical changes keep the current route when switching and restoration would cost more than the work; explicit user overrides always win.
-- Current task identity and route are verified from `CODEX_THREAD_ID` and local `turn_context` or `thread_settings_applied` settings metadata without reading prompt content.
-- One visible route notice per request in the Codex conversation, including model, reasoning effort, and purpose.
-- Same-task routed continuations; no new top-level Codex task.
-- Fast local Query and Record modes that do not start an analysis agent.
-- Persistent model x effort usage ratios in `.codex/model-routing-history.jsonl`.
-- Evidence-based Retune mode using success, failure, escalation, rework, median duration, and P75 duration.
-- Deterministic report updates that preserve unrelated Markdown content.
-- GPT-5.6 availability fallback with honest model labeling.
-- Optional custom-agent presets for Codex surfaces that explicitly support selecting named agents; generic subagent names are never treated as proof of a model switch.
-- No API key, external model gateway, or API integration required.
-
-## Install
-
-### Install the Skill from a Codex conversation
+## Quick start
 
 In Codex, send:
 
@@ -47,11 +19,7 @@ In Codex, send:
 $skill-installer Install the Codex Auto Model Router skill from https://github.com/orange-the-weak/codex-auto-model-router
 ```
 
-The Skill installer places the Skill in `~/.codex/skills/codex-auto-model-router`. It does not run this repository's `install.sh`, install the optional 24 custom-agent presets, or remove the legacy Skill name. For a first pure-Skill installation this is sufficient; use the terminal method for a full installation or rename migration. Restart Codex afterward.
-
-### Install from a terminal
-
-Clone the repository and run the installer:
+Restart Codex afterward. This installs the core Skill. For all 24 optional custom-agent presets or migration from the old name, use:
 
 ```bash
 git clone https://github.com/orange-the-weak/codex-auto-model-router.git
@@ -59,117 +27,91 @@ cd codex-auto-model-router
 ./install.sh
 ```
 
-The installer copies:
+## Routing at a glance
 
-- this skill to `${CODEX_HOME:-~/.codex}/skills/codex-auto-model-router`
-- the twelve router and twelve executor agents to `${CODEX_HOME:-~/.codex}/agents`
+| Route | Best fit | Default reasoning |
+|---|---|---|
+| **GPT-5.6 Luna** | Repetitive edits, formatting, file moves, and other deterministic work | `medium`, lowered to `low` when checks are clear |
+| **GPT-5.6 Terra** | Features, localized bugs, tests, UI iteration, and bounded refactors | `medium` |
+| **GPT-5.6 Sol** | Architecture, security, migrations, concurrency, cross-system diagnosis, and high-risk review | `medium`, raised to `high` or `xhigh` only when justified |
 
-Restart Codex after installation so it refreshes skills and custom agents.
+Explicit user choices always win. Tiny tasks can keep the current route when switching and restoration would take longer than the work itself.
 
-The installer only changes this Skill's files inside `CODEX_HOME`; it does not modify project code, call an API, or remove unrelated files.
-When upgrading from the former `codex-model-router` name, it removes only that legacy Skill folder and its `project-model-*` agent presets to prevent duplicate entries in Codex.
+## What it does
 
-## Usage
+- Builds the smallest deterministic linear plan; simple requests remain one segment, while genuinely complex or large plans can use more stages.
+- Selects a model and reasoning level for each segment, switches through native same-task overrides, and restores the verified original route once at the end.
+- Merges adjacent same-route segments and avoids switches for tiny work. The default budget is 4 segments/4 switches, eligible plans can expand to 6/6, and users can set a bounded limit up to 8/8.
+- Stops on segment failure instead of cycling through models; falls back to an explicitly selectable custom agent or the current model when native switching is unavailable.
+- Shows one clear routing line at each segment boundary, including the automatically selected model, reasoning effort, and reason.
+- Tracks verified per-segment model and reasoning usage in a local JSONL ledger.
+- Retunes allocations from completion, failure, escalation, rework, and duration evidence.
+- Writes a full Markdown routing report while keeping the chat summary short.
+- Works entirely inside Codex without an external model gateway or API integration.
 
-Invoke the skill in Codex with `$codex-auto-model-router`.
+Budget behavior is explicit: `4/4` is the normal ceiling; Codex expands to `6/6` only when the normalized plan actually needs it and contains a `complex` or `large` stage. Risk alone does not expand the plan. A user can set one shared limit or separate Segment/switch limits from `1` to `8`; switch counts include the final restore.
 
-```text
-$codex-auto-model-router Analyze this repository and optimize model routing.
+## Recent updates
 
-$codex-auto-model-router Query the actual model usage ratio.
+- **Dynamic segmented Apply:** analysis, implementation, verification, and review can use different routes when that improves the task; simple work stays in one segment.
+- **Adaptive bounded switching:** most work stays within 4/4, complex or large plans can expand to 6/6, and explicit user limits can reach the hard 8/8 ceiling.
+- **Safer switching:** same-task overrides use verified task metadata and restore the original model and reasoning level once after the chain.
+- **Consistent fallback:** selectable custom-agent presets are tried only when their model is explicit; otherwise work continues locally with honest labeling.
+- **Clear handoffs:** each segment announces its route once; routine runtime-identity warnings remain hidden on normal completion.
+- **Measurable tuning:** actual segment execution, analysis calls, and recommended allocation are recorded separately and can be queried or retuned later.
+- **Clean rename migration:** the installer upgrades the former `codex-model-router` name and replaces its legacy presets without touching unrelated Codex files.
 
-$codex-auto-model-router Record: Terra low completed a UI task in 90 seconds.
+## Use
 
-$codex-auto-model-router Retune task allocation from the observed history.
-
-$codex-auto-model-router Use GPT-5.6 Terra high for this assessment.
-
-$codex-auto-model-router Apply the saved routing plan and implement the requested feature.
-```
-
-Before routed work starts, the skill shows one compact notice such as:
-
-```text
-Codex automatic routing | Segment: Repository assessment | Model: GPT-5.6 Sol | Reasoning: medium | Selected automatically from repository scope
-```
-
-It does not repeat the notice for commands, files, verification, or route restoration. On Codex surfaces that expose model-aware same-task follow-ups, routed work is sent back to the same task and the verified original route is restored after completion. Otherwise the skill uses an explicitly model-selectable subagent when available, then falls back honestly to the current model. It never creates a separate top-level task. A separate future Codex task must invoke the skill again or explicitly continue under the saved report.
-
-Chinese prompts work too:
-
-```text
-$codex-auto-model-router Analyze this repository and optimize model routing.
-$codex-auto-model-router Query actual model usage ratios.
-$codex-auto-model-router Retune task allocation from success, failure, and duration history.
-```
-
-## Outputs
-
-The skill keeps the chat response short and writes the full evidence to:
+Invoke `$codex-auto-model-router` in Codex:
 
 ```text
-docs/codex-model-routing-report.md
+$codex-auto-model-router Analyze this repository and recommend model routing.
+$codex-auto-model-router Apply the saved routing plan and implement this feature.
+$codex-auto-model-router Apply this migration with at most 7 segments and 7 switches.
+$codex-auto-model-router Use at most 6 segments, but no more than 4 switches.
+$codex-auto-model-router Use GPT-5.6 Terra high for this task.
+$codex-auto-model-router Query actual model and reasoning usage.
+$codex-auto-model-router Record: Terra low completed the UI update in 90 seconds.
+$codex-auto-model-router Retune allocation from observed outcomes.
 ```
 
-Confirmed usage history is stored as append-only JSONL:
+At each segment boundary, Codex displays one compact notice:
 
 ```text
-.codex/model-routing-history.jsonl
+Codex automatic routing | Segment 1/3: Analyze the change | Model: GPT-5.6 Sol | Reasoning: high | Selected from task ambiguity
 ```
 
-Actual execution, router-analysis usage, and recommended allocation are reported separately. Recommendations are never counted as actual use.
+The next segment can switch to Terra for implementation and Luna for deterministic checks without creating a new top-level Codex task. The chain stops on failure and restores the original route once. If model-aware same-task continuation is unavailable, the Skill uses an explicit custom-agent route when available, then falls back to the current model.
 
-## Retuning thresholds
+## Reports, history, and privacy
 
-- Raise a route after at least five comparable attempts with at least 40% failure, escalation, or rework pressure.
-- Lower a route after at least ten comparable attempts, at least 90% completion, no pressure events, and deterministic verification.
-- Preserve assignments when evidence is below threshold.
+- Full report: `docs/codex-model-routing-report.md`
+- Local usage ledger: `.codex/model-routing-history.jsonl`
 
-## Repository layout
+Actual segment execution, routing analysis, and recommendations remain separate. Recommendations are never counted as observed use. The ledger stores routing metadata and outcomes—not prompts, source code, secrets, or conversation text.
 
-```text
-SKILL.md                       Codex workflow and routing contract
-agents/openai.yaml             Skill UI metadata
-references/                    Routing and usage-ledger rules
-scripts/model_usage_ledger.py  Safe append, aggregation, and report rendering
-scripts/route_policy.py         Deterministic route selection and current-task metadata inspection
-codex-agents/                  Optional named-agent compatibility presets
-tests/                         Distribution and ledger tests
-install.sh                     Local Codex installer
-```
+Automatic retuning is deliberately conservative: raise a route after at least five comparable attempts with 40% pressure, and lower it only after at least ten attempts with 90% completion, deterministic verification, and no pressure events.
 
-## Privacy and safety
+## A personal note
 
-- The ledger stores model, effort, task class, outcome, optional duration, and fallback metadata.
-- It does not store prompts, source code, secrets, or conversation text.
-- Runtime inspection reads only the matching task's local settings events; it does not copy conversation content into reports or ledgers.
-- Repository analysis is read-only and does not run builds or tests merely to create a routing plan.
-- The skill cannot silently observe unrelated Codex tasks; actual use is recorded only from reliable task metadata or user confirmation.
+This is my first open-source project. I built it after spending too much time making the same model-choice decision across different Codex projects. I am still learning how to make the workflow clearer and more reliable, so practical feedback, issue reports, and small improvements are especially welcome.
 
 ## Compatibility
 
-This project is designed for Codex installations that support personal skills and custom subagents. If a named GPT-5.6 preset is unavailable, the workflow continues with the current available Codex model and records the fallback instead of pretending the requested model ran.
+This project targets Codex installations that support personal Skills. Native same-task model overrides and named custom agents depend on the capabilities exposed by the current Codex surface. When a requested GPT-5.6 route is unavailable, the workflow continues with an available model and records the fallback instead of claiming a switch that cannot be verified.
 
 ## Development
 
-Run the standard-library tests:
-
 ```bash
 python3 -m unittest discover -s tests -v
-```
-
-Validate the public distribution:
-
-```bash
 python3 tests/validate_distribution.py
 ```
 
-## Contributing
-
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) to contribute or report a security issue.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
 
-This is an independent community project and is not affiliated with or endorsed by OpenAI.
+This independent community project is not affiliated with or endorsed by OpenAI.

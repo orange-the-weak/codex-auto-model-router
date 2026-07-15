@@ -68,8 +68,8 @@ Do not escalate because a command failed for an environmental reason such as mis
 - Avoid generated folders and dependencies.
 - Reuse repository instructions and existing verification commands.
 - Do not run builds or test suites during routing unless the user asks for empirical benchmarking.
-- Recommend one repository default and list exceptions, rather than causing frequent switches.
-- Batch adjacent tasks assigned to the same model and effort.
+- Use one segment by default; add a boundary only when a dependent stage needs a materially different route or verification contract.
+- Batch adjacent tasks assigned to the same model and effort. Use the 4/4 standard budget, expand to 6/6 only for a normalized plan with a concrete complex or large basis, and require a user override for anything above that up to the 8/8 hard limit.
 
 ## Efficiency estimate
 

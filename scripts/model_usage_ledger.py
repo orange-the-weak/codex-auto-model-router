@@ -94,6 +94,10 @@ def validate_event(event):
             raise ValueError("invalid allocation percentage")
         if abs(sum(values) - 100) > 0.01:
             raise ValueError("allocation percentages must total 100")
+    elif event_type == "segment_claim":
+        for identifier in ("route_id", "segment_id", "attempt_id"):
+            if not isinstance(event.get(identifier), str) or not event[identifier]:
+                raise ValueError(f"segment_claim requires non-empty {identifier}")
     else:
         raise ValueError("unknown event type")
 
@@ -105,6 +109,13 @@ def validate_event(event):
         raise ValueError("duration must be finite and non-negative")
     if "event_id" in event and not isinstance(event["event_id"], str):
         raise ValueError("event_id must be a string")
+    for identifier in ("task_id", "route_id", "segment_id"):
+        if identifier in event and (
+            not isinstance(event[identifier], str) or not event[identifier]
+        ):
+            raise ValueError(f"{identifier} must be a non-empty string")
+    if event_type == "execution" and (("route_id" in event) != ("segment_id" in event)):
+        raise ValueError("segmented execution requires both route_id and segment_id")
     return event
 
 
@@ -132,7 +143,13 @@ def read_events(path):
 
 def append_event(path, event):
     path.parent.mkdir(parents=True, exist_ok=True)
-    event.setdefault("event_id", str(uuid.uuid4()))
+    if event.get("event") in ("execution", "segment_claim") and event.get("route_id") and event.get("segment_id"):
+        event.setdefault("event_id", str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"codex-auto-model-router:{event['event']}:{event['route_id']}:{event['segment_id']}",
+        )))
+    else:
+        event.setdefault("event_id", str(uuid.uuid4()))
     event.setdefault("timestamp", now())
     validate_event(event)
     encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
@@ -143,6 +160,14 @@ def append_event(path, event):
             existing, _ = load_lines(existing_text, path)
             if any(item.get("event_id") == event["event_id"] for item in existing):
                 return False
+            if event.get("event") in ("execution", "segment_claim") and event.get("route_id"):
+                if any(
+                    item.get("event") == event.get("event")
+                    and item.get("route_id") == event.get("route_id")
+                    and item.get("segment_id") == event.get("segment_id")
+                    for item in existing
+                ):
+                    return False
             handle.seek(0, os.SEEK_END)
             if existing_text and not existing_text.endswith("\n"):
                 handle.write("\n")
@@ -212,10 +237,16 @@ def route_performance(executions):
 def build_summary(events, warnings):
     executions = [item for item in events if item.get("event") == "execution"]
     attempts = [item for item in executions if item.get("outcome") != "cancelled"]
-    actual_models = Counter(item.get("model", "unknown") for item in attempts)
+    segment_attempts = [
+        item for item in attempts
+        if item.get("route_id") and item.get("segment_id") and item.get("source") in SOURCES
+    ]
+    legacy_attempts = [item for item in attempts if not (item.get("route_id") and item.get("segment_id"))]
+    actual_models = Counter(item.get("model", "unknown") for item in segment_attempts)
     model_effort = Counter(
-        f"{item.get('model', 'unknown')} | {item.get('effort', 'unknown')}" for item in attempts
+        f"{item.get('model', 'unknown')} | {item.get('effort', 'unknown')}" for item in segment_attempts
     )
+    legacy_models = Counter(item.get("model", "unknown") for item in legacy_attempts)
     analyses = Counter(
         item.get("analysis_model", "unknown")
         for item in events if item.get("event") == "skill_run"
@@ -224,10 +255,11 @@ def build_summary(events, warnings):
     return {
         "actual_execution": proportions(actual_models),
         "model_effort_usage": proportions(model_effort),
+        "legacy_execution": proportions(legacy_models),
         "analysis_runs": proportions(analyses),
         "recommended_allocation": latest,
-        "route_performance": route_performance(executions),
-        "actual_sample": "insufficient" if not attempts else ("early" if len(attempts) < 5 else "established"),
+        "route_performance": route_performance(segment_attempts),
+        "actual_sample": "insufficient" if not segment_attempts else ("early" if len(segment_attempts) < 5 else "established"),
         "warnings": warnings,
     }
 
@@ -246,15 +278,19 @@ def render_markdown(summary):
     sample = summary["actual_sample"]
     lines = [
         USAGE_START,
-        f"_Observed sample: **{sample}**. Actual use counts non-cancelled execution attempts._",
+        f"_Observed sample: **{sample}**. Actual use counts non-cancelled Segment attempts backed by task metadata or user confirmation._",
         "",
-        "### Actual execution by model",
+        "### Actual Segment execution by model",
         "",
         markdown_table(summary["actual_execution"], "Model"),
         "",
-        "### Actual execution by model and effort",
+        "### Actual Segment execution by model and effort",
         "",
         markdown_table(summary["model_effort_usage"], "Model and effort"),
+        "",
+        "### Legacy whole-task execution records",
+        "",
+        markdown_table(summary["legacy_execution"], "Model"),
         "",
         "### Router analysis runs",
         "",
@@ -325,7 +361,7 @@ def record(args):
     if args.duration_seconds is not None and (not math.isfinite(args.duration_seconds) or args.duration_seconds < 0):
         raise SystemExit("duration must be finite and non-negative")
     event = {"event": args.event}
-    for key in ("event_id", "task_id", "mode", "analysis_model", "model", "effort",
+    for key in ("event_id", "task_id", "route_id", "segment_id", "mode", "analysis_model", "model", "effort",
                 "task_class", "outcome", "source", "fallback_from", "fallback_to",
                 "fallback_reason", "verification"):
         value = getattr(args, key, None)
@@ -352,6 +388,19 @@ def allocation(args):
     print(json.dumps({"appended": append_event(args.ledger, event), "event_id": event.get("event_id")}, ensure_ascii=False))
 
 
+def claim(args):
+    event = {
+        "event": "segment_claim",
+        "route_id": args.route_id,
+        "segment_id": args.segment_id,
+        "attempt_id": args.attempt_id,
+    }
+    if args.task_id:
+        event["task_id"] = args.task_id
+    claimed = append_event(args.ledger, event)
+    print(json.dumps({"claimed": claimed, "event_id": event.get("event_id")}, ensure_ascii=False))
+
+
 def summarize(args):
     events, warnings = read_events(args.ledger)
     summary = build_summary(events, warnings)
@@ -375,6 +424,8 @@ def parser():
     rec.add_argument("--event", choices=("skill_run", "execution"), required=True)
     rec.add_argument("--event-id")
     rec.add_argument("--task-id")
+    rec.add_argument("--route-id")
+    rec.add_argument("--segment-id")
     rec.add_argument("--mode", choices=MODES)
     rec.add_argument("--analysis-model")
     rec.add_argument("--model")
@@ -394,6 +445,13 @@ def parser():
     alloc.add_argument("--basis", choices=("heuristic", "observed", "mixed"), default="heuristic")
     alloc.add_argument("--event-id")
     alloc.set_defaults(func=allocation)
+    claimer = commands.add_parser("claim")
+    claimer.add_argument("--ledger", type=Path, required=True)
+    claimer.add_argument("--route-id", required=True)
+    claimer.add_argument("--segment-id", required=True)
+    claimer.add_argument("--attempt-id", required=True)
+    claimer.add_argument("--task-id")
+    claimer.set_defaults(func=claim)
     report = commands.add_parser("summary")
     report.add_argument("--ledger", type=Path, required=True)
     report.add_argument("--format", choices=("json", "markdown"), default="json")

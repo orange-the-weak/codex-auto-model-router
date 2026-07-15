@@ -27,7 +27,7 @@ if not 25 <= len(values.get("short_description", "")) <= 64:
     fail("openai.yaml short_description length is invalid")
 if "$codex-auto-model-router" not in values.get("default_prompt", ""):
     fail("openai.yaml default prompt does not invoke the skill")
-if "## Visible routing protocol" not in skill_text or "Codex 自动路由｜任务段：<task segment>" not in skill_text:
+if "## Visible routing protocol" not in skill_text or "Codex 自动路由｜Segment <index>/<total>：<task segment>" not in skill_text:
     fail("visible routing protocol is missing")
 if "## Path dispatch" not in skill_text or "ROUTE_PROJECT_MODELS_EXECUTOR=1`" not in skill_text:
     fail("coordinator/router/executor path dispatch is missing")
@@ -37,22 +37,29 @@ if "A task/agent name alone is not proof of model selection" not in skill_text:
     fail("generic subagent model-safety guard is missing")
 if "A normal successful completion needs no separate model-identity or runtime-verification warning" not in skill_text:
     fail("normal completion suppression rule is missing")
-if "Use this fixed order once" not in skill_text or "use a subagent only when" not in skill_text:
+if "Use this order once for the complete plan" not in skill_text or "explicitly model-selectable executor presets" not in skill_text:
     fail("switch-to-subagent fallback order is missing")
-if "ROUTED_MODE=APPLY_ONESHOT" not in skill_text or "## Restore and Return" not in skill_text:
-    fail("one-shot Apply or restore contract is missing")
-if "A missing, stale, or uncovered report never triggers Assess" not in skill_text or "Keep Apply as one segment and one route" not in skill_text:
-    fail("deterministic Apply fallback is missing")
-if "tiny-task" not in skill_text or "Do not switch the same task when the original model or effort is unknown" not in skill_text:
+if "ROUTED_MODE=APPLY_SEGMENT" not in skill_text or "ROUTED_MODE=APPLY_ONESHOT" not in skill_text or "## Restore and Return" not in skill_text:
+    fail("segmented Apply, compatibility, or restore contract is missing")
+for budget_contract in (
+    "standard budget of four routed segments and four switches",
+    "Expand automatically to six segments and six switches",
+    "Eight segments and eight switches are absolute hard limits",
+    "budget_source=standard|adaptive-extended|user-override",
+):
+    if budget_contract not in skill_text:
+        fail(f"adaptive budget contract is missing: {budget_contract}")
+if "tiny mechanical segment" not in skill_text or "Never make a persistent same-task switch when the original model or effort is unknown" not in skill_text:
     fail("switch-cost or safe-restore rule is missing")
-if "APPLY_SEGMENT" in skill_text:
-    fail("legacy multi-segment Apply protocol is still present")
+if "A failed segment stops the chain" not in skill_text or "Never re-plan after execution begins" not in skill_text:
+    fail("segment failure or recursion guard is missing")
 
 state_machine = (ROOT / "references" / "execution-state-machine.md").read_text()
 for invariant in (
-    "one mode, one selected route, and one `route_id`",
-    "never automatically becomes Assess",
-    "exactly one Restore attempt",
+    "one immutable `route_id`",
+    "immutable adaptive budget",
+    "absolute 8/8 hard limit",
+    "A failed segment stops the plan",
     "`RETURN` is terminal",
 ):
     if invariant not in state_machine:
@@ -63,9 +70,11 @@ if 'MODES = ("assess", "apply", "query", "record", "retune")' not in ledger_text
     fail("Apply ledger mode is missing")
 if "import msvcrt" not in ledger_text or "import fcntl" not in ledger_text:
     fail("cross-platform ledger locking is missing")
+if 'commands.add_parser("claim")' not in ledger_text or '"segment_claim"' not in ledger_text:
+    fail("atomic Segment replay claim is missing")
 
 policy_text = (ROOT / "scripts" / "route_policy.py").read_text()
-for contract in ("CODEX_THREAD_ID", "thread_settings_applied", "turn_context", "tiny-task-switch-cost", "selectable-subagent-or-local"):
+for contract in ("CODEX_THREAD_ID", "thread_settings_applied", "turn_context", "tiny-segment-switch-cost", "selectable-subagent-or-local", "segmented-v1", "DEFAULT_MAX_SEGMENTS", "EXTENDED_MAX_SEGMENTS", "HARD_MAX_SEGMENTS", "HARD_MAX_SWITCHES", "budget_source", "plan_hash", "attempt_id", "validate_segment_cursor", "synthetic-test-input"):
     if contract not in policy_text:
         fail(f"route policy contract is missing: {contract}")
 
@@ -124,6 +133,8 @@ for tier, model in models.items():
             fail(f"executor must be workspace-write: {executor_name}")
         if "ROUTE_PROJECT_MODELS_EXECUTOR=1" not in executor.get("developer_instructions", ""):
             fail(f"executor recursion guard is missing: {executor_name}")
+        if "route_id and segment_id" not in executor.get("developer_instructions", "") or "do not plan, route, advance" not in executor.get("developer_instructions", ""):
+            fail(f"executor segment guard is missing: {executor_name}")
         if f"`{executor.get('name')}`" not in preset_mapping:
             fail(f"executor preset mapping is missing: {executor_name}")
         executor_count += 1
