@@ -69,6 +69,7 @@ Do not escalate because a command failed for an environmental reason such as mis
 - Reuse repository instructions and existing verification commands.
 - Do not run builds or test suites during routing unless the user asks for empirical benchmarking.
 - Use one segment by default; add a boundary only when a dependent stage needs a materially different route or verification contract.
+- Re-evaluate each applicable Apply request independently. Treat model-switch latency as small relative to route fit; move both downward from an unnecessarily strong route and upward from an insufficient route.
 - Batch adjacent tasks assigned to the same model and effort. Use the 4/4 standard budget, expand to 6/6 only for a normalized plan with a concrete complex or large basis, and require a user override for anything above that up to the 8/8 hard limit.
 
 ## Efficiency estimate
@@ -86,7 +87,7 @@ Prefer measured repository-specific timing or evaluation evidence when it exists
    - Optimized normal lane: 10–25%.
    - Escalation lane: -10–0% direct speed improvement.
 3. Weight the lower and upper bounds by the task mix. Clamp the overall range to 0–60% and round each bound to the nearest 5 percentage points.
-4. Subtract observed model-switch and Restore/Return time. If it is not measured, explicitly state that the estimate excludes unknown routing overhead and use the tiny-task no-switch gate; do not claim a measured gain.
+4. Subtract observed model-switch and Restore/Return time. Treat it as a normal bounded overhead rather than a reason to inherit the previous route; if it is not measured, state that the estimate excludes unknown routing overhead and do not claim a measured gain.
 5. Explain the task-mix assumptions and identify the two or three changes contributing most to the result.
 
 Exclude unavoidable external waiting such as dependency downloads, network services, simulator or device delays, approval waits, and full builds unless the repository contains measured evidence showing that the proposed workflow changes them. Do not present generic model-tier marketing claims as benchmarks. If evidence is too weak to estimate the task mix, report `预计增效：暂无法可靠估算` and state what evidence is missing instead of inventing a percentage.

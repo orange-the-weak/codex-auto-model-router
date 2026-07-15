@@ -49,8 +49,10 @@ for budget_contract in (
 ):
     if budget_contract not in skill_text:
         fail(f"adaptive budget contract is missing: {budget_contract}")
-if "tiny mechanical segment" not in skill_text or "Never make a persistent same-task switch when the original model or effort is unknown" not in skill_text:
-    fail("switch-cost or safe-restore rule is missing")
+if "Re-evaluate every applicable Apply request" not in skill_text or "never show `current-route` or `keep` placeholders" not in skill_text:
+    fail("per-request dynamic routing contract is missing")
+if "Never make a persistent same-task switch when the original model or effort is unknown" not in skill_text:
+    fail("safe-restore rule is missing")
 if "A failed segment stops the chain" not in skill_text or "Never re-plan after execution begins" not in skill_text:
     fail("segment failure or recursion guard is missing")
 
@@ -74,7 +76,7 @@ if 'commands.add_parser("claim")' not in ledger_text or '"segment_claim"' not in
     fail("atomic Segment replay claim is missing")
 
 policy_text = (ROOT / "scripts" / "route_policy.py").read_text()
-for contract in ("CODEX_THREAD_ID", "thread_settings_applied", "turn_context", "tiny-segment-switch-cost", "selectable-subagent-or-local", "segmented-v1", "DEFAULT_MAX_SEGMENTS", "EXTENDED_MAX_SEGMENTS", "HARD_MAX_SEGMENTS", "HARD_MAX_SWITCHES", "budget_source", "plan_hash", "attempt_id", "validate_segment_cursor", "synthetic-test-input"):
+for contract in ("CODEX_THREAD_ID", "thread_settings_applied", "turn_context", "route-already-matched", "selectable-subagent-or-local", "segmented-v1", "DEFAULT_MAX_SEGMENTS", "EXTENDED_MAX_SEGMENTS", "HARD_MAX_SEGMENTS", "HARD_MAX_SWITCHES", "budget_source", "plan_hash", "attempt_id", "validate_segment_cursor", "synthetic-test-input"):
     if contract not in policy_text:
         fail(f"route policy contract is missing: {contract}")
 

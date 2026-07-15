@@ -167,7 +167,7 @@ def recommended_route(mode, task_kind, risk, size, report_model=None, report_eff
     if task_kind == "mechanical":
         effort = "medium" if size == "large" else "low"
         return "gpt-5.6-luna", effort, "deterministic-fallback"
-    effort = "high" if size == "large" else "medium"
+    effort = "high" if size == "large" else ("low" if risk == "low" else "medium")
     return "gpt-5.6-terra", effort, "deterministic-fallback"
 
 
@@ -198,21 +198,12 @@ def select_route(
 
     current = current or unavailable_current()
     execution_model, execution_effort = target_model, target_effort
-    tiny_fast_path = (
-        mode == "apply" and task_kind == "mechanical" and size == "tiny"
-        and risk != "high" and not explicit_override
-    )
-    if tiny_fast_path:
-        dispatch = "local"
-        execution_model = current.get("model") or "current-route"
-        execution_effort = current.get("effort") or "keep"
-        reason = "tiny-task-switch-cost"
-    elif current.get("status") == "verified" and (
+    if current.get("status") in ("verified", "synthetic") and (
         current.get("model"), current.get("effort")
     ) == (target_model, target_effort):
         dispatch = "local"
         reason = "route-already-matched"
-    elif current.get("status") == "verified" and current.get("thread_id"):
+    elif current.get("status") in ("verified", "synthetic") and current.get("thread_id"):
         dispatch = "same-task-switch"
         reason = source
     else:
@@ -496,13 +487,6 @@ def plan_apply_segments(
             source = "user-override"
         elif route_source == "report" or report_default_model:
             source = "report"
-
-        if task_kind == "mechanical" and size == "tiny" and risk != "high" and not explicit:
-            if routed:
-                target_model, target_effort = routed[-1]["model"], routed[-1]["effort"]
-            elif current_route:
-                target_model, target_effort = current_route
-            source = "tiny-segment-switch-cost"
 
         routed.append({
             "segment_id": segment_id,

@@ -13,6 +13,7 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 - Each segment has one stable `segment_id`, one selected route, one goal, one predecessor at most, and one verification budget.
 - The cursor advances only after the current segment succeeds; an atomic pre-execution claim prevents the same Segment envelope from executing twice.
 - Adjacent segments with the same model and effort are merged before execution.
+- Every new Apply request and every candidate Segment is routed from its own evidence. A previous request or Segment route never biases selection in either direction: simple work can move down, and complex work can move up.
 - The standard budget is 4/4, eligible complex or large plans may expand to 6/6, and explicit user budgets may reach the absolute 8/8 hard limit. Switch counts include final Restore.
 - Dispatch performs at most one same-task continuation per segment boundary and at most one explicitly model-selectable subagent fallback per segment.
 - Only reliable task metadata or explicit user confirmation establishes actual model identity.
@@ -30,7 +31,7 @@ Normalize in this order:
 
 1. Validate IDs, required fields, linear dependencies, enums, and overrides.
 2. Choose the lowest sufficient model and effort for each candidate segment.
-3. Keep tiny mechanical work on the current or previous route unless explicitly overridden.
+3. Compare each independently selected route with the current execution route only to choose local execution or a switch.
 4. Merge adjacent segments with the same route.
 5. Rebuild indexes and linear dependencies.
 6. Select the immutable budget: standard 4/4; adaptive 6/6 only with a concrete complex or large basis; or a user override from 1 to 8. Reject any over-budget plan.

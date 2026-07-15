@@ -35,13 +35,13 @@ cd codex-auto-model-router
 | **GPT-5.6 Terra** | Features, localized bugs, tests, UI iteration, and bounded refactors | `medium` |
 | **GPT-5.6 Sol** | Architecture, security, migrations, concurrency, cross-system diagnosis, and high-risk review | `medium`, raised to `high` or `xhigh` only when justified |
 
-Explicit user choices always win. Tiny tasks can keep the current route when switching and restoration would take longer than the work itself.
+Explicit user choices always win. Every applicable request is evaluated independently: simple work can move from Sol to Terra or Luna, and complex work can move from Luna or Terra to Sol.
 
 ## What it does
 
 - Builds the smallest deterministic linear plan; simple requests remain one segment, while genuinely complex or large plans can use more stages.
 - Selects a model and reasoning level for each segment, switches through native same-task overrides, and restores the verified original route once at the end.
-- Merges adjacent same-route segments and avoids switches for tiny work. The default budget is 4 segments/4 switches, eligible plans can expand to 6/6, and users can set a bounded limit up to 8/8.
+- Re-evaluates every Segment from its own evidence, then merges adjacent same-route results. The default budget is 4 segments/4 switches, eligible plans can expand to 6/6, and users can set a bounded limit up to 8/8.
 - Stops on segment failure instead of cycling through models; falls back to an explicitly selectable custom agent or the current model when native switching is unavailable.
 - Shows one clear routing line at each segment boundary, including the automatically selected model, reasoning effort, and reason.
 - Tracks verified per-segment model and reasoning usage in a local JSONL ledger.
@@ -55,6 +55,7 @@ Budget behavior is explicit: `4/4` is the normal ceiling; Codex expands to `6/6`
 
 - **Dynamic segmented Apply:** analysis, implementation, verification, and review can use different routes when that improves the task; simple work stays in one segment.
 - **Adaptive bounded switching:** most work stays within 4/4, complex or large plans can expand to 6/6, and explicit user limits can reach the hard 8/8 ceiling.
+- **Fresh routing per request:** new simple work actively moves down, and new complex work actively moves up; the current route affects dispatch, not model choice.
 - **Safer switching:** same-task overrides use verified task metadata and restore the original model and reasoning level once after the chain.
 - **Consistent fallback:** selectable custom-agent presets are tried only when their model is explicit; otherwise work continues locally with honest labeling.
 - **Clear handoffs:** each segment announces its route once; routine runtime-identity warnings remain hidden on normal completion.

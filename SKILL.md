@@ -5,7 +5,7 @@ description: Deterministically analyze, apply, query, record, and retune project
 
 # Codex Auto Model Router
 
-Route simple requests as one segment. Split an Apply request only when distinct dependent stages materially benefit from different models or reasoning levels. Run the segments in order inside the same Codex task, stop on failure, and restore the verified original route once at the end. Skip switches whose latency would exceed their value. Query and Record stay local and fast. Never add API integration, estimate API spend, create a top-level Codex task, or commit/push unless the user separately requests it.
+Route simple requests as one segment. Re-evaluate every applicable Apply request from its own task evidence; never inherit either a stronger or weaker route merely because the previous request used it. Move down for simple work and up for complex work whenever the selected route differs. Split only when distinct dependent stages materially benefit from different models or reasoning levels. Run the segments in order inside the same Codex task, stop on failure, and restore the verified original route once at the end. Query and Record stay local and fast. Never add API integration, estimate API spend, create a top-level Codex task, or commit/push unless the user separately requests it.
 
 Run `scripts/route_policy.py` before Assess, Retune, or Apply. For Apply, pass a JSON segment plan with `--segments-json`. Read [execution-state-machine.md](references/execution-state-machine.md) for segment envelopes and transitions, [preset-mapping.md](references/preset-mapping.md) before custom-agent fallback, [usage-ledger.md](references/usage-ledger.md) before writing history, and [routing-criteria.md](references/routing-criteria.md) for model selection and efficiency estimates.
 
@@ -62,7 +62,7 @@ Adaptive budgets:
 - Honor a user budget from 1 to 8. Eight segments and eight switches are absolute hard limits; never create an unbounded chain.
 - Store `segment_budget`, `switch_budget`, and `budget_source=standard|adaptive-extended|user-override` in the immutable plan and envelope.
 - Merge adjacent segments with the same model and effort.
-- Keep a tiny mechanical segment on the current or previous route unless the user explicitly overrides it.
+- Route every Segment from its own task kind, risk, size, report match, and user override. Use the current route only to choose `local` versus `same-task-switch` after selection.
 - Reject branches, cycles, non-linear dependencies, duplicate IDs, and conflicting overrides.
 - Never re-plan after execution begins. A failed segment stops the chain; do not retry it by cycling through models.
 - Do not add a review segment unless risk, ambiguity, or the user requires an independent review.
@@ -95,12 +95,12 @@ Do not include unrelated future implementation details beyond the normalized pla
 
 Immediately before every Assess, Retune, Apply segment, Query, or Record, show one compact commentary line:
 
-`Codex 自动路由｜Segment <index>/<total>：<task segment>｜模型：<model|current-route>｜推理：<low|medium|high|xhigh|none|keep>｜<reason>`
+`Codex 自动路由｜Segment <index>/<total>：<task segment>｜模型：<model>｜推理：<low|medium|high|xhigh|none>｜<reason>`
 
 - This means Codex automatically selected the route; never use an ambiguous bare `路由提示` label.
 - Show the line once per executed segment, not once per command or file.
 - For a one-segment request, use `Segment 1/1`.
-- For a tiny segment kept local, say `Segment 较小，Codex 保持当前模型以避免切换延迟`.
+- If the selected route already matches the current task settings, show the actual model and effort with `当前路由已匹配`; never show `current-route` or `keep` placeholders.
 - Label a configured route as configured, not observed, when reliable metadata is unavailable.
 - A normal successful completion needs no separate model-identity or runtime-verification warning.
 - Only for a high-risk fallback, show: `Codex 自动路由状态｜目标：<model/effort>｜当前对话不支持带模型续接，已用当前可用模型继续｜<reason>`.

@@ -113,14 +113,19 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertEqual(route["execution"]["dispatch"], "same-task-switch")
         self.assertTrue(route["restore_required"])
 
-    def test_tiny_apply_skips_switch_and_keeps_verified_current_route(self):
-        route = POLICY.select_route("apply", task_kind="mechanical", risk="low", size="tiny", current=current())
+    def test_tiny_mechanical_apply_switches_from_previous_sol_to_luna_low(self):
+        route = POLICY.select_route(
+            "apply", task_kind="mechanical", risk="low", size="tiny",
+            current=current("gpt-5.6-sol", "high"),
+        )
         self.assertEqual(route["recommended"]["model"], "gpt-5.6-luna")
-        self.assertEqual(route["execution"]["model"], "gpt-5.6-sol")
-        self.assertEqual(route["execution"]["dispatch"], "local")
-        self.assertFalse(route["restore_required"])
+        self.assertEqual(route["recommended"]["effort"], "low")
+        self.assertEqual(route["execution"]["model"], "gpt-5.6-luna")
+        self.assertEqual(route["execution"]["effort"], "low")
+        self.assertEqual(route["execution"]["dispatch"], "same-task-switch")
+        self.assertTrue(route["restore_required"])
 
-    def test_explicit_override_bypasses_tiny_switch_budget(self):
+    def test_explicit_override_still_controls_tiny_task(self):
         route = POLICY.select_route(
             "apply", task_kind="mechanical", risk="low", size="tiny",
             model_override="luna", effort_override="low", current=current(),
@@ -128,7 +133,30 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertEqual(route["execution"]["dispatch"], "same-task-switch")
         self.assertTrue(route["explicit_override"])
 
-    def test_complex_task_cannot_use_tiny_fast_path(self):
+    def test_tiny_low_risk_ordinary_apply_switches_to_terra_low(self):
+        route = POLICY.select_route(
+            "apply", task_kind="ordinary", risk="low", size="tiny",
+            current=current("gpt-5.6-sol", "medium"),
+        )
+        self.assertEqual(
+            (route["recommended"]["model"], route["recommended"]["effort"]),
+            ("gpt-5.6-terra", "low"),
+        )
+        self.assertEqual(route["execution"]["dispatch"], "same-task-switch")
+
+    def test_current_target_route_stays_local_without_keep_placeholder(self):
+        route = POLICY.select_route(
+            "apply", task_kind="mechanical", risk="low", size="tiny",
+            current=current("gpt-5.6-luna", "low"),
+        )
+        self.assertEqual(route["execution"]["dispatch"], "local")
+        self.assertEqual(route["execution"]["reason"], "route-already-matched")
+        self.assertEqual(
+            (route["execution"]["model"], route["execution"]["effort"]),
+            ("gpt-5.6-luna", "low"),
+        )
+
+    def test_complex_tiny_task_still_uses_sol(self):
         route = POLICY.select_route("apply", task_kind="complex", risk="normal", size="tiny", current=current())
         self.assertEqual(route["recommended"]["model"], "gpt-5.6-sol")
         self.assertEqual(route["execution"]["dispatch"], "same-task-switch")
@@ -154,6 +182,18 @@ class RoutePolicyTests(unittest.TestCase):
     def test_high_risk_apply_uses_sol_high(self):
         route = POLICY.select_route("apply", risk="high", current=current("gpt-5.6-terra", "medium"))
         self.assertEqual((route["recommended"]["model"], route["recommended"]["effort"]), ("gpt-5.6-sol", "high"))
+
+    def test_complex_apply_switches_from_previous_luna_to_sol_high(self):
+        route = POLICY.select_route(
+            "apply", task_kind="complex", risk="normal", size="normal",
+            current=current("gpt-5.6-luna", "low"),
+        )
+        self.assertEqual(
+            (route["recommended"]["model"], route["recommended"]["effort"]),
+            ("gpt-5.6-sol", "high"),
+        )
+        self.assertEqual(route["execution"]["dispatch"], "same-task-switch")
+        self.assertTrue(route["restore_required"])
 
     def test_segment_plan_routes_and_restores_in_one_thread(self):
         segments = [
@@ -271,14 +311,17 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertEqual(plan["segments"][0]["source_ids"], ["implement", "tests"])
         self.assertIn("Then:", plan["segments"][0]["goal"])
 
-    def test_tiny_segment_keeps_previous_route_and_merges(self):
+    def test_tiny_segment_is_routed_independently_from_previous_strong_segment(self):
         segments = [
-            self.segment("implement"),
+            self.segment("analyze", task_kind="complex"),
             self.segment("rename", task_kind="mechanical", risk="low", size="tiny"),
         ]
         plan = POLICY.plan_apply_segments(segments, current=current("gpt-5.6-sol", "medium"))
-        self.assertEqual(plan["segment_count"], 1)
-        self.assertEqual(plan["segments"][0]["model"], "gpt-5.6-terra")
+        self.assertEqual(plan["segment_count"], 2)
+        self.assertEqual(
+            [(item["model"], item["effort"]) for item in plan["segments"]],
+            [("gpt-5.6-sol", "high"), ("gpt-5.6-luna", "low")],
+        )
 
     def test_unknown_original_uses_non_persistent_segment_fallback(self):
         plan = POLICY.plan_apply_segments(

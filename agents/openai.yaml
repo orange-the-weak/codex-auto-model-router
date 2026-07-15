@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Auto Model Router"
   short_description: "为 GPT-5.6 Sol、Terra、Luna 自动选择模型与推理强度"
-  default_prompt: "Use $codex-auto-model-router to build the smallest useful segment plan with adaptive bounded budgets, choose GPT-5.6 model and reasoning per segment, switch within the same verified Codex task, stop on failure, restore the original route once, and record only verified segment usage."
+  default_prompt: "Use $codex-auto-model-router to re-evaluate this Apply request independently, build the smallest useful segment plan with adaptive bounded budgets, choose GPT-5.6 model and reasoning per segment, switch within the same verified Codex task, stop on failure, restore the original route once, and record only verified segment usage."
