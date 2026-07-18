@@ -1,16 +1,20 @@
-# Segmented execution state machine
+# Segmented and dependency-parallel execution state machine
 
 Use this state machine for Apply:
 
 `CLASSIFY -> PLAN -> NORMALIZE -> CAPABILITY_CHECK -> SEGMENT_READY -> EXECUTE -> VERIFY -> RECORD -> ADVANCE | STOP -> RESTORE -> RETURN`
+
+For dependency-parallel Apply, use:
+
+`CLASSIFY -> PLAN_DAG -> NORMALIZE -> CAPABILITY_CHECK -> FRONTIER -> DISPATCH -> WAIT_ANY -> RECORD -> FRONTIER | STOP_DISPATCH -> DRAIN -> AGGREGATE -> RETURN`
 
 Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use their local fast paths.
 
 ## Invariants
 
 - One invocation has one mode and one immutable `route_id`.
-- Apply has one normalized linear plan under an immutable adaptive budget.
-- Each segment has one stable `segment_id`, one selected route, one goal, one predecessor at most, and one verification budget.
+- Apply has one normalized plan under an immutable adaptive budget: linear `segmented-v1` or DAG-based `dependency-parallel-v1`.
+- Each segment has one stable `segment_id`, one selected route, one goal, immutable predecessors, and one verification budget.
 - The cursor advances only after the current segment succeeds; an atomic pre-execution claim prevents the same Segment envelope from executing twice.
 - Adjacent segments with the same model and effort are merged before execution.
 - Every new Apply request and every candidate Segment is routed from its own evidence. A previous request or Segment route never biases selection in either direction: simple work can move down, and complex work can move up.
@@ -24,6 +28,9 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 - A verified GPT-5.6 original remains immutable across intermediate switches. Make one Restore attempt only when that original is Sol, Terra, or Luna and the final/failed Segment is not already on it. A non-5.6 original is audit-only after verified GPT-5.6 execution.
 - `RETURN` is terminal and cannot execute or advance a segment.
 - Report or ledger persistence failure does not invalidate otherwise completed work.
+- Parallel execution has an automatic ceiling of 4 and only reduces it from dependency-independent width, model task count, and runtime capacity. It never auto-expands. A user request above 4 requires observed matching `agents.max_threads` and enough independent ready work; otherwise it is rejected instead of queued. Executors are created only after a free slot is confirmed.
+- The parallel Coordinator exclusively owns the frontier, dispatch, wait-any loop, failure state, and deterministic aggregation. `stop-dispatch-drain-running` starts no new work after the first failure but waits for already active workers.
+- Parallel write tasks declare concrete `write_scopes`; overlapping write scopes and shared `conflict_keys` add dependencies and degrade to serial. The complete DAG, routes, estimates, scopes, conflict keys, `parallelism_source`, requested/effective concurrency, scheduler, aggregation order, and failure policy are covered by `plan_hash` and echoed in worker envelopes. Legacy parallel plans without the source remain valid.
 
 ## Plan normalization
 
@@ -32,13 +39,15 @@ The policy script validates a JSON array and returns `protocol=segmented-v1`, a 
 Normalize in this order:
 
 1. Validate IDs, required fields, linear dependencies, enums, and overrides.
-2. Choose the lowest sufficient model and effort for each candidate segment.
+2. Choose the lowest sufficient GPT-5.6 model and effort for every candidate.
 3. Compare each independently selected route with the current execution route only to choose local execution or a switch.
 4. Merge adjacent segments with the same route.
 5. Rebuild indexes and linear dependencies.
 6. Record the evidence snapshot status and ID, then select the immutable budget: standard 4/4; adaptive 6/6 only with a concrete complex or large basis; or a user override from 1 to 8. Reject any over-budget plan.
 
 Do not mutate the returned plan after execution starts. If new work appears, finish or stop the current route and require a new user invocation.
+
+For `dependency-parallel-v1`, normalize the DAG as specified in [parallel-execution.md](parallel-execution.md). The existing 4/6/8 Segment budgets remain unchanged; executor dispatch does not count as a persistent main-thread model switch.
 
 ## Transitions
 
@@ -47,6 +56,7 @@ Do not mutate the returned plan after execution starts. If new work appears, fin
 | CLASSIFY | PLAN for Apply; SELECT for Assess/Retune | ask only for conflicting or unsupported explicit values |
 | PLAN | NORMALIZE | reduce to the smallest useful linear plan |
 | NORMALIZE | CAPABILITY_CHECK | stop on invalid IDs, dependencies, overrides, segment count, or switch budget |
+| FRONTIER | DISPATCH for the highest-priority ready node when a slot is free | stop on dependency, capacity, or hash mismatch |
 | CAPABILITY_CHECK | SEGMENT_READY using target GPT-5.6, a deterministic 5.6 substitute, explicit 5.6 preset, or eligible local route | use GPT-5.5 only when the complete 5.6 family is unavailable; otherwise stop |
 | SEGMENT_READY | EXECUTE after one visible route line | stop on envelope or cursor mismatch |
 | EXECUTE | VERIFY | STOP; do not attempt another model |
@@ -102,3 +112,5 @@ Never treat a generic subagent name as model evidence. Never count a configured 
 ## Backward compatibility
 
 `ROUTED_MODE=APPLY_ONESHOT` is accepted only as a one-segment plan. It executes once and proceeds directly to Restore; it cannot create or advance additional implementation segments.
+
+Legacy `segmented-v1` plans remain readable. New plans may include the optional local-node fields without changing legacy model nodes. `dependency-parallel-v1` is opt-in or selected by a valid non-linear dependency graph and uses its own frontier envelope validator.

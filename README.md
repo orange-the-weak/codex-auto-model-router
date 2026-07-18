@@ -3,7 +3,7 @@
 [![Codex Skill](https://img.shields.io/badge/OpenAI%20Codex-Skill-111827)](https://github.com/openai/skills)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Evidence-calibrated GPT-5.6 model and reasoning selection for OpenAI Codex.** Route each task segment to Sol, Terra, or Luna at the lowest sufficient reasoning effort—inside Codex, with no external API or API key.
+**Evidence-calibrated GPT-5.6 model, reasoning, and dependency-aware concurrency selection for OpenAI Codex.** Route each bounded task to Sol, Terra, or Luna at the lowest sufficient effort—inside Codex, with no external API or API key.
 
 [中文说明](README.zh-CN.md)
 
@@ -49,10 +49,16 @@ For an illustrative mixed workload, the current policy estimates **15–30% fast
 
 - Re-evaluates every applicable request instead of inheriting the previous route.
 - Keeps simple work in one segment; splits analysis, implementation, verification, or review only when different routes materially help.
+- Runs genuinely independent work with `dependency-parallel-v1`: automatic concurrency is capped at 4 and reduces to runtime capacity and useful independent width. It never auto-expands above 4.
+- Creates an executor only after a free slot is confirmed. A user request above 4 requires matching observed runtime capacity and enough independent ready work; otherwise it is rejected instead of queued.
+- Uses critical-path-priority wait-any scheduling to reduce tail latency. Compatible short siblings may merge; long tasks split only at real independent boundaries.
+- Requires disjoint write scopes and serializes Git index, lockfiles, project files, migrations, deploy targets, shared simulators, and other mutable resources through conflict keys.
 - Uses a standard 4-segment/4-switch budget, adaptive 6/6 for genuinely complex or large plans, and an explicit hard limit of 8/8. Restore counts as a switch.
 - Keeps fallback inside GPT-5.6: Sol tries Terra then Luna; Terra tries Sol then Luna; Luna tries Terra then Sol. GPT-5.5 is allowed only when the complete 5.6 family is unavailable.
 - Announces the selected model and reasoning once per segment, stops on failure, and restores a verified original GPT-5.6 route once.
 - Records only verified execution in a local JSONL ledger; recommendations never count as observed use.
+- Separates configured parallel plans from verified model × concurrency, wall-clock, cumulative worker time, and peak-concurrency statistics.
+- Ends each task brief with concurrency and speedup status; measured parallel runs use worker-time compression, while actual speedup is reserved for a verified comparable serial baseline.
 
 ## Use
 
@@ -67,6 +73,8 @@ Example notice:
 
 ```text
 Codex automatic routing | Segment 1/3: Analyze the change | Model: GPT-5.6 Sol | Reasoning: high | High ambiguity
+Codex automatic routing | Parallel plan: 3 tasks | Concurrency: 3/4 | Source: smart-reduced | max_threads=6 | Critical-path priority
+Concurrency: peak 3 | Wall: 120s | Effective parallel factor: 2.4x | Worker-time compression: 58.3% (not a controlled serial A/B)
 ```
 
 Reports are written to `docs/codex-model-routing-report.md`; verified usage is stored in `.codex/model-routing-history.jsonl`. The ledger contains routing metadata and outcomes, not prompts, source code, secrets, or conversation text.

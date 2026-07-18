@@ -32,7 +32,7 @@ if "## Visible routing protocol" not in skill_text or "Codex 自动路由｜Segm
     fail("visible routing protocol is missing")
 if "## Path dispatch" not in skill_text or "ROUTE_PROJECT_MODELS_EXECUTOR=1`" not in skill_text:
     fail("coordinator/router/executor path dispatch is missing")
-if "## Capability check and Dispatch" not in skill_text or "Never call a thread/task creation capability" not in skill_text:
+if "## Capability check and Dispatch" not in skill_text or "Never create a new top-level Codex task" not in skill_text:
     fail("same-task routing contract is missing")
 if "A task/agent name alone is not proof of model selection" not in skill_text:
     fail("generic subagent model-safety guard is missing")
@@ -64,7 +64,22 @@ if "Never make a persistent same-task switch when the original model or effort i
     fail("safe-restore rule is missing")
 if "A failed segment stops the chain" not in skill_text or "Never re-plan after execution begins" not in skill_text:
     fail("segment failure or recursion guard is missing")
-
+for parallel_contract in (
+    "## Dependency-aware parallel planning",
+    "dependency-parallel-v1",
+    "critical-path",
+    "wait-any",
+    "stop-dispatch-drain-running",
+    "write_scopes",
+    "conflict_keys",
+    "workers are leaves and may not delegate",
+    "parallelism_source=standard|smart-reduced|user-override",
+    "Never auto-expand above 4",
+    "Create an executor only after confirming a free slot",
+    "End every Apply chat summary with one concise concurrency line",
+):
+    if parallel_contract not in skill_text:
+        fail(f"parallel routing contract is missing: {parallel_contract}")
 state_machine = (ROOT / "references" / "execution-state-machine.md").read_text(encoding="utf-8")
 for invariant in (
     "one immutable `route_id`",
@@ -85,9 +100,20 @@ if "import msvcrt" not in ledger_text or "import fcntl" not in ledger_text:
     fail("cross-platform ledger locking is missing")
 if 'commands.add_parser("claim")' not in ledger_text or '"segment_claim"' not in ledger_text:
     fail("atomic Segment replay claim is missing")
-
+for parallel_ledger_contract in (
+    'commands.add_parser("parallel-plan")',
+    'commands.add_parser("parallel-execution")',
+    '"model_concurrency_usage"',
+    '"cumulative_worker_seconds"',
+    '"parallelism_source"',
+    '"requested_max_parallelism"',
+    '"effective_parallel_factor"',
+    '"worker_time_compression_percent"',
+):
+    if parallel_ledger_contract not in ledger_text:
+        fail(f"parallel ledger contract is missing: {parallel_ledger_contract}")
 policy_text = (ROOT / "scripts" / "route_policy.py").read_text(encoding="utf-8")
-for contract in ("CODEX_THREAD_ID", "thread_settings_applied", "turn_context", "route-already-matched", "selectable-subagent-or-local", "segmented-v1", "DEFAULT_MAX_SEGMENTS", "EXTENDED_MAX_SEGMENTS", "HARD_MAX_SEGMENTS", "HARD_MAX_SWITCHES", "budget_source", "plan_hash", "attempt_id", "validate_segment_cursor", "synthetic-test-input", "load_benchmark_evidence", "evidence-snapshot-expired", "prior_failure", "resolve_family_fallback", "gpt56-family-unavailable"):
+for contract in ("CODEX_THREAD_ID", "thread_settings_applied", "turn_context", "route-already-matched", "selectable-subagent-or-local", "segmented-v1", "dependency-parallel-v1", "DEFAULT_AUTO_PARALLELISM", "HARD_MAX_PARALLELISM", "parallelism_source", "capacity_evaluation", "smart-reduced", "runtime_max_threads", "critical-path-priority-wait-any", "write_scopes", "conflict_keys", "stop-dispatch-drain-running", "validate_parallel_envelope", "DEFAULT_MAX_SEGMENTS", "EXTENDED_MAX_SEGMENTS", "HARD_MAX_SEGMENTS", "HARD_MAX_SWITCHES", "budget_source", "plan_hash", "attempt_id", "validate_segment_cursor", "synthetic-test-input", "load_benchmark_evidence", "evidence-snapshot-expired", "prior_failure", "resolve_family_fallback", "gpt56-family-unavailable"):
     if contract not in policy_text:
         fail(f"route policy contract is missing: {contract}")
 
@@ -104,7 +130,10 @@ if 'project-model-router*.toml' in install_text or 'project-model-executor*.toml
     fail("installer uses an unsafe broad legacy-agent cleanup glob")
 
 preset_mapping = (ROOT / "references" / "preset-mapping.md").read_text(encoding="utf-8")
-
+parallel_reference = (ROOT / "references" / "parallel-execution.md").read_text(encoding="utf-8")
+for contract in ("dependency-parallel-v1", "wait-any", "stop-dispatch-drain-running", "write_scopes", "conflict_keys", "parallelism_source=standard|smart-reduced|user-override", "no pre-created executor queue"):
+    if contract not in parallel_reference:
+        fail(f"parallel execution reference is missing: {contract}")
 evidence = json.loads(
     (ROOT / "references" / "benchmark-evidence.json").read_text(encoding="utf-8")
 )

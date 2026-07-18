@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -28,6 +29,13 @@ EXTENDED_MAX_SEGMENTS = 6
 EXTENDED_MAX_SWITCHES = 6
 HARD_MAX_SEGMENTS = 8
 HARD_MAX_SWITCHES = 8
+DEFAULT_AUTO_PARALLELISM = 4
+# Kept only to validate already-issued dependency-parallel-v1 envelopes.
+EXTENDED_AUTO_PARALLELISM = 6
+ADAPTIVE_MIN_READY_TASKS = 5
+HARD_MAX_PARALLELISM = MAX_CANDIDATE_SEGMENTS
+DEFAULT_CODEX_MAX_THREADS = 6
+PARALLEL_PROTOCOL = "dependency-parallel-v1"
 DEFAULT_EVIDENCE_PATH = Path(__file__).resolve().parents[1] / "references" / "benchmark-evidence.json"
 MODEL_ALIASES = {
     "gpt-5.6": "gpt-5.6-sol",
@@ -503,13 +511,14 @@ def _merge_adjacent_segments(segments):
 def plan_hash(
     segments, route_id, original, restore_required,
     segment_budget, switch_budget, budget_source, routing_evidence=None,
+    protocol="segmented-v1", parallel=None,
 ):
     hashable = [
         {key: value for key, value in segment.items() if key != "attempt_id"}
         for segment in segments
     ]
     payload = {
-        "protocol": "segmented-v1",
+        "protocol": protocol,
         "route_id": route_id,
         "original": original,
         "restore_required": restore_required,
@@ -520,8 +529,488 @@ def plan_hash(
     }
     if routing_evidence is not None:
         payload["routing_evidence"] = routing_evidence
+    if parallel is not None:
+        payload["parallel"] = parallel
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _bounded_integer(value, field, maximum):
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:
+        raise ValueError(f"{field} must be an integer from 1 to {maximum}")
+    return value
+
+
+def _scopes_overlap(left, right):
+    left = left.rstrip("/")
+    right = right.rstrip("/")
+    return left == right or left.startswith(right + "/") or right.startswith(left + "/")
+
+
+def _normalized_scope_list(value, field, segment_id, required=False):
+    if value is None:
+        value = []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or (required and not value):
+        raise ValueError(f"segment {segment_id} requires non-empty {field}")
+    result = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"segment {segment_id} has invalid {field}")
+        item = item.strip().replace("\\", "/").rstrip("/")
+        if field == "write_scopes" and (
+            item.startswith("/") or item in (".", "..") or ".." in item.split("/")
+            or any(character in item for character in "*?[]")
+        ):
+            raise ValueError(
+                f"segment {segment_id} {field} must contain concrete repository-relative paths"
+            )
+        result.append(item)
+    return sorted(set(result))
+
+
+def _dependency_reachable(by_id, ancestor, descendant, memo):
+    key = (ancestor, descendant)
+    if key in memo:
+        return memo[key]
+    dependencies = by_id[descendant]["depends_on"]
+    reachable = ancestor in dependencies or any(
+        _dependency_reachable(by_id, ancestor, dependency, memo)
+        for dependency in dependencies
+    )
+    memo[key] = reachable
+    return reachable
+
+
+def _merge_short_siblings(segments):
+    successors = {item["segment_id"]: [] for item in segments}
+    for item in segments:
+        for dependency in item["depends_on"]:
+            successors[dependency].append(item["segment_id"])
+    groups = {}
+    for item in segments:
+        if item["work_estimate"] != "short":
+            continue
+        key = (
+            tuple(item["depends_on"]), tuple(successors[item["segment_id"]]),
+            item["model"], item["effort"], item["access_mode"],
+            item["task_kind"], item["risk"], tuple(item["conflict_keys"]),
+        )
+        groups.setdefault(key, []).append(item)
+    replaced = {}
+    for siblings in groups.values():
+        # Three short tasks approximate one normal task; larger sets remain separate.
+        for offset in range(0, len(siblings), 3):
+            chunk = siblings[offset:offset + 3]
+            if len(chunk) < 2:
+                continue
+            if chunk[0]["access_mode"] == "write" and any(
+                _scopes_overlap(left, right)
+                for index, item in enumerate(chunk)
+                for other in chunk[index + 1:]
+                for left in item["write_scopes"] for right in other["write_scopes"]
+            ):
+                continue
+            target = chunk[0]
+            for item in chunk[1:]:
+                target["goal"] += " Then: " + item["goal"]
+                target["acceptance"].extend(item["acceptance"])
+                target["validation_budget"] += "; " + item["validation_budget"]
+                target["source_ids"].extend(item["source_ids"])
+                target["write_scopes"] = sorted(set(target["write_scopes"] + item["write_scopes"]))
+                replaced[item["segment_id"]] = target["segment_id"]
+            target["work_estimate"] = "normal"
+            target["reason"] = "compatible-short-siblings-merged"
+    merged = [item for item in segments if item["segment_id"] not in replaced]
+    for item in merged:
+        item["depends_on"] = list(dict.fromkeys(
+            replaced.get(dependency, dependency) for dependency in item["depends_on"]
+            if replaced.get(dependency, dependency) != item["segment_id"]
+        ))
+    return merged
+
+
+def _serialize_parallel_conflicts(segments):
+    by_id = {item["segment_id"]: item for item in segments}
+    serialized = []
+    for later_index, later in enumerate(segments):
+        for earlier in segments[:later_index]:
+            shared_key = sorted(set(earlier["conflict_keys"]) & set(later["conflict_keys"]))
+            overlapping_write = (
+                earlier["access_mode"] == "write" and later["access_mode"] == "write"
+                and any(
+                    _scopes_overlap(left, right)
+                    for left in earlier["write_scopes"] for right in later["write_scopes"]
+                )
+            )
+            if not shared_key and not overlapping_write:
+                continue
+            memo = {}
+            if _dependency_reachable(by_id, earlier["segment_id"], later["segment_id"], memo):
+                continue
+            later["depends_on"].append(earlier["segment_id"])
+            serialized.append({
+                "before": earlier["segment_id"],
+                "after": later["segment_id"],
+                "reason": "shared-conflict-key" if shared_key else "overlapping-write-scope",
+                "conflict_keys": shared_key,
+            })
+    return serialized
+
+
+def _parallel_segments_conflict(left, right):
+    if set(left["conflict_keys"]) & set(right["conflict_keys"]):
+        return True
+    return (
+        left["access_mode"] == "write" and right["access_mode"] == "write"
+        and any(
+            _scopes_overlap(left_scope, right_scope)
+            for left_scope in left["write_scopes"]
+            for right_scope in right["write_scopes"]
+        )
+    )
+
+
+def _critical_path_priorities(segments):
+    by_id = {item["segment_id"]: item for item in segments}
+    children = {identifier: [] for identifier in by_id}
+    for item in segments:
+        for dependency in item["depends_on"]:
+            children[dependency].append(item["segment_id"])
+    critical = {}
+
+    def visit(identifier):
+        if identifier not in critical:
+            critical[identifier] = {"short": 1, "normal": 2, "long": 4}[
+                by_id[identifier]["work_estimate"]
+            ] + max(
+                (visit(child) for child in children[identifier]), default=0
+            )
+        return critical[identifier]
+
+    for identifier in by_id:
+        visit(identifier)
+    source_order = {item["segment_id"]: index for index, item in enumerate(segments)}
+    priority_order = sorted(
+        by_id, key=lambda identifier: (-critical[identifier], source_order[identifier])
+    )
+    initial_frontier = [
+        identifier for identifier in priority_order if not by_id[identifier]["depends_on"]
+    ]
+    return critical, priority_order, initial_frontier
+
+
+def _parallel_capacity_evaluation(segments, initial_frontier):
+    """Find useful model concurrency after dependencies, merging, and conflicts."""
+    by_id = {item["segment_id"]: item for item in segments}
+    model_ids = [item["segment_id"] for item in segments]
+    model_ready = list(initial_frontier)
+    descendants = {}
+
+    def collect_descendants(identifier):
+        if identifier not in descendants:
+            direct = [
+                item["segment_id"] for item in segments
+                if identifier in item["depends_on"]
+            ]
+            descendants[identifier] = set(direct)
+            for child in direct:
+                descendants[identifier].update(collect_descendants(child))
+        return descendants[identifier]
+
+    for identifier in model_ids:
+        collect_descendants(identifier)
+
+    useful_parallelism = 1
+    for width in range(len(model_ids), 1, -1):
+        if any(
+            all(
+                right not in descendants[left] and left not in descendants[right]
+                for left, right in itertools.combinations(candidate, 2)
+            )
+            for candidate in itertools.combinations(model_ids, width)
+        ):
+            useful_parallelism = width
+            break
+    return {
+        "model_task_count": len(model_ids),
+        "initial_ready_model_task_count": len(model_ready),
+        "useful_parallelism": useful_parallelism,
+        "basis": "maximum-dependency-independent-model-width",
+        "queue_policy": "dispatch-only-into-confirmed-free-slots",
+    }
+
+
+def plan_parallel_segments(
+    raw_segments, current=None, model_override=None, effort_override=None,
+    report_model=None, report_effort=None, max_segments=None, max_switches=None,
+    max_parallelism=None, runtime_max_threads=None, evidence_path=None,
+):
+    """Create a dependency-aware, wait-any Apply plan without executing it."""
+    if not isinstance(raw_segments, list) or not raw_segments:
+        raise ValueError("Apply segment plan must be a non-empty list")
+    if len(raw_segments) > MAX_CANDIDATE_SEGMENTS:
+        raise ValueError(f"Apply plan exceeds {MAX_CANDIDATE_SEGMENTS} candidate segments")
+    if (report_model is None) != (report_effort is None):
+        raise ValueError("report route requires both model and effort")
+    if report_model is not None and len(raw_segments) != 1:
+        raise ValueError(
+            "a global report route applies only to one-segment Apply; use per-segment report routes"
+        )
+    runtime_threads_source = "documented-default" if runtime_max_threads is None else "runtime-config"
+    runtime_max_threads = DEFAULT_CODEX_MAX_THREADS if runtime_max_threads is None else _bounded_integer(
+        runtime_max_threads, "runtime_max_threads", 64
+    )
+    user_parallelism = None if max_parallelism is None else _bounded_integer(
+        max_parallelism, "max_parallelism", HARD_MAX_PARALLELISM
+    )
+    current = current or unavailable_current()
+    routed, seen_ids = [], set()
+    for index, raw in enumerate(raw_segments):
+        if not isinstance(raw, dict):
+            raise ValueError(f"segment {index + 1} is not an object")
+        segment_id = raw.get("segment_id") or f"segment-{index + 1}"
+        if not isinstance(segment_id, str) or not SEGMENT_ID_RE.fullmatch(segment_id):
+            raise ValueError(f"invalid segment_id: {segment_id}")
+        if segment_id in seen_ids:
+            raise ValueError(f"duplicate segment_id: {segment_id}")
+        dependencies = raw.get("depends_on", [])
+        if isinstance(dependencies, str):
+            dependencies = [dependencies]
+        if not isinstance(dependencies, list) or any(
+            not isinstance(item, str) or item not in seen_ids for item in dependencies
+        ):
+            raise ValueError(f"segment {segment_id} dependencies must reference earlier segments")
+        if len(set(dependencies)) != len(dependencies):
+            raise ValueError(f"segment {segment_id} dependencies must be unique")
+        seen_ids.add(segment_id)
+        sanitized = dict(raw, segment_id=segment_id, depends_on=[])
+        single = plan_apply_segments(
+            [sanitized], current=current, model_override=model_override,
+            effort_override=effort_override, report_model=report_model,
+            report_effort=report_effort, evidence_path=evidence_path,
+        )["segments"][0]
+        single.pop("attempt_id", None)
+        single["depends_on"] = list(dict.fromkeys(dependencies))
+        work_estimate = raw.get("work_estimate", "normal")
+        if work_estimate not in ("short", "normal", "long"):
+            raise ValueError(f"segment {segment_id} has invalid work_estimate")
+        access_mode = raw.get("access_mode", "read")
+        if access_mode not in ("read", "write"):
+            raise ValueError(f"segment {segment_id} has invalid access_mode")
+        single["work_estimate"] = work_estimate
+        single["access_mode"] = access_mode
+        single["write_scopes"] = _normalized_scope_list(
+            raw.get("write_scopes"), "write_scopes", segment_id, access_mode == "write"
+        )
+        single["conflict_keys"] = _normalized_scope_list(
+            raw.get("conflict_keys"), "conflict_keys", segment_id
+        )
+        routed.append(single)
+    segments = _merge_short_siblings(routed)
+    if len(segments) > HARD_MAX_SEGMENTS:
+        raise ValueError(
+            f"Apply plan exceeds the hard limit of {HARD_MAX_SEGMENTS} routed segments after merging"
+        )
+    serialized_conflicts = _serialize_parallel_conflicts(segments)
+    critical, priority_order, initial_frontier = _critical_path_priorities(segments)
+    capacity_evaluation = _parallel_capacity_evaluation(segments, initial_frontier)
+    if user_parallelism is not None:
+        requested_parallelism = user_parallelism
+    else:
+        requested_parallelism = DEFAULT_AUTO_PARALLELISM
+    model_segment_count = len(segments)
+    useful_parallelism = capacity_evaluation["useful_parallelism"]
+    if requested_parallelism > DEFAULT_AUTO_PARALLELISM:
+        if runtime_threads_source != "runtime-config":
+            raise ValueError(
+                "max_parallelism above four requires observed runtime_max_threads"
+            )
+        if runtime_max_threads < requested_parallelism:
+            raise ValueError(
+                "max_parallelism above four exceeds confirmed runtime capacity"
+            )
+        if useful_parallelism < requested_parallelism:
+            raise ValueError(
+                "max_parallelism above four exceeds independent ready-task capacity"
+            )
+    effective_parallelism = min(
+        requested_parallelism, runtime_max_threads, useful_parallelism
+    )
+    if user_parallelism is not None:
+        parallelism_source = "user-override"
+    elif effective_parallelism < DEFAULT_AUTO_PARALLELISM:
+        parallelism_source = "smart-reduced"
+    else:
+        parallelism_source = "standard"
+    reduction_reasons = []
+    if runtime_max_threads < requested_parallelism:
+        reduction_reasons.append("runtime-capacity")
+    if useful_parallelism < requested_parallelism:
+        reduction_reasons.append("dependency-independent-width")
+    for index, segment in enumerate(segments):
+        segment["index"] = index + 1
+        segment["critical_path_work"] = critical[segment["segment_id"]]
+        segment["dispatch"] = "parallel-executor"
+    segment_budget, switch_budget, budget_source = _resolve_plan_budget(
+        segments, 0, max_segments, max_switches
+    )
+    evidence = load_benchmark_evidence(evidence_path)
+    route_id = str(uuid.uuid4())
+    original = {
+        "model": current.get("model") if current.get("status") in ("verified", "synthetic") else None,
+        "effort": current.get("effort") if current.get("status") in ("verified", "synthetic") else None,
+    }
+    parallel = {
+        "scheduler": "critical-path-priority-wait-any",
+        "parallelism_source": parallelism_source,
+        "requested_max_parallelism": requested_parallelism,
+        "runtime_max_threads": runtime_max_threads,
+        "runtime_max_threads_source": runtime_threads_source,
+        "effective_max_parallelism": effective_parallelism,
+        "available_task_count": model_segment_count,
+        "model_segment_count": model_segment_count,
+        "capacity_evaluation": capacity_evaluation,
+        "reduction_reasons": reduction_reasons,
+        "priority_order": priority_order,
+        "initial_frontier": initial_frontier,
+        "aggregation_order": [item["segment_id"] for item in segments],
+        "serialized_conflicts": serialized_conflicts,
+        "failure_policy": "stop-dispatch-drain-running",
+        "coordinator_owns_frontier": True,
+        "workers_may_delegate": False,
+        "timing_kind": "estimate-only",
+    }
+    result = {
+        "route_id": route_id, "mode": "apply", "protocol": PARALLEL_PROTOCOL,
+        "current": current, "original": original,
+        "routing_evidence": evidence_audit(evidence), "segments": segments,
+        "segment_count": len(segments), "switch_count": 0,
+        "segment_budget": segment_budget, "switch_budget": switch_budget,
+        "budget_source": budget_source, "max_segments": segment_budget,
+        "max_switches": switch_budget, "hard_max_segments": HARD_MAX_SEGMENTS,
+        "hard_max_switches": HARD_MAX_SWITCHES, "restore_required": False,
+        "parallel": parallel,
+        "explicit_override": bool(
+            max_segments is not None or max_switches is not None or max_parallelism is not None
+            or model_override or effort_override or any(
+                (raw.get("model") or raw.get("effort"))
+                and raw.get("route_source", "user-override") == "user-override"
+                for raw in raw_segments
+            )
+        ),
+    }
+    result["plan_hash"] = plan_hash(
+        segments, route_id, original, False, segment_budget, switch_budget,
+        budget_source, result["routing_evidence"], PARALLEL_PROTOCOL, parallel,
+    )
+    for segment in segments:
+        segment["attempt_id"] = hashlib.sha256(
+            f"{route_id}:{result['plan_hash']}:{segment['segment_id']}".encode("utf-8")
+        ).hexdigest()
+    return result
+
+
+def validate_parallel_envelope(
+    plan, segment_id, completed_ids, running_ids, route_id, attempt_id,
+    envelope_parallelism=None,
+):
+    if not isinstance(plan, dict) or plan.get("protocol") != PARALLEL_PROTOCOL:
+        raise ValueError("invalid parallel plan protocol")
+    if route_id != plan.get("route_id"):
+        raise ValueError("envelope route_id mismatch")
+    segments = plan.get("segments")
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("parallel plan has no segments")
+    by_id = {item.get("segment_id"): item for item in segments}
+    if segment_id not in by_id:
+        raise ValueError("parallel segment is missing")
+    all_ids = set(by_id)
+    if not isinstance(completed_ids, list) or not isinstance(running_ids, list):
+        raise ValueError("parallel frontier state must be lists")
+    if len(set(completed_ids + running_ids)) != len(completed_ids + running_ids):
+        raise ValueError("parallel frontier contains duplicate segment IDs")
+    if not set(completed_ids + running_ids).issubset(all_ids):
+        raise ValueError("parallel frontier contains unknown segment IDs")
+    # A claimed completed descendant must not unlock work before its own
+    # prerequisites have completed.
+    for completed_id in completed_ids:
+        if any(
+            dependency not in completed_ids
+            for dependency in by_id[completed_id]["depends_on"]
+        ):
+            raise ValueError("parallel completed state has incomplete dependencies")
+    segment = by_id[segment_id]
+    if not all(dependency in completed_ids for dependency in segment["depends_on"]):
+        raise ValueError("parallel segment dependencies are incomplete")
+    if segment_id in completed_ids or segment_id in running_ids:
+        raise ValueError("parallel segment was already dispatched")
+    parallel = plan.get("parallel")
+    if not isinstance(parallel, dict):
+        raise ValueError("parallel plan metadata is missing")
+    parallelism_source = parallel.get("parallelism_source")
+    if parallelism_source is not None and parallelism_source not in (
+        "standard", "smart-reduced", "adaptive-extended", "user-override"
+    ):
+        raise ValueError("invalid parallelism_source")
+    requested_parallelism = parallel.get("requested_max_parallelism")
+    effective_parallelism = parallel.get("effective_max_parallelism")
+    if parallelism_source == "standard" and requested_parallelism != DEFAULT_AUTO_PARALLELISM:
+        raise ValueError("standard parallelism must request four workers")
+    if parallelism_source == "smart-reduced" and (
+        requested_parallelism != DEFAULT_AUTO_PARALLELISM
+        or not isinstance(effective_parallelism, int)
+        or not 1 <= effective_parallelism < DEFAULT_AUTO_PARALLELISM
+    ):
+        raise ValueError("smart-reduced parallelism must reduce the default four")
+    if parallelism_source == "adaptive-extended" and (
+        requested_parallelism != EXTENDED_AUTO_PARALLELISM
+        or parallel.get("adaptive_evaluation", {}).get("eligible") is not True
+    ):
+        raise ValueError("adaptive parallelism lacks deterministic benefit evidence")
+    if parallelism_source == "user-override":
+        _bounded_integer(requested_parallelism, "requested_max_parallelism", HARD_MAX_PARALLELISM)
+        capacity = parallel.get("capacity_evaluation")
+        if requested_parallelism > DEFAULT_AUTO_PARALLELISM and capacity is not None:
+            if parallel.get("runtime_max_threads_source") != "runtime-config":
+                raise ValueError("parallel override above four lacks observed runtime capacity")
+            if parallel.get("runtime_max_threads", 0) < requested_parallelism:
+                raise ValueError("parallel override above four exceeds runtime capacity")
+            if capacity.get("useful_parallelism", 0) < requested_parallelism:
+                raise ValueError("parallel override above four exceeds useful task capacity")
+    if envelope_parallelism is not None:
+        expected_envelope = {
+            "parallelism_source": parallelism_source,
+            "requested_max_parallelism": requested_parallelism,
+            "effective_max_parallelism": effective_parallelism,
+        }
+        if envelope_parallelism != expected_envelope:
+            raise ValueError("parallel envelope concurrency metadata mismatch")
+    priority = parallel.get("priority_order", [])
+    ready = [
+        identifier for identifier in priority
+        if identifier not in completed_ids and identifier not in running_ids
+        and all(dependency in completed_ids for dependency in by_id[identifier]["depends_on"])
+    ]
+    if len(running_ids) >= parallel.get("effective_max_parallelism", 0):
+        raise ValueError("parallel plan has no available worker slot")
+    expected = ready[0] if ready else None
+    if expected is None or segment_id != expected:
+        raise ValueError("parallel segment is not the deterministic frontier priority")
+    expected_hash = plan_hash(
+        segments, route_id, plan.get("original"), False,
+        plan.get("segment_budget"), plan.get("switch_budget"), plan.get("budget_source"),
+        plan.get("routing_evidence"), PARALLEL_PROTOCOL, parallel,
+    )
+    if plan.get("plan_hash") != expected_hash:
+        raise ValueError("parallel plan hash mismatch")
+    expected_attempt = hashlib.sha256(
+        f"{route_id}:{expected_hash}:{segment_id}".encode("utf-8")
+    ).hexdigest()
+    if segment.get("attempt_id") != expected_attempt or attempt_id != expected_attempt:
+        raise ValueError("parallel attempt_id mismatch")
+    return segment
 
 
 def validate_segment_cursor(
@@ -861,7 +1350,14 @@ def parser():
     root.add_argument("--segments-json", help="JSON array for a bounded multi-segment Apply plan")
     root.add_argument("--max-segments", type=int, help="User Segment budget override (1-8)")
     root.add_argument("--max-switches", type=int, help="User switch budget override including Restore (1-8)")
+    root.add_argument("--parallel", action="store_true", help="Enable dependency-aware parallel planning")
+    root.add_argument(
+        "--max-parallelism", type=int,
+        help="User concurrency cap (1-16); values above 4 require observed matching runtime capacity",
+    )
+    root.add_argument("--runtime-max-threads", type=int, help="Observed Codex agents.max_threads constraint")
     root.add_argument("--validate-envelope-json", help="JSON object containing plan, cursor, segment_id, and completed_ids")
+    root.add_argument("--validate-parallel-envelope-json", help="JSON object containing plan and frontier state")
     root.add_argument("--synthetic-current-for-test", action="store_true", help=argparse.SUPPRESS)
     return root
 
@@ -895,6 +1391,23 @@ def main():
             raise SystemExit(f"invalid segment envelope: {exc}") from exc
         print(json.dumps({"valid": True, "segment": segment}, ensure_ascii=False, sort_keys=True))
         return
+    if args.validate_parallel_envelope_json is not None:
+        try:
+            envelope = json.loads(args.validate_parallel_envelope_json)
+            segment = validate_parallel_envelope(
+                envelope.get("plan"), envelope.get("segment_id"),
+                envelope.get("completed_ids"), envelope.get("running_ids"),
+                envelope.get("route_id"), envelope.get("attempt_id"),
+                {
+                    "parallelism_source": envelope.get("parallelism_source"),
+                    "requested_max_parallelism": envelope.get("requested_max_parallelism"),
+                    "effective_max_parallelism": envelope.get("effective_max_parallelism"),
+                } if envelope.get("plan", {}).get("parallel", {}).get("parallelism_source") is not None else None,
+            )
+        except (json.JSONDecodeError, AttributeError, ValueError) as exc:
+            raise SystemExit(f"invalid parallel envelope: {exc}") from exc
+        print(json.dumps({"valid": True, "segment": segment}, ensure_ascii=False, sort_keys=True))
+        return
     if (args.current_model is None) != (args.current_effort is None):
         raise SystemExit("--current-model and --current-effort must be supplied together")
     if args.current_model is not None:
@@ -919,8 +1432,9 @@ def main():
         raise SystemExit("--mode is required unless --inspect-current is used")
     if args.segments_json is None and (
         args.max_segments is not None or args.max_switches is not None
+        or args.parallel or args.max_parallelism is not None or args.runtime_max_threads is not None
     ):
-        raise SystemExit("--max-segments and --max-switches require --segments-json")
+        raise SystemExit("segment budget and parallel options require --segments-json")
     try:
         if args.segments_json is not None:
             if args.mode != "apply":
@@ -929,8 +1443,25 @@ def main():
                 raw_segments = json.loads(args.segments_json)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"invalid --segments-json: {exc}") from exc
-            route = plan_apply_segments(
-                raw_segments,
+            nonlinear = False
+            if isinstance(raw_segments, list):
+                for index, item in enumerate(raw_segments):
+                    if not isinstance(item, dict):
+                        continue
+                    previous = None if index == 0 else raw_segments[index - 1]
+                    previous_id = None if index == 0 else (
+                        previous.get("segment_id", f"segment-{index}")
+                        if isinstance(previous, dict) else f"segment-{index}"
+                    )
+                    expected = [] if index == 0 else [previous_id]
+                    dependencies = item.get("depends_on", expected)
+                    if isinstance(dependencies, str):
+                        dependencies = [dependencies]
+                    if dependencies != expected:
+                        nonlinear = True
+                        break
+            planner = plan_parallel_segments if args.parallel or nonlinear else plan_apply_segments
+            planner_options = dict(
                 current=current,
                 model_override=args.model,
                 effort_override=args.effort,
@@ -940,6 +1471,10 @@ def main():
                 max_switches=args.max_switches,
                 evidence_path=args.evidence_path,
             )
+            if planner is plan_parallel_segments:
+                planner_options["max_parallelism"] = args.max_parallelism
+                planner_options["runtime_max_threads"] = args.runtime_max_threads
+            route = planner(raw_segments, **planner_options)
             print(json.dumps(route, ensure_ascii=False, sort_keys=True))
             return
         route = select_route(

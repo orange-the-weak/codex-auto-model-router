@@ -1,6 +1,6 @@
 # Codex Auto Model Router
 
-**为 OpenAI Codex 提供基于测评校准的 GPT-5.6 模型与推理强度选择。** 在同一 Codex 任务内，为每个必要 Segment 选择刚好够用的 Sol、Terra 或 Luna；不需要外部 API 或 API Key。
+**为 OpenAI Codex 提供基于测评校准的 GPT-5.6 模型、推理强度与依赖感知并发选择。** 为每个有界任务选择刚好够用的 Sol、Terra 或 Luna；不需要外部 API 或 API Key。
 
 [English README](README.md)
 
@@ -46,10 +46,16 @@ cd codex-auto-model-router
 
 - 每次适用请求都重新评估，不继承上一轮的强弱档位。
 - 简单任务保持一个 Segment；只有分析、实现、验证或审查确实需要不同能力时才拆分。
+- 真正独立的工作使用 `dependency-parallel-v1`：自动并发上限为 4，并按运行时容量和有效独立宽度智能减少，不再自动扩容。
+- 只有确认空闲槽位后才创建 executor。用户请求超过 4 时，必须同时具备足够的已观测运行时容量和独立 ready 任务，否则直接拒绝而不是排队。
+- 采用关键路径优先的 wait-any 调度降低尾延迟；兼容的短兄弟任务可合并，长任务只在真实独立边界拆分。
+- 并行写入必须拥有不相交的路径；Git index、lockfile、工程文件、migration、部署目标和共享模拟器等资源通过冲突键串行化。
 - 默认预算 4 个 Segment/4 次切换；复杂或大型计划可自动扩到 6/6；用户可显式设置，但 8/8 是硬上限。最终恢复计入切换次数。
 - 回退保持在 GPT-5.6 家族内：Sol 依次尝试 Terra、Luna；Terra 依次尝试 Sol、Luna；Luna 依次尝试 Terra、Sol。只有整个 5.6 家族不可用时才允许 GPT-5.5。
 - 每段只显示一次模型和推理强度；失败立即停止；最后只恢复一次可验证的原路由。
 - 本地 JSONL 账本只记录可验证执行，推荐路由不会被算成真实使用。
+- 并发计划与实测分开：模型×并发比例、并行墙钟、累计 worker 时长和峰值并发只接受可验证数据。
+- 每次任务简报都说明并发和提速状态；有实测时显示有效并发倍率与时间压缩，只有具备可比串行基线时才称为实际加速。
 
 ## 使用
 
@@ -64,6 +70,8 @@ $codex-auto-model-router 查询使用比例并根据真实结果微调
 
 ```text
 Codex 自动路由｜Segment 1/3：分析改动｜模型：GPT-5.6 Sol｜推理：high｜任务歧义较高
+Codex 自动路由｜并行计划：3 个任务｜并发：3/4｜来源：smart-reduced｜约束：max_threads=6｜调度：关键路径优先
+并发：峰值 3｜墙钟：120 秒｜有效并发倍率：2.4×｜时间压缩：58.3%（非受控串行 A/B）
 ```
 
 完整报告写入 `docs/codex-model-routing-report.md`，可验证使用记录保存在 `.codex/model-routing-history.jsonl`。账本只保存路由元数据和结果，不保存提示词、源码、密钥或对话正文。

@@ -73,10 +73,14 @@ Do not escalate because a command failed for an environmental reason such as mis
 - Use one segment by default; add a boundary only when a dependent stage needs a materially different route or verification contract.
 - Re-evaluate each applicable Apply request independently. Treat model-switch latency as small relative to route fit; move both downward from an unnecessarily strong route and upward from an insufficient route.
 - Batch adjacent tasks assigned to the same model and effort. Use the 4/4 standard budget, expand to 6/6 only for a normalized plan with a concrete complex or large basis, and require a user override for anything above that up to the 8/8 hard limit.
+- Parallelize only useful independent work. Automatically use at most 4 leaf executors and reduce from observed `agents.max_threads` plus dependency-independent width. Permit a user request above 4 only when both runtime capacity and useful ready work are confirmed; never pre-create a waiting executor queue. Prefer read-heavy parallelism; require disjoint write scopes and serialize shared mutation through conflict keys.
+- Balance tail latency with coarse short/normal/long estimates and critical-path-priority wait-any scheduling. Merge only compatible short siblings; split a long Segment only across genuine independent ownership and verification boundaries.
 
 ## Efficiency estimate
 
 Estimate improvement against this default baseline: **all follow-on AI work uses GPT-5.6 Sol with medium reasoning and no task-specific routing**. Measure expected end-to-end AI work turnaround or productive throughput, not application runtime and not API cost.
+
+When verified token telemetry is compared, preserve input-cache categories: cached input is a context-reuse/repetition indicator with lower cost, not a standalone reason to suppress concurrency. Focus optimization decisions on uncached input, output, and reasoning tokens; do not use total tokens alone, and never map API prices to Codex subscription cost.
 
 Prefer measured repository-specific timing or evaluation evidence when it exists. Otherwise produce a clearly labeled heuristic range:
 

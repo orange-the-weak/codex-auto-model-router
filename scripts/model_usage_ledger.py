@@ -5,7 +5,6 @@ import argparse
 import json
 import math
 import os
-import statistics
 import uuid
 from collections import Counter, defaultdict
 from contextlib import contextmanager
@@ -98,6 +97,56 @@ def validate_event(event):
         for identifier in ("route_id", "segment_id", "attempt_id"):
             if not isinstance(event.get(identifier), str) or not event[identifier]:
                 raise ValueError(f"segment_claim requires non-empty {identifier}")
+    elif event_type == "parallel_plan":
+        if event.get("protocol") != "dependency-parallel-v1":
+            raise ValueError("invalid parallel plan protocol")
+        for field in ("effective_max_parallelism", "planned_worker_count"):
+            if not isinstance(event.get(field), int) or isinstance(event[field], bool) or event[field] < 1:
+                raise ValueError(f"invalid parallel plan {field}")
+        if event["effective_max_parallelism"] > 16:
+            raise ValueError("parallel plan exceeds concurrency hard limit")
+        requested = event.get("requested_max_parallelism")
+        source = event.get("parallelism_source")
+        if (requested is None) != (source is None):
+            raise ValueError("parallel plan concurrency intent requires requested cap and source")
+        if requested is not None:
+            if (
+                not isinstance(requested, int) or isinstance(requested, bool)
+                or not 1 <= requested <= 16
+                or source not in (
+                    "standard", "smart-reduced", "adaptive-extended", "user-override"
+                )
+            ):
+                raise ValueError("invalid parallel plan concurrency intent")
+            if source == "standard" and requested != 4:
+                raise ValueError("standard parallel plan must request four workers")
+            if source == "adaptive-extended" and requested != 6:
+                raise ValueError("adaptive parallel plan must request six workers")
+            if source == "smart-reduced" and (
+                requested != 4 or not 1 <= event["effective_max_parallelism"] < 4
+            ):
+                raise ValueError("smart-reduced parallel plan must reduce default four")
+            if event["effective_max_parallelism"] > requested:
+                raise ValueError("effective parallelism exceeds requested cap")
+        model_plan = event.get("model_plan")
+        if not isinstance(model_plan, dict) or any(
+            not isinstance(model, str) or not model or not isinstance(count, int)
+            or isinstance(count, bool) or count < 0 for model, count in model_plan.items()
+        ) or sum(model_plan.values()) != event["planned_worker_count"]:
+            raise ValueError("invalid parallel plan model_plan")
+    elif event_type == "parallel_execution":
+        for field in ("wall_clock_seconds", "cumulative_worker_seconds"):
+            value = event.get(field)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"invalid parallel execution {field}")
+        for field in ("peak_concurrency", "worker_count"):
+            value = event.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"invalid parallel execution {field}")
+        if event["peak_concurrency"] > event["worker_count"] or event["peak_concurrency"] > 16:
+            raise ValueError("invalid parallel execution concurrency")
+        if event.get("outcome") not in OUTCOMES or event.get("source") not in SOURCES:
+            raise ValueError("parallel execution requires verified outcome and source")
     else:
         raise ValueError("unknown event type")
 
@@ -116,6 +165,14 @@ def validate_event(event):
             raise ValueError(f"{identifier} must be a non-empty string")
     if event_type == "execution" and (("route_id" in event) != ("segment_id" in event)):
         raise ValueError("segmented execution requires both route_id and segment_id")
+    if event_type in ("parallel_plan", "parallel_execution") and not event.get("route_id"):
+        raise ValueError(f"{event_type} requires route_id")
+    concurrency = event.get("concurrency")
+    if concurrency is not None and (
+        event_type != "execution" or not isinstance(concurrency, int)
+        or isinstance(concurrency, bool) or not 1 <= concurrency <= 16
+    ):
+        raise ValueError("execution concurrency must be an integer from 1 to 16")
     return event
 
 
@@ -148,6 +205,11 @@ def append_event(path, event):
             uuid.NAMESPACE_URL,
             f"codex-auto-model-router:{event['event']}:{event['route_id']}:{event['segment_id']}",
         )))
+    elif event.get("event") in ("parallel_plan", "parallel_execution") and event.get("route_id"):
+        event.setdefault("event_id", str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"codex-auto-model-router:{event['event']}:{event['route_id']}",
+        )))
     else:
         event.setdefault("event_id", str(uuid.uuid4()))
     event.setdefault("timestamp", now())
@@ -165,6 +227,13 @@ def append_event(path, event):
                     item.get("event") == event.get("event")
                     and item.get("route_id") == event.get("route_id")
                     and item.get("segment_id") == event.get("segment_id")
+                    for item in existing
+                ):
+                    return False
+            if event.get("event") in ("parallel_plan", "parallel_execution") and event.get("route_id"):
+                if any(
+                    item.get("event") == event.get("event")
+                    and item.get("route_id") == event.get("route_id")
                     for item in existing
                 ):
                     return False
@@ -188,13 +257,6 @@ def proportions(counter):
     }
 
 
-def percentile(values, fraction):
-    if not values:
-        return None
-    ordered = sorted(values)
-    return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)]
-
-
 def route_performance(executions):
     groups = defaultdict(list)
     for event in executions:
@@ -211,7 +273,6 @@ def route_performance(executions):
         completed = outcomes.get("completed", 0)
         pressure = sum(outcomes.get(name, 0) for name in ("failed", "escalated", "reworked"))
         active_items = [item for item in items if item.get("outcome") != "cancelled"]
-        durations = [item["duration_seconds"] for item in active_items if item.get("duration_seconds") is not None]
         deterministic = sum(item.get("verification") == "deterministic" for item in active_items)
         if attempts >= 5 and pressure / attempts >= 0.4:
             signal = "raise_candidate"
@@ -226,8 +287,6 @@ def route_performance(executions):
             "outcomes": dict(sorted(outcomes.items())),
             "success_rate": round(completed * 100 / attempts, 1) if attempts else None,
             "pressure_rate": round(pressure * 100 / attempts, 1) if attempts else None,
-            "duration_median_seconds": round(statistics.median(durations), 1) if durations else None,
-            "duration_p75_seconds": round(percentile(durations, 0.75), 1) if durations else None,
             "deterministic_verification_rate": round(deterministic * 100 / attempts, 1) if attempts else None,
             "retune_signal": signal,
         }
@@ -246,18 +305,58 @@ def build_summary(events, warnings):
     model_effort = Counter(
         f"{item.get('model', 'unknown')} | {item.get('effort', 'unknown')}" for item in segment_attempts
     )
+    model_concurrency = Counter(
+        f"{item.get('model', 'unknown')} | {item['concurrency']}"
+        for item in segment_attempts if item.get("concurrency") is not None
+    )
     legacy_models = Counter(item.get("model", "unknown") for item in legacy_attempts)
     analyses = Counter(
         item.get("analysis_model", "unknown")
         for item in events if item.get("event") == "skill_run"
     )
     latest = next((item for item in reversed(events) if item.get("event") == "allocation"), None)
+    parallel_plans = [item for item in events if item.get("event") == "parallel_plan"]
+    parallel_runs = [item for item in events if item.get("event") == "parallel_execution"]
+    parallel_wall = sum(item["wall_clock_seconds"] for item in parallel_runs)
+    parallel_worker = sum(item["cumulative_worker_seconds"] for item in parallel_runs)
+    latest_parallel = parallel_runs[-1] if parallel_runs else None
+    latest_parallel_brief = None
+    if latest_parallel:
+        wall = latest_parallel["wall_clock_seconds"]
+        worker = latest_parallel["cumulative_worker_seconds"]
+        latest_parallel_brief = {
+            "route_id": latest_parallel["route_id"],
+            "wall_clock_seconds": wall,
+            "cumulative_worker_seconds": worker,
+            "peak_concurrency": latest_parallel["peak_concurrency"],
+            "effective_parallel_factor": round(worker / wall, 2) if wall > 0 else None,
+            "worker_time_compression_percent": (
+                round((1 - wall / worker) * 100, 1) if worker > 0 else None
+            ),
+        }
     return {
         "actual_execution": proportions(actual_models),
         "model_effort_usage": proportions(model_effort),
+        "model_concurrency_usage": proportions(model_concurrency),
         "legacy_execution": proportions(legacy_models),
         "analysis_runs": proportions(analyses),
         "recommended_allocation": latest,
+        "parallel_plans": {
+            "count": len(parallel_plans),
+            "latest": parallel_plans[-1] if parallel_plans else None,
+        },
+        "parallel_execution": {
+            "count": len(parallel_runs),
+            "wall_clock_seconds": round(parallel_wall, 3),
+            "cumulative_worker_seconds": round(parallel_worker, 3),
+            "peak_concurrency": max((item["peak_concurrency"] for item in parallel_runs), default=None),
+            "effective_parallel_factor": round(parallel_worker / parallel_wall, 2) if parallel_wall > 0 else None,
+            "worker_time_compression_percent": (
+                round((1 - parallel_wall / parallel_worker) * 100, 1)
+                if parallel_worker > 0 else None
+            ),
+            "latest": latest_parallel_brief,
+        },
         "route_performance": route_performance(segment_attempts),
         "actual_sample": "insufficient" if not segment_attempts else ("early" if len(segment_attempts) < 5 else "established"),
         "warnings": warnings,
@@ -287,6 +386,23 @@ def render_markdown(summary):
         "### Actual Segment execution by model and effort",
         "",
         markdown_table(summary["model_effort_usage"], "Model and effort"),
+        "",
+        "### Actual Segment execution by model and concurrency",
+        "",
+        markdown_table(summary["model_concurrency_usage"], "Model and verified concurrency"),
+        "",
+        "### Verified parallel execution",
+        "",
+        (
+            f"Runs: {summary['parallel_execution']['count']}; wall clock: "
+            f"{summary['parallel_execution']['wall_clock_seconds']:g}s; cumulative worker time: "
+            f"{summary['parallel_execution']['cumulative_worker_seconds']:g}s; peak concurrency: "
+            f"{summary['parallel_execution']['peak_concurrency'] or '—'}; effective parallel factor: "
+            f"{summary['parallel_execution']['effective_parallel_factor'] or '—'}x "
+            "(cumulative worker time / wall clock; not a controlled serial A/B)."
+            if summary["parallel_execution"]["count"] else
+            "Insufficient verified parallel timing data."
+        ),
         "",
         "### Legacy whole-task execution records",
         "",
@@ -363,12 +479,44 @@ def record(args):
     event = {"event": args.event}
     for key in ("event_id", "task_id", "route_id", "segment_id", "mode", "analysis_model", "model", "effort",
                 "task_class", "outcome", "source", "fallback_from", "fallback_to",
-                "fallback_reason", "verification"):
+                "fallback_reason", "verification", "concurrency"):
         value = getattr(args, key, None)
         if value is not None:
             event[key] = value
     if args.duration_seconds is not None:
         event["duration_seconds"] = args.duration_seconds
+    print(json.dumps({"appended": append_event(args.ledger, event), "event_id": event.get("event_id")}, ensure_ascii=False))
+
+
+def parallel_plan(args):
+    try:
+        model_plan = json.loads(args.model_plan)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--model-plan must be a JSON object: {exc}") from exc
+    event = {
+        "event": "parallel_plan", "route_id": args.route_id,
+        "protocol": args.protocol,
+        "requested_max_parallelism": args.requested_max_parallelism,
+        "parallelism_source": args.parallelism_source,
+        "effective_max_parallelism": args.effective_max_parallelism,
+        "planned_worker_count": args.planned_worker_count,
+        "model_plan": model_plan,
+    }
+    if args.requested_max_parallelism is None and args.parallelism_source is None:
+        event.pop("requested_max_parallelism")
+        event.pop("parallelism_source")
+    print(json.dumps({"appended": append_event(args.ledger, event), "event_id": event.get("event_id")}, ensure_ascii=False))
+
+
+def parallel_execution(args):
+    event = {
+        "event": "parallel_execution", "route_id": args.route_id,
+        "wall_clock_seconds": args.wall_clock_seconds,
+        "cumulative_worker_seconds": args.cumulative_worker_seconds,
+        "peak_concurrency": args.peak_concurrency,
+        "worker_count": args.worker_count,
+        "outcome": args.outcome, "source": args.source,
+    }
     print(json.dumps({"appended": append_event(args.ledger, event), "event_id": event.get("event_id")}, ensure_ascii=False))
 
 
@@ -438,7 +586,31 @@ def parser():
     rec.add_argument("--fallback-to")
     rec.add_argument("--fallback-reason")
     rec.add_argument("--duration-seconds", type=float)
+    rec.add_argument("--concurrency", type=int, help="Verified active worker count for this Segment")
     rec.set_defaults(func=record)
+    planned = commands.add_parser("parallel-plan")
+    planned.add_argument("--ledger", type=Path, required=True)
+    planned.add_argument("--route-id", required=True)
+    planned.add_argument("--protocol", default="dependency-parallel-v1")
+    planned.add_argument("--requested-max-parallelism", type=int)
+    planned.add_argument(
+        "--parallelism-source",
+        choices=("standard", "smart-reduced", "adaptive-extended", "user-override"),
+    )
+    planned.add_argument("--effective-max-parallelism", type=int, required=True)
+    planned.add_argument("--planned-worker-count", type=int, required=True)
+    planned.add_argument("--model-plan", required=True)
+    planned.set_defaults(func=parallel_plan)
+    measured = commands.add_parser("parallel-execution")
+    measured.add_argument("--ledger", type=Path, required=True)
+    measured.add_argument("--route-id", required=True)
+    measured.add_argument("--wall-clock-seconds", type=float, required=True)
+    measured.add_argument("--cumulative-worker-seconds", type=float, required=True)
+    measured.add_argument("--peak-concurrency", type=int, required=True)
+    measured.add_argument("--worker-count", type=int, required=True)
+    measured.add_argument("--outcome", choices=OUTCOMES, required=True)
+    measured.add_argument("--source", choices=SOURCES, required=True)
+    measured.set_defaults(func=parallel_execution)
     alloc = commands.add_parser("allocation")
     alloc.add_argument("--ledger", type=Path, required=True)
     alloc.add_argument("--values", required=True, help='JSON object such as {"Sol":30,"Terra":50,"Luna":20}')

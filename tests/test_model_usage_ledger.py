@@ -50,6 +50,124 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(summary["actual_execution"]["items"]["GPT-5.6 Terra"]["percent"], 100.0)
         self.assertEqual(summary["model_effort_usage"]["items"]["GPT-5.6 Terra | low"]["count"], 1)
 
+    def test_reports_only_verified_model_concurrency(self):
+        LEDGER.append_event(self.ledger, {
+            "event": "execution", "model": "GPT-5.6 Terra", "effort": "low",
+            "task_class": "ui", "outcome": "completed", "source": "task-metadata",
+            "route_id": "route-1", "segment_id": "one", "concurrency": 3,
+        })
+        LEDGER.append_event(self.ledger, {
+            "event": "execution", "model": "GPT-5.6 Luna", "effort": "low",
+            "task_class": "docs", "outcome": "completed", "source": "task-metadata",
+            "route_id": "route-1", "segment_id": "two",
+        })
+        summary = LEDGER.build_summary(*LEDGER.read_events(self.ledger))
+        self.assertEqual(summary["model_concurrency_usage"]["total"], 1)
+        self.assertEqual(
+            summary["model_concurrency_usage"]["items"]["GPT-5.6 Terra | 3"]["percent"],
+            100.0,
+        )
+
+    def test_parallel_plan_and_verified_execution_are_separate(self):
+        plan = {
+            "event": "parallel_plan", "route_id": "route-1",
+            "protocol": "dependency-parallel-v1", "effective_max_parallelism": 4,
+            "planned_worker_count": 3,
+            "model_plan": {"gpt-5.6-sol": 1, "gpt-5.6-terra": 2},
+        }
+        measured = {
+            "event": "parallel_execution", "route_id": "route-1",
+            "wall_clock_seconds": 12.5, "cumulative_worker_seconds": 29.0,
+            "peak_concurrency": 3, "worker_count": 3,
+            "outcome": "completed", "source": "task-metadata",
+        }
+        self.assertTrue(LEDGER.append_event(self.ledger, plan))
+        self.assertTrue(LEDGER.append_event(self.ledger, measured))
+        self.assertFalse(LEDGER.append_event(self.ledger, measured.copy()))
+        summary = LEDGER.build_summary(*LEDGER.read_events(self.ledger))
+        self.assertEqual(summary["parallel_plans"]["count"], 1)
+        self.assertEqual(summary["parallel_execution"]["wall_clock_seconds"], 12.5)
+        self.assertEqual(summary["parallel_execution"]["cumulative_worker_seconds"], 29.0)
+        self.assertEqual(summary["parallel_execution"]["effective_parallel_factor"], 2.32)
+        self.assertEqual(summary["parallel_execution"]["worker_time_compression_percent"], 56.9)
+        self.assertEqual(summary["parallel_execution"]["latest"], {
+            "route_id": "route-1", "wall_clock_seconds": 12.5,
+            "cumulative_worker_seconds": 29.0, "peak_concurrency": 3,
+            "effective_parallel_factor": 2.32,
+            "worker_time_compression_percent": 56.9,
+        })
+        rendered = LEDGER.render_markdown(summary)
+        self.assertIn("effective parallel factor: 2.32x", rendered)
+        self.assertIn("not a controlled serial A/B", rendered)
+
+    def test_parallel_plan_records_adaptive_concurrency_intent(self):
+        plan = {
+            "event": "parallel_plan", "route_id": "route-adaptive",
+            "protocol": "dependency-parallel-v1",
+            "parallelism_source": "adaptive-extended",
+            "requested_max_parallelism": 6,
+            "effective_max_parallelism": 5,
+            "planned_worker_count": 5,
+            "model_plan": {"gpt-5.6-sol": 1, "gpt-5.6-terra": 4},
+        }
+        self.assertTrue(LEDGER.append_event(self.ledger, plan))
+        latest = LEDGER.build_summary(
+            *LEDGER.read_events(self.ledger)
+        )["parallel_plans"]["latest"]
+        self.assertEqual(latest["parallelism_source"], "adaptive-extended")
+        self.assertEqual(latest["requested_max_parallelism"], 6)
+        self.assertEqual(latest["effective_max_parallelism"], 5)
+
+    def test_parallel_plan_rejects_inconsistent_concurrency_intent(self):
+        with self.assertRaisesRegex(ValueError, "adaptive parallel plan must request six"):
+            LEDGER.validate_event({
+                "event": "parallel_plan", "route_id": "route-invalid",
+                "protocol": "dependency-parallel-v1",
+                "parallelism_source": "adaptive-extended",
+                "requested_max_parallelism": 4,
+                "effective_max_parallelism": 4,
+                "planned_worker_count": 4,
+                "model_plan": {"gpt-5.6-terra": 4},
+            })
+
+    def test_parallel_plan_cli_writes_requested_effective_and_source(self):
+        args = LEDGER.parser().parse_args([
+            "parallel-plan", "--ledger", str(self.ledger),
+            "--route-id", "route-cli",
+            "--requested-max-parallelism", "4",
+            "--effective-max-parallelism", "3",
+            "--parallelism-source", "smart-reduced",
+            "--planned-worker-count", "3",
+            "--model-plan", '{"gpt-5.6-terra":3}',
+        ])
+        with redirect_stdout(io.StringIO()):
+            args.func(args)
+        event = LEDGER.read_events(self.ledger)[0][0]
+        self.assertEqual(event["requested_max_parallelism"], 4)
+        self.assertEqual(event["effective_max_parallelism"], 3)
+        self.assertEqual(event["parallelism_source"], "smart-reduced")
+
+    def test_parallel_plan_accepts_smart_reduced_concurrency_intent(self):
+        event = LEDGER.validate_event({
+            "event": "parallel_plan", "route_id": "route-smart-reduced",
+            "protocol": "dependency-parallel-v1",
+            "parallelism_source": "smart-reduced",
+            "requested_max_parallelism": 4,
+            "effective_max_parallelism": 2,
+            "planned_worker_count": 3,
+            "model_plan": {"gpt-5.6-sol": 1, "gpt-5.6-terra": 2},
+        })
+        self.assertEqual(event["parallelism_source"], "smart-reduced")
+
+    def test_parallel_execution_rejects_unverified_timing(self):
+        with self.assertRaisesRegex(ValueError, "verified outcome and source"):
+            LEDGER.validate_event({
+                "event": "parallel_execution", "route_id": "route-1",
+                "wall_clock_seconds": 1, "cumulative_worker_seconds": 1,
+                "peak_concurrency": 1, "worker_count": 1,
+                "outcome": "completed", "source": "configured-only",
+            })
+
     def test_records_segment_identifiers(self):
         parser = LEDGER.parser()
         args = parser.parse_args([
@@ -167,16 +285,6 @@ class LedgerTests(unittest.TestCase):
         ]
         summary = LEDGER.build_summary(events, [])
         self.assertEqual(summary["route_performance"]["docs | Terra | medium"]["retune_signal"], "hold")
-
-    def test_cancelled_duration_is_excluded(self):
-        events = [
-            {"event": "execution", "route_id": "route", "segment_id": "done", "model": "Terra", "effort": "medium", "task_class": "docs", "outcome": "completed", "duration_seconds": 10, "source": "task-metadata"},
-            {"event": "execution", "route_id": "route", "segment_id": "cancelled", "model": "Terra", "effort": "medium", "task_class": "docs", "outcome": "cancelled", "duration_seconds": 1000, "source": "task-metadata"},
-        ]
-        summary = LEDGER.build_summary(events, [])
-        performance = summary["route_performance"]["docs | Terra | medium"]
-        self.assertEqual(performance["duration_median_seconds"], 10)
-        self.assertEqual(performance["duration_p75_seconds"], 10)
 
     def test_report_markers_preserve_surrounding_content(self):
         report = self.root / "report.md"

@@ -1,11 +1,11 @@
 ---
 name: codex-auto-model-router
-description: Deterministically analyze, apply, query, record, and retune project model routing inside Codex. For Apply, create the smallest useful sequence of bounded task segments and automatically select GPT-5.6 Sol, Terra, or Luna plus low, medium, high, or xhigh reasoning for each segment; prefer native same-task overrides, keep availability fallback inside the GPT-5.6 family whenever any 5.6 model is available, restore only a verified original GPT-5.6 route, and use GPT-5.5 only when the complete GPT-5.6 family is unavailable. Maintain a Markdown report and validated per-segment usage history. Use when the user invokes $codex-auto-model-router, asks which model should handle project work, requests dynamically routed implementation, queries usage ratios, records outcomes, or retunes assignments. Never create a new top-level Codex task.
+description: Deterministically analyze, apply, query, record, and retune project model routing inside Codex. For Apply, create the smallest useful bounded task graph, run independent work with dependency-aware concurrency when worthwhile, and select GPT-5.6 Sol, Terra, or Luna plus low, medium, high, or xhigh reasoning per segment. Keep availability fallback inside the GPT-5.6 family whenever any 5.6 model is available, restore only a verified original GPT-5.6 route, and use GPT-5.5 only when the complete GPT-5.6 family is unavailable. Maintain a Markdown report and validated per-segment and parallel usage history. Use when the user invokes $codex-auto-model-router, asks which model should handle project work, requests dynamically routed implementation, queries usage ratios, records outcomes, or retunes assignments. Never create a new top-level Codex task.
 ---
 
 # Codex Auto Model Router
 
-Route simple requests as one segment. Re-evaluate every applicable Apply request from its own task evidence; never inherit either a stronger or weaker route merely because the previous request used it. Move down for simple work and up for complex work whenever the selected route differs. Split only when distinct dependent stages materially benefit from different models or reasoning levels. Run the segments in order inside the same Codex task, stop on failure, and restore a verified original GPT-5.6 route once at the end. Query and Record stay local and fast. Never add API integration, estimate API spend, create a top-level Codex task, or commit/push unless the user separately requests it.
+Route simple requests as one segment. Re-evaluate every applicable Apply request from its own task evidence; never inherit either a stronger or weaker route merely because the previous request used it. Move down for simple work and up for complex work whenever the selected route differs. Use linear `segmented-v1` by default and `dependency-parallel-v1` only for genuinely independent work whose dependencies and mutation ownership are explicit. Query and Record stay local and fast. Never add API integration, estimate API spend, create a top-level Codex task, or commit/push unless the user separately requests it.
 
 Run `scripts/route_policy.py` before Assess, Retune, or Apply. For Apply, pass a JSON segment plan with `--segments-json`. Read [execution-state-machine.md](references/execution-state-machine.md) for segment envelopes and transitions, [preset-mapping.md](references/preset-mapping.md) before custom-agent fallback, [usage-ledger.md](references/usage-ledger.md) before writing history, [routing-criteria.md](references/routing-criteria.md) for model selection, and [benchmark-evidence.md](references/benchmark-evidence.md) before changing evidence-derived lanes.
 
@@ -35,7 +35,7 @@ Unknown modes, missing `route_id`, invalid `segment_id`, or a cursor outside the
 2. Query, Record, and Help never switch models or spawn agents. Use the local ledger script for Query and Record.
 3. Parse optional user overrides. Accept Sol, GPT-5.6, GPT-5.6 Sol, Terra, or Luna; accept low, medium, high, xhigh, and map `very high` or `extra high` to xhigh. A whole-request override applies to every segment. A segment-specific override applies only there. Ask only when overrides conflict or are unsupported.
 4. For Assess or Retune, classify and route the single analysis task with the policy script, then use Capability check and Dispatch.
-5. For Apply, create the smallest necessary linear segment plan, validate it with the policy script, then execute the returned plan without changing it.
+5. For Apply, create the smallest necessary plan. Use a linear plan unless at least two tasks can make useful independent progress. Validate the immutable plan with the policy script, then execute it without changing routes, dependencies, ownership, or concurrency.
 
 ## Apply segment planning
 
@@ -45,13 +45,14 @@ Each candidate segment must contain:
 
 - `segment_id`: lowercase stable identifier unique within `route_id`
 - `goal`: bounded work owned only by this segment
-- `depends_on`: empty for the first segment, otherwise exactly the previous segment ID
+- `depends_on`: for `segmented-v1`, empty for the first segment and otherwise exactly the previous ID; for `dependency-parallel-v1`, zero or more earlier Segment IDs
 - `task_kind`: `mechanical`, `ordinary`, or `complex`
 - `risk`: `low`, `normal`, or `high`
 - `size`: `tiny`, `normal`, or `large`
 - optional task evidence: `ambiguity` and `coupling` (`low|medium|high`), `verification` (`deterministic|mixed|judgment`), `consequence` (`low|normal|high`), and `prior_failure` (boolean)
 - `acceptance`: one or more concrete completion checks
 - `validation_budget`: the maximum proportionate verification work
+- parallel-only `work_estimate=short|normal|long`, `access_mode=read|write`, concrete repository-relative `write_scopes` for every write task, and `conflict_keys`
 - optional segment-specific `model`, `effort`, and `route_source=report|user-override`; whole-request user overrides take precedence over report routes
 
 Pass the JSON array to `scripts/route_policy.py --mode apply --segments-json '<json>'`. When the user sets a limit, add `--max-segments 1..8` and/or `--max-switches 1..8`; one supplied value applies to both dimensions unless both are supplied. A global saved-report route is valid only for a one-segment plan; for multi-segment plans, attach each matching report route to its segment. Treat the returned order, budgets, selected routes, dispatch values, `route_id`, `plan_hash`, per-segment `attempt_id`, and Restore decision as authoritative.
@@ -65,15 +66,34 @@ Adaptive budgets:
 - Merge adjacent segments with the same model and effort.
 - Route every Segment from its own task kind, risk, size, ambiguity, coupling, verification, consequence, prior failure, report match, and user override. Use the current route only to choose `local` versus `same-task-switch` after selection.
 - Use the bundled, versioned `references/benchmark-evidence.json` only as an offline prior. Task evidence and user overrides outrank it. If the snapshot is missing, invalid, or expired, use the deterministic fallback; never fetch benchmarks during Apply.
-- Reject branches, cycles, non-linear dependencies, duplicate IDs, and conflicting overrides.
+- `segmented-v1` rejects branches, cycles, and non-linear dependencies. `dependency-parallel-v1` accepts only an acyclic graph whose dependencies reference earlier IDs. Both reject duplicate IDs and conflicting overrides.
 - Never re-plan after execution begins. A failed segment stops the chain; do not retry it by cycling through models.
 - Do not add a review segment unless risk, ambiguity, or the user requires an independent review.
+
+## Dependency-aware parallel planning
+
+Enable `--parallel` or supply a non-linear dependency graph only when useful independent work exists. Pass observed Codex `agents.max_threads` as `--runtime-max-threads` when available. Automatic planning requests at most 4 and only reduces it from the dependency-independent model width, model task count, and runtime capacity. Never auto-expand above 4. A user may request more than 4 only when observed runtime capacity and the normalized independent width both meet the request; otherwise reject it instead of creating an ineffective queue. If runtime configuration is unavailable, values above 4 are illegal and the documented default is only a ceiling for reduction. Codex's documented default `agents.max_depth=1` reinforces that executor workers are leaves and may not delegate.
+
+- Keep a single task intact when its state or file boundaries are coupled. Split one long task only across real independent boundaries with separate acceptance checks and ownership.
+- Estimate work coarsely as short, normal, or long. Compute critical-path weight from this estimate and dispatch ready tasks in descending critical-path order, breaking ties by normalized plan order. Use wait-any list scheduling: when any worker completes, update the frontier and fill the next free slot; do not impose wave barriers.
+- Merge at most three short siblings only when they have identical dependencies and successors, the same selected model/effort and task class, and compatible mutation ownership.
+- Prefer read-only workers for broad discovery. Every write worker must own concrete repository-relative `write_scopes`; concurrently running write scopes must not overlap. Use `conflict_keys` to serialize Git index, lockfiles, project files, migrations, deployment targets, shared simulators, and other shared mutable resources. Any conflict adds a deterministic dependency and degrades to serial.
+- The coordinator exclusively owns the ready/running/completed frontier, executor dispatch, wait-any loop, failure transition, and final summary. Workers receive one bounded Segment with `ROUTE_PROJECT_MODELS_EXECUTOR=1`; they must not plan, route, advance, or delegate.
+- Failure policy is `stop-dispatch-drain-running`: after the first failed worker, start nothing else, wait for already running workers, preserve their bounded results, mark undispatched work skipped, and summarize deterministically in normalized Segment order. Never retry a failed Segment by cycling models.
+- Hash the full DAG, routes, coarse work estimates, write scopes, conflict keys, `parallelism_source=standard|smart-reduced|user-override`, requested/effective concurrency, scheduler, aggregation order, and failure policy. Echo the source and both caps in every worker envelope; validate them against the immutable plan, completed/running sets, dependencies, confirmed free capacity, and attempt ID. Legacy `adaptive-extended` plans and plans without `parallelism_source` remain readable.
+- Create an executor only after confirming a free slot. Keep later nodes in the immutable plan but do not pre-create, queue, or block agents beyond effective capacity; refill exactly one free slot after a worker returns.
+
+Immediately before parallel dispatch show:
+
+`Codex 自动路由｜并行计划：<tasks> 个任务｜并发：<effective>/<requested>｜来源：<standard|smart-reduced|user-override>｜约束：max_threads=<runtime>｜调度：关键路径优先`
+
+Then show the normal per-Segment model line once for each dispatched worker. This makes both automatic model and concurrency selection visible.
 
 ## Capability check and Dispatch
 
 Use this order once for the complete plan:
 
-1. Search available Codex task tools for `send_message_to_thread` (normally `codex_app__send_message_to_thread`). Use native same-task chaining only when the interface explicitly accepts `model` and `thinking`. Never call a thread/task creation capability. Use only the verified `current.thread_id` returned from `CODEX_THREAD_ID` metadata.
+1. Search available Codex task tools for `send_message_to_thread` (normally `codex_app__send_message_to_thread`). Use native same-task chaining only when the interface explicitly accepts `model` and `thinking`. Never create a new top-level Codex task. Linear routing uses only the verified `current.thread_id`; parallel routing may create bounded leaf executor agents through the available agent tool, never an unverified generic task interface.
 2. Read the tool's supported-model list when exposed. Before any non-target execution, run `scripts/route_policy.py --resolve-fallback --target-model <model> --target-effort <effort> --available-model <id> ...`. Unknown availability means try the selected GPT-5.6 target first; it never authorizes GPT-5.5.
 3. If the original model and effort are verified, execute a locally matched first segment or send the first mismatched segment to the same task with its exact model and effort. Each successful segment sends at most one follow-up for the next segment. This is intentional bounded continuation, not recursive planning.
 4. If the target is rejected for availability before execution, use the resolver's deterministic GPT-5.6 substitute: Sol → Terra → Luna, Terra → Sol → Luna, or Luna → Terra → Sol. These bounded capability attempts are not Segment retries.
@@ -129,6 +149,8 @@ When `ROUTED_MODE=APPLY_SEGMENT`:
 
 An executor preset requires `ROUTE_PROJECT_MODELS_EXECUTOR=1`, `route_id`, and `segment_id`. Execute only that bounded segment, do not route or delegate, and return status, changed files, checks, remaining risks, and exposed runtime model metadata to the coordinator. The coordinator alone advances the cursor. Read [preset-mapping.md](references/preset-mapping.md) for exact names.
 
+For `dependency-parallel-v1`, the executor also receives the immutable plan hash, selected route, dependencies, access mode, write scopes, conflict keys, acceptance, and validation budget. It must stay inside its write ownership and preserve unrelated changes. The coordinator uses wait-any scheduling but aggregates status, changed files, checks, risks, and runtime metadata in normalized Segment order after draining active workers.
+
 ## Query and Record fast path
 
 Before Query or Record, use the visible line with `local-script` and `none`.
@@ -137,6 +159,8 @@ Before Query or Record, use the visible line with `local-script` and `none`.
 - Query runs `summary`, then `render` to update only the marked report section.
 - Record appends only user-confirmed or reliable task-metadata execution, then summarizes and renders.
 - Report actual execution proportions as verified Segment attempts, separate from analysis calls and latest recommended allocation.
+- For parallel work, also report model × verified concurrency. Record `parallel_plan` as configured intent. Record `parallel_execution` only when wall clock, cumulative worker duration, peak concurrency, worker count, source, and outcome are genuinely available from task metadata or user confirmation. Never use the ledger event timestamp as a worker start time or turn estimates into observed timing.
+- End every Apply chat summary with one concise concurrency line. For serial work say `并发：未启用｜提速：不适用（任务未形成有价值的独立并行边界）`. For a parallel plan without verified timing say `并发：<effective>/<requested>｜提速：待实测`. With verified timing say `并发：峰值 <n>｜墙钟：<time>｜有效并发倍率：<cumulative worker time / wall clock>x｜时间压缩：<percent>%`, and label it as worker-time compression rather than controlled serial A/B speedup. Only call `serial wall / parallel wall` an actual speedup when a comparable serial run is independently verified.
 - Never infer actual use from a recommendation or configured-but-unverified route.
 
 ## Routed Assess and Retune
@@ -166,4 +190,4 @@ Under `## Usage proportions`, include exactly one empty marker pair:
 
 `<!-- MODEL_USAGE_END -->`
 
-The ledger script owns the marker contents. Retune raises only after at least 5 comparable attempts with at least 40% failure/escalation/rework pressure, and lowers only after at least 10 attempts with at least 90% completion, deterministic verification, and no pressure events. The chat result stays brief: completion, key optimizations, checks, remaining risk, and report link when applicable.
+The ledger script owns the marker contents. Retune raises only after at least 5 comparable attempts with at least 40% failure/escalation/rework pressure, and lowers only after at least 10 attempts with at least 90% completion, deterministic verification, and no pressure events. The chat result stays brief: completion, key optimizations, checks, remaining risk, concurrency/speedup line, and report link when applicable.
