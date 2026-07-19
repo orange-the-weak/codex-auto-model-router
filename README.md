@@ -59,9 +59,10 @@ For an illustrative mixed workload, the current policy estimates **15–30% fast
 - Keeps fallback inside GPT-5.6: Sol tries Terra then Luna; Terra tries Sol then Luna; Luna tries Terra then Sol. GPT-5.5 is allowed only when the complete 5.6 family is unavailable.
 - Announces the selected model and reasoning once per segment, stops on failure, and restores a verified original GPT-5.6 route once.
 - Records only verified execution in a local JSONL ledger; recommendations never count as observed use.
-- Separates configured parallel plans from verified model × concurrency, wall-clock, cumulative worker time, and peak-concurrency statistics.
+- Captures each worker's dispatch-confirmed and result-received boundaries on one coordinator monotonic clock, then derives wall-clock, cumulative worker time, peak concurrency, and utilization. Models never supply timing numbers.
+- Keeps older aggregate-only records readable but excludes them from verified history.
 - Tracks verified routing, queue, startup, switch/Restore, useful-execution, round-trip, and state-gate overhead without guessing missing data.
-- Ends each task brief with effective parallel factor and utilization. These use observed worker and wall time, so no serial baseline is required; actual speedup remains optional controlled A/B evidence.
+- Ends each Apply brief with the runtime-generated current-run concurrency line, reproduced verbatim; Query/history is labeled as a historical aggregate. Reliable schema-v2 timing comes only from complete per-worker intervals; otherwise the brief says `测量：待记录`. The overlap factor is not claimed as actual speedup.
 
 ## Use
 
@@ -77,7 +78,7 @@ Example notice:
 ```text
 Codex automatic routing | Segment 1/3: Analyze the change | Model: GPT-5.6 Sol | Reasoning: high | High ambiguity
 Codex automatic routing | Parallel plan: 3 tasks | Concurrency: 3/4 | Free workers: 3 | Source: smart-reduced | Critical-path priority
-Concurrency: peak 3 | Wall: 120s | Worker total: 288s | Effective parallel factor: 2.4x | Utilization: 80%
+并发：峰值 3｜墙钟：120s｜累计 worker：288s｜有效并发倍率：2.4x｜并发利用率：80%
 ```
 
 Reports are written to `docs/codex-model-routing-report.md`; verified usage is stored in `.codex/model-routing-history.jsonl`. The ledger contains routing metadata and outcomes, not prompts, source code, secrets, or conversation text.

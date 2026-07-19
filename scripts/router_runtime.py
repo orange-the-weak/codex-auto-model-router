@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -109,6 +110,45 @@ def begin(args):
     }, ensure_ascii=False, sort_keys=True))
 
 
+def _capture_worker_event(args, event_type, outcome=None):
+    event = {
+        "event": event_type,
+        "route_id": args.route_id,
+        "segment_id": args.segment_id,
+        "monotonic_ns": time.monotonic_ns(),
+        "clock_source": ledger.PARALLEL_CLOCK_SOURCE,
+        "capture_source": "router-runtime",
+    }
+    if outcome is not None:
+        event["outcome"] = outcome
+    appended = ledger.append_event(args.ledger, event)
+    print(json.dumps({
+        "captured": appended,
+        "state": "captured" if appended else "already-captured",
+        "route_id": args.route_id,
+        "segment_id": args.segment_id,
+        "event": event_type,
+        "timestamp": event.get("timestamp"),
+    }, ensure_ascii=False, sort_keys=True))
+
+
+def worker_start(args):
+    _capture_worker_event(args, "parallel_worker_start")
+
+
+def worker_finish(args):
+    events, _ = ledger.read_events(args.ledger)
+    started = any(
+        item.get("event") == "parallel_worker_start"
+        and item.get("route_id") == args.route_id
+        and item.get("segment_id") == args.segment_id
+        for item in events
+    )
+    if not started:
+        raise SystemExit("parallel worker finish requires a captured start")
+    _capture_worker_event(args, "parallel_worker_finish", args.outcome)
+
+
 def _observed_route(result, current):
     source = result.get("source")
     if source == "user-confirmed" and result.get("actual_model") and result.get("actual_effort"):
@@ -164,6 +204,112 @@ def _next_action(plan, result, current):
     return {"action": "return"}
 
 
+def _parallel_finalization(
+    state, pending_reason=None, missing_fields=None, brief=None,
+):
+    return {
+        "parallel_execution_recorded": state == "recorded",
+        "parallel_execution_state": state,
+        "parallel_execution_pending_reason": pending_reason,
+        "parallel_execution_missing_fields": missing_fields or [],
+        "parallel_execution_brief": brief,
+    }
+
+
+def _finalize_parallel_execution(args, plan, result, next_state):
+    if plan.get("protocol") != policy.PARALLEL_PROTOCOL:
+        return None
+    if next_state.get("action") not in ("return", "restore", "stop"):
+        return _parallel_finalization("pending", "aggregate-not-ready")
+
+    parallel_plan = plan.get("parallel", {})
+    pending_brief = ledger.pending_parallel_brief(
+        parallel_plan.get("effective_max_parallelism", 1),
+        parallel_plan.get("requested_max_parallelism", 1),
+    )
+    events, warnings = ledger.read_events(args.ledger)
+    if warnings:
+        return _parallel_finalization(
+            "pending", "invalid-ledger-events", brief=pending_brief,
+        )
+    segment_order = [item["segment_id"] for item in plan.get("segments", [])]
+    planned = set(segment_order)
+    starts = {
+        item["segment_id"]: item for item in events
+        if item.get("event") == "parallel_worker_start"
+        and item.get("route_id") == plan["route_id"]
+        and item.get("segment_id") in planned
+    }
+    finishes = {
+        item["segment_id"]: item for item in events
+        if item.get("event") == "parallel_worker_finish"
+        and item.get("route_id") == plan["route_id"]
+        and item.get("segment_id") in planned
+    }
+    if not starts:
+        return _parallel_finalization(
+            "pending", "missing-worker-start-events", segment_order, pending_brief,
+        )
+    if result.get("outcome") == "completed" and set(starts) != planned:
+        missing = [identifier for identifier in segment_order if identifier not in starts]
+        return _parallel_finalization(
+            "pending", "missing-worker-start-events", missing, pending_brief,
+        )
+    unfinished = [identifier for identifier in starts if identifier not in finishes]
+    if unfinished:
+        return _parallel_finalization(
+            "pending", "worker-results-still-pending", unfinished, pending_brief,
+        )
+    try:
+        intervals = []
+        for identifier in segment_order:
+            if identifier not in starts:
+                continue
+            start = starts[identifier]
+            finish = finishes[identifier]
+            if finish["monotonic_ns"] <= start["monotonic_ns"]:
+                raise ValueError("parallel worker interval must have positive duration")
+            intervals.append({
+                "segment_id": identifier,
+                "started_monotonic_ns": start["monotonic_ns"],
+                "result_received_monotonic_ns": finish["monotonic_ns"],
+                "started_at": start["timestamp"],
+                "result_received_at": finish["timestamp"],
+                "outcome": finish["outcome"],
+            })
+        metrics = ledger.parallel_metrics_from_intervals(intervals)
+        if result.get("outcome") == "completed" and any(
+            interval["outcome"] != "completed" for interval in intervals
+        ):
+            raise ValueError("completed parallel execution contains failed worker")
+        effective_parallelism = plan.get("parallel", {}).get(
+            "effective_max_parallelism"
+        )
+        if metrics["peak_concurrency"] > effective_parallelism:
+            raise ValueError("observed peak concurrency exceeds current plan")
+        event = {
+            "event": "parallel_execution",
+            "schema_version": ledger.PARALLEL_SCHEMA_VERSION,
+            "route_id": plan["route_id"],
+            **metrics,
+            "worker_intervals": intervals,
+            "outcome": result.get("outcome", "failed"),
+            "source": "task-metadata",
+            "measurement_boundary": "dispatch-confirmed-to-result-received",
+            "timing_provenance": ledger.PARALLEL_TIMING_PROVENANCE,
+            "clock_source": ledger.PARALLEL_CLOCK_SOURCE,
+        }
+        appended = ledger.append_event(args.ledger, event)
+    except (KeyError, TypeError, ValueError):
+        return _parallel_finalization(
+            "pending", "invalid-worker-timing-trace", brief=pending_brief,
+        )
+    brief = ledger.parallel_run_brief(event)
+    if appended:
+        return _parallel_finalization("recorded", brief=brief)
+    return _parallel_finalization("already-recorded", brief=brief)
+
+
 def finish(args):
     result = _load(args.result_json, "result")
     plan = result.get("plan")
@@ -208,13 +354,20 @@ def finish(args):
             if metrics.get(field) is not None:
                 event[field] = metrics[field]
         metrics_recorded = ledger.append_event(args.ledger, event)
-    print(json.dumps({
+    next_state = _next_action(plan, result, current)
+    response = {
         "ok": result.get("outcome") == "completed",
         "execution_recorded": execution_recorded,
         "metrics_recorded": metrics_recorded,
         "current": current,
-        "next": _next_action(plan, result, current),
-    }, ensure_ascii=False, sort_keys=True))
+        "next": next_state,
+    }
+    parallel_finalization = _finalize_parallel_execution(
+        args, plan, result, next_state
+    )
+    if parallel_finalization is not None:
+        response.update(parallel_finalization)
+    print(json.dumps(response, ensure_ascii=False, sort_keys=True))
 
 
 def parser():
@@ -226,6 +379,17 @@ def parser():
     starter.add_argument("--ledger", type=Path, required=True)
     starter.add_argument("--envelope-json", required=True)
     starter.set_defaults(func=begin)
+    worker_started = commands.add_parser("worker-start")
+    worker_started.add_argument("--ledger", type=Path, required=True)
+    worker_started.add_argument("--route-id", required=True)
+    worker_started.add_argument("--segment-id", required=True)
+    worker_started.set_defaults(func=worker_start)
+    worker_finished = commands.add_parser("worker-finish")
+    worker_finished.add_argument("--ledger", type=Path, required=True)
+    worker_finished.add_argument("--route-id", required=True)
+    worker_finished.add_argument("--segment-id", required=True)
+    worker_finished.add_argument("--outcome", choices=ledger.OUTCOMES, required=True)
+    worker_finished.set_defaults(func=worker_finish)
     finisher = commands.add_parser("finish")
     finisher.add_argument("--ledger", type=Path, required=True)
     finisher.add_argument("--result-json", required=True)

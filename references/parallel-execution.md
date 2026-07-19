@@ -37,9 +37,16 @@ At the first failed worker, stop dispatching new tasks and drain all already-run
 
 ## Ledger evidence
 
+The default Apply brief is current-run only. Query/history output is explicitly labeled a historical aggregate. Canonical wall clock uses the coordinator's monotonic clock from first dispatch confirmation through last result receipt.
+
 - `parallel_plan` records configured intent: protocol, `parallelism_source`, requested/effective caps, planned worker count, and planned model counts.
 - Each verified Segment `execution` may record the real active `concurrency` when task metadata or the user confirms it.
-- `parallel_execution` records verified wall clock, cumulative worker duration, peak concurrency, worker count, outcome, and source.
+- `parallel_worker_start` and `parallel_worker_finish` record runtime-captured monotonic boundaries for each Segment.
+- Schema-v2 `parallel_execution` stores every worker interval and derives wall clock, cumulative duration, peak concurrency, and worker count from them.
 
-The final chat brief reports concurrency effectiveness without requiring a serial baseline. With verified timing, show `effective_parallel_factor = cumulative_worker_seconds / wall_clock_seconds` and `parallel_utilization = cumulative_worker_seconds / (peak_concurrency × wall_clock_seconds)`. The factor measures observed work overlap, not speedup. Report actual speedup only for an optional controlled A/B run.
+Call `router_runtime.py worker-start` immediately after a dispatch is confirmed and `worker-finish` immediately after its result is received. Neither command accepts timing numbers. At the terminal aggregate, `finish` reads those events and writes at most one verified run. Missing, reversed, or incomplete traces stay `pending`; aggregate-only legacy records remain readable but never enter verified metrics.
+
+Use the returned `parallel_execution_brief` verbatim in the Apply response. Do not independently calculate or format the line.
+
+The final chat brief reports concurrency effectiveness without requiring a serial baseline. With verified timing, show `并发：峰值 <n>｜墙钟：<wall>｜累计 worker：<worker>｜有效并发倍率：<factor>x｜并发利用率：<util>%` (`parallel_utilization`). Without reliable timing fields, show `并发：<effective>/<requested>｜测量：待记录`. Never display obsolete compression metrics, and never call factor or utilization speedup.
 Keep plans separate from execution statistics. Never treat coarse weights as seconds, infer worker start time from ledger append timestamps, or record configured targets as actual model use.

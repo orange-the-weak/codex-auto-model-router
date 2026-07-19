@@ -26,6 +26,10 @@ EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 MODES = ("assess", "apply", "query", "record", "retune")
 OUTCOMES = ("completed", "failed", "escalated", "reworked", "cancelled")
 SOURCES = ("user-confirmed", "task-metadata")
+PARALLEL_MEASUREMENT_BOUNDARIES = ("parallel-run",)
+PARALLEL_SCHEMA_VERSION = 2
+PARALLEL_TIMING_PROVENANCE = "coordinator-monotonic-v1"
+PARALLEL_CLOCK_SOURCE = "python-monotonic-ns"
 VERIFICATIONS = ("deterministic", "manual", "none", "unknown")
 EFFICIENCY_DURATIONS = (
     "routing_seconds", "queue_wait_seconds", "executor_start_seconds",
@@ -34,6 +38,79 @@ EFFICIENCY_DURATIONS = (
 EFFICIENCY_COUNTS = ("model_round_trips", "tool_round_trips")
 USAGE_START = "<!-- MODEL_USAGE_START -->"
 USAGE_END = "<!-- MODEL_USAGE_END -->"
+
+
+def resolve_ledger_path(repository):
+    current = Path(repository).expanduser().resolve()
+    if current.is_file():
+        current = current.parent
+    fallback = current
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate / ".codex" / "model-routing-history.jsonl"
+    return fallback / ".codex" / "model-routing-history.jsonl"
+
+
+def _brief_number(value, digits):
+    if value is None:
+        return "—"
+    return f"{round(value, digits):g}"
+
+
+def parallel_run_brief(run):
+    wall = run["wall_clock_seconds"]
+    worker = run["cumulative_worker_seconds"]
+    peak = run["peak_concurrency"]
+    factor = worker / wall if wall > 0 else None
+    utilization = worker * 100 / (peak * wall) if wall > 0 else None
+    return (
+        f"并发：峰值 {peak}｜墙钟：{_brief_number(wall, 3)}s｜"
+        f"累计 worker：{_brief_number(worker, 3)}s｜"
+        f"有效并发倍率：{_brief_number(factor, 2)}x｜"
+        f"并发利用率：{_brief_number(utilization, 1)}%"
+    )
+
+
+def pending_parallel_brief(effective, requested):
+    return f"并发：{effective}/{requested}｜测量：待记录"
+
+
+def parallel_metrics_from_intervals(intervals):
+    """Derive every aggregate from coordinator-captured worker intervals."""
+    if not intervals:
+        raise ValueError("parallel execution requires worker intervals")
+    starts = [item["started_monotonic_ns"] for item in intervals]
+    finishes = [item["result_received_monotonic_ns"] for item in intervals]
+    if any(end <= start for start, end in zip(starts, finishes)):
+        raise ValueError("parallel worker interval must have positive duration")
+    points = []
+    for start, end in zip(starts, finishes):
+        points.extend(((start, 1), (end, -1)))
+    active = peak = 0
+    for _, delta in sorted(points, key=lambda item: (item[0], item[1])):
+        active += delta
+        peak = max(peak, active)
+    first = min(starts)
+    last = max(finishes)
+    wall = (last - first) / 1_000_000_000
+    worker = sum(end - start for start, end in zip(starts, finishes)) / 1_000_000_000
+    return {
+        "wall_clock_seconds": round(wall, 9),
+        "cumulative_worker_seconds": round(worker, 9),
+        "peak_concurrency": peak,
+        "worker_count": len(intervals),
+    }
+
+
+def is_verified_parallel_run(event):
+    return (
+        event.get("event") == "parallel_execution"
+        and event.get("schema_version") == PARALLEL_SCHEMA_VERSION
+        and event.get("timing_provenance") == PARALLEL_TIMING_PROVENANCE
+        and event.get("clock_source") == PARALLEL_CLOCK_SOURCE
+        and isinstance(event.get("worker_intervals"), list)
+        and bool(event["worker_intervals"])
+    )
 
 
 @contextmanager
@@ -102,6 +179,19 @@ def validate_event(event):
         for identifier in ("route_id", "segment_id", "attempt_id"):
             if not isinstance(event.get(identifier), str) or not event[identifier]:
                 raise ValueError(f"segment_claim requires non-empty {identifier}")
+    elif event_type in ("parallel_worker_start", "parallel_worker_finish"):
+        for identifier in ("route_id", "segment_id"):
+            if not isinstance(event.get(identifier), str) or not event[identifier]:
+                raise ValueError(f"{event_type} requires non-empty {identifier}")
+        monotonic_ns = event.get("monotonic_ns")
+        if not isinstance(monotonic_ns, int) or isinstance(monotonic_ns, bool) or monotonic_ns < 0:
+            raise ValueError(f"invalid {event_type} monotonic_ns")
+        if event.get("capture_source") != "router-runtime":
+            raise ValueError(f"invalid {event_type} capture_source")
+        if event.get("clock_source") != PARALLEL_CLOCK_SOURCE:
+            raise ValueError(f"invalid {event_type} clock_source")
+        if event_type == "parallel_worker_finish" and event.get("outcome") not in OUTCOMES:
+            raise ValueError("invalid parallel_worker_finish outcome")
     elif event_type == "parallel_plan":
         if event.get("protocol") != "dependency-parallel-v1":
             raise ValueError("invalid parallel plan protocol")
@@ -157,6 +247,55 @@ def validate_event(event):
             raise ValueError("parallel worker time exceeds observed concurrency capacity")
         if event.get("outcome") not in OUTCOMES or event.get("source") not in SOURCES:
             raise ValueError("parallel execution requires verified outcome and source")
+        if event.get("schema_version") == PARALLEL_SCHEMA_VERSION:
+            if event.get("measurement_boundary") != "dispatch-confirmed-to-result-received":
+                raise ValueError("invalid verified parallel measurement boundary")
+            if event.get("timing_provenance") != PARALLEL_TIMING_PROVENANCE:
+                raise ValueError("invalid verified parallel timing provenance")
+            if event.get("clock_source") != PARALLEL_CLOCK_SOURCE:
+                raise ValueError("invalid verified parallel clock source")
+            intervals = event.get("worker_intervals")
+            if not isinstance(intervals, list) or not intervals:
+                raise ValueError("verified parallel execution requires worker_intervals")
+            identifiers = []
+            for interval in intervals:
+                if not isinstance(interval, dict):
+                    raise ValueError("invalid parallel worker interval")
+                identifier = interval.get("segment_id")
+                if not isinstance(identifier, str) or not identifier:
+                    raise ValueError("invalid parallel worker interval segment_id")
+                identifiers.append(identifier)
+                for field in ("started_monotonic_ns", "result_received_monotonic_ns"):
+                    value = interval.get(field)
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                        raise ValueError(f"invalid parallel worker interval {field}")
+                if interval.get("outcome") not in OUTCOMES:
+                    raise ValueError("invalid parallel worker interval outcome")
+                for field in ("started_at", "result_received_at"):
+                    if not isinstance(interval.get(field), str) or not interval[field]:
+                        raise ValueError(f"invalid parallel worker interval {field}")
+            if len(identifiers) != len(set(identifiers)):
+                raise ValueError("duplicate parallel worker interval segment_id")
+            if event.get("outcome") == "completed" and any(
+                interval["outcome"] != "completed" for interval in intervals
+            ):
+                raise ValueError("completed parallel execution contains failed worker")
+            derived = parallel_metrics_from_intervals(intervals)
+            for field in ("wall_clock_seconds", "cumulative_worker_seconds"):
+                if not math.isclose(event[field], derived[field], abs_tol=1e-9):
+                    raise ValueError(f"parallel execution {field} does not match intervals")
+            for field in ("peak_concurrency", "worker_count"):
+                if event[field] != derived[field]:
+                    raise ValueError(f"parallel execution {field} does not match intervals")
+        elif event.get("schema_version") in (None, 1):
+            boundary = event.get("measurement_boundary")
+            provenance = event.get("timing_provenance")
+            if boundary is not None and boundary not in PARALLEL_MEASUREMENT_BOUNDARIES:
+                raise ValueError("invalid legacy parallel measurement boundary")
+            if provenance is not None and provenance not in SOURCES:
+                raise ValueError("invalid legacy parallel timing provenance")
+        else:
+            raise ValueError("unsupported parallel execution schema_version")
     elif event_type == "routing_efficiency":
         if event.get("source") not in SOURCES:
             raise ValueError("routing efficiency requires task metadata or user confirmation")
@@ -202,7 +341,10 @@ def validate_event(event):
             raise ValueError(f"{identifier} must be a non-empty string")
     if event_type == "execution" and (("route_id" in event) != ("segment_id" in event)):
         raise ValueError("segmented execution requires both route_id and segment_id")
-    if event_type in ("parallel_plan", "parallel_execution", "routing_efficiency") and not event.get("route_id"):
+    if event_type in (
+        "parallel_plan", "parallel_execution", "parallel_worker_start",
+        "parallel_worker_finish", "routing_efficiency",
+    ) and not event.get("route_id"):
         raise ValueError(f"{event_type} requires route_id")
     concurrency = event.get("concurrency")
     if concurrency is not None and (
@@ -237,7 +379,9 @@ def read_events(path):
 
 def append_event(path, event):
     path.parent.mkdir(parents=True, exist_ok=True)
-    if event.get("event") in ("execution", "segment_claim") and event.get("route_id") and event.get("segment_id"):
+    if event.get("event") in (
+        "execution", "segment_claim", "parallel_worker_start", "parallel_worker_finish",
+    ) and event.get("route_id") and event.get("segment_id"):
         event.setdefault("event_id", str(uuid.uuid5(
             uuid.NAMESPACE_URL,
             f"codex-auto-model-router:{event['event']}:{event['route_id']}:{event['segment_id']}",
@@ -270,7 +414,9 @@ def append_event(path, event):
             existing, _ = load_lines(existing_text, path)
             if any(item.get("event_id") == event["event_id"] for item in existing):
                 return False
-            if event.get("event") in ("execution", "segment_claim") and event.get("route_id"):
+            if event.get("event") in (
+                "execution", "segment_claim", "parallel_worker_start", "parallel_worker_finish",
+            ) and event.get("route_id"):
                 if any(
                     item.get("event") == event.get("event")
                     and item.get("route_id") == event.get("route_id")
@@ -341,7 +487,7 @@ def route_performance(executions):
     return result
 
 
-def build_summary(events, warnings):
+def build_summary(events, warnings, current_route_id=None):
     executions = [item for item in events if item.get("event") == "execution"]
     attempts = [item for item in executions if item.get("outcome") != "cancelled"]
     segment_attempts = [
@@ -364,30 +510,45 @@ def build_summary(events, warnings):
     )
     latest = next((item for item in reversed(events) if item.get("event") == "allocation"), None)
     parallel_plans = [item for item in events if item.get("event") == "parallel_plan"]
-    parallel_runs = [item for item in events if item.get("event") == "parallel_execution"]
+    all_parallel_runs = [item for item in events if item.get("event") == "parallel_execution"]
+    parallel_runs = [item for item in all_parallel_runs if is_verified_parallel_run(item)]
+    legacy_parallel_runs = [item for item in all_parallel_runs if not is_verified_parallel_run(item)]
     efficiency_events = [item for item in events if item.get("event") == "routing_efficiency"]
     parallel_wall = sum(item["wall_clock_seconds"] for item in parallel_runs)
     parallel_worker = sum(item["cumulative_worker_seconds"] for item in parallel_runs)
     parallel_capacity = sum(
         item["peak_concurrency"] * item["wall_clock_seconds"] for item in parallel_runs
     )
-    latest_parallel = parallel_runs[-1] if parallel_runs else None
-    latest_parallel_brief = None
-    if latest_parallel:
-        wall = latest_parallel["wall_clock_seconds"]
-        worker = latest_parallel["cumulative_worker_seconds"]
-        latest_parallel_brief = {
-            "route_id": latest_parallel["route_id"],
+    current_parallel_event = next(
+        (
+            item for item in reversed(parallel_runs)
+            if current_route_id is not None and item["route_id"] == current_route_id
+        ),
+        None,
+    )
+    current_parallel_run = None
+    if current_parallel_event:
+        wall = current_parallel_event["wall_clock_seconds"]
+        worker = current_parallel_event["cumulative_worker_seconds"]
+        current_parallel_run = {
+            "route_id": current_parallel_event["route_id"],
+            "schema_version": current_parallel_event["schema_version"],
+            "measurement_boundary": current_parallel_event.get(
+                "measurement_boundary", "legacy-unspecified"
+            ),
+            "timing_provenance": current_parallel_event.get(
+                "timing_provenance", current_parallel_event["source"]
+            ),
+            "clock_source": current_parallel_event["clock_source"],
             "wall_clock_seconds": wall,
             "cumulative_worker_seconds": worker,
-            "peak_concurrency": latest_parallel["peak_concurrency"],
+            "peak_concurrency": current_parallel_event["peak_concurrency"],
+            "worker_count": current_parallel_event["worker_count"],
+            "outcome": current_parallel_event["outcome"],
             "effective_parallel_factor": round(worker / wall, 2) if wall > 0 else None,
             "parallel_utilization_percent": (
-                round(worker * 100 / (latest_parallel["peak_concurrency"] * wall), 1)
+                round(worker * 100 / (current_parallel_event["peak_concurrency"] * wall), 1)
                 if wall > 0 else None
-            ),
-            "worker_time_compression_percent": (
-                round((1 - wall / worker) * 100, 1) if worker > 0 else None
             ),
         }
     return {
@@ -402,20 +563,22 @@ def build_summary(events, warnings):
             "latest": parallel_plans[-1] if parallel_plans else None,
         },
         "parallel_execution": {
-            "count": len(parallel_runs),
-            "wall_clock_seconds": round(parallel_wall, 3),
-            "cumulative_worker_seconds": round(parallel_worker, 3),
-            "peak_concurrency": max((item["peak_concurrency"] for item in parallel_runs), default=None),
-            "effective_parallel_factor": round(parallel_worker / parallel_wall, 2) if parallel_wall > 0 else None,
-            "parallel_utilization_percent": (
-                round(parallel_worker * 100 / parallel_capacity, 1)
-                if parallel_capacity > 0 else None
-            ),
-            "worker_time_compression_percent": (
-                round((1 - parallel_wall / parallel_worker) * 100, 1)
-                if parallel_worker > 0 else None
-            ),
-            "latest": latest_parallel_brief,
+            "current_run": current_parallel_run,
+            "legacy_unverified": {
+                "count": len(legacy_parallel_runs),
+                "route_ids": [item["route_id"] for item in legacy_parallel_runs],
+            },
+            "historical_summary": {
+                "count": len(parallel_runs),
+                "wall_clock_seconds": round(parallel_wall, 3),
+                "cumulative_worker_seconds": round(parallel_worker, 3),
+                "peak_concurrency": max((item["peak_concurrency"] for item in parallel_runs), default=None),
+                "effective_parallel_factor": round(parallel_worker / parallel_wall, 2) if parallel_wall > 0 else None,
+                "parallel_utilization_percent": (
+                    round(parallel_worker * 100 / parallel_capacity, 1)
+                    if parallel_capacity > 0 else None
+                ),
+            },
         },
         "routing_efficiency": {
             "count": len(efficiency_events),
@@ -469,6 +632,10 @@ def render_markdown(summary):
             (efficiency["durations"]["model_switch_seconds"] or 0)
             + (efficiency["durations"]["restore_seconds"] or 0)
         )
+    parallel = summary["parallel_execution"]
+    historical_parallel = parallel["historical_summary"]
+    legacy_parallel = parallel["legacy_unverified"]
+    current_parallel = parallel["current_run"]
     lines = [
         USAGE_START,
         f"_Observed sample: **{sample}**. Actual use counts non-cancelled Segment attempts backed by task metadata or user confirmation._",
@@ -485,18 +652,26 @@ def render_markdown(summary):
         "",
         markdown_table(summary["model_concurrency_usage"], "Model and verified concurrency"),
         "",
-        "### Verified parallel execution",
+        "### Historical verified parallel execution",
         "",
         (
-            f"Runs: {summary['parallel_execution']['count']}; wall clock: "
-            f"{summary['parallel_execution']['wall_clock_seconds']:g}s; cumulative worker time: "
-            f"{summary['parallel_execution']['cumulative_worker_seconds']:g}s; peak concurrency: "
-            f"{summary['parallel_execution']['peak_concurrency'] or '—'}; effective parallel factor: "
-            f"{summary['parallel_execution']['effective_parallel_factor'] or '—'}x; parallel utilization: "
-            f"{summary['parallel_execution']['parallel_utilization_percent'] or '—'}%. "
+            f"Aggregate of {historical_parallel['count']} verified run(s): wall clock: "
+            f"{historical_parallel['wall_clock_seconds']:g}s; cumulative worker time: "
+            f"{historical_parallel['cumulative_worker_seconds']:g}s; peak concurrency: "
+            f"{historical_parallel['peak_concurrency'] if historical_parallel['peak_concurrency'] is not None else '—'}; effective parallel factor: "
+            f"{historical_parallel['effective_parallel_factor'] if historical_parallel['effective_parallel_factor'] is not None else '—'}x; parallel utilization: "
+            f"{historical_parallel['parallel_utilization_percent'] if historical_parallel['parallel_utilization_percent'] is not None else '—'}%. "
             "The factor measures observed work overlap, not serial/parallel speedup."
-            if summary["parallel_execution"]["count"] else
+            if historical_parallel["count"] else
             "Insufficient verified parallel timing data."
+        ),
+        "",
+        "### Legacy/unverified parallel records",
+        "",
+        (
+            f"Excluded from verified metrics: {legacy_parallel['count']} record(s)."
+            if legacy_parallel["count"] else
+            "No legacy parallel records."
         ),
         "",
         "### Verified routing overhead",
@@ -524,6 +699,26 @@ def render_markdown(summary):
         "### Latest recommended allocation",
         "",
     ]
+    if current_parallel:
+        current_run_lines = [
+            "### Current verified parallel run",
+            "",
+            (
+                f"Route: `{current_parallel['route_id']}`; schema: "
+                f"v{current_parallel['schema_version']}; measurement boundary: "
+                f"`{current_parallel['measurement_boundary']}`; timing provenance: "
+                f"`{current_parallel['timing_provenance']}`; clock: "
+                f"`{current_parallel['clock_source']}`; wall clock: "
+                f"{current_parallel['wall_clock_seconds']:g}s; cumulative worker time: "
+                f"{current_parallel['cumulative_worker_seconds']:g}s; peak concurrency: "
+                f"{current_parallel['peak_concurrency']}; effective parallel factor: "
+                f"{current_parallel['effective_parallel_factor'] if current_parallel['effective_parallel_factor'] is not None else '—'}x; "
+                f"parallel utilization: {current_parallel['parallel_utilization_percent'] if current_parallel['parallel_utilization_percent'] is not None else '—'}%."
+            ),
+            "",
+        ]
+        insert_at = lines.index("### Verified routing overhead")
+        lines[insert_at:insert_at] = current_run_lines
     allocation = summary.get("recommended_allocation")
     if allocation:
         lines.extend([
@@ -620,12 +815,17 @@ def parallel_plan(args):
 def parallel_execution(args):
     event = {
         "event": "parallel_execution", "route_id": args.route_id,
+        "schema_version": 1,
         "wall_clock_seconds": args.wall_clock_seconds,
         "cumulative_worker_seconds": args.cumulative_worker_seconds,
         "peak_concurrency": args.peak_concurrency,
         "worker_count": args.worker_count,
         "outcome": args.outcome, "source": args.source,
     }
+    if args.measurement_boundary is not None:
+        event["measurement_boundary"] = args.measurement_boundary
+    if args.timing_provenance is not None:
+        event["timing_provenance"] = args.timing_provenance
     print(json.dumps({"appended": append_event(args.ledger, event), "event_id": event.get("event_id")}, ensure_ascii=False))
 
 
@@ -679,7 +879,7 @@ def claim(args):
 
 def summarize(args):
     events, warnings = read_events(args.ledger)
-    summary = build_summary(events, warnings)
+    summary = build_summary(events, warnings, current_route_id=args.route_id)
     if args.format == "markdown":
         print(render_markdown(summary))
     else:
@@ -688,8 +888,14 @@ def summarize(args):
 
 def render(args):
     events, warnings = read_events(args.ledger)
-    update_report(args.report, render_markdown(build_summary(events, warnings)))
+    update_report(args.report, render_markdown(build_summary(
+        events, warnings, current_route_id=args.route_id,
+    )))
     print(args.report)
+
+
+def resolve_ledger(args):
+    print(resolve_ledger_path(args.repository))
 
 
 def parser():
@@ -738,6 +944,8 @@ def parser():
     measured.add_argument("--worker-count", type=int, required=True)
     measured.add_argument("--outcome", choices=OUTCOMES, required=True)
     measured.add_argument("--source", choices=SOURCES, required=True)
+    measured.add_argument("--measurement-boundary", choices=PARALLEL_MEASUREMENT_BOUNDARIES)
+    measured.add_argument("--timing-provenance", choices=SOURCES)
     measured.set_defaults(func=parallel_execution)
     efficiency = commands.add_parser("efficiency")
     efficiency.add_argument("--ledger", type=Path, required=True)
@@ -766,12 +974,17 @@ def parser():
     claimer.set_defaults(func=claim)
     report = commands.add_parser("summary")
     report.add_argument("--ledger", type=Path, required=True)
+    report.add_argument("--route-id", help="Select the current verified parallel run by route")
     report.add_argument("--format", choices=("json", "markdown"), default="json")
     report.set_defaults(func=summarize)
     renderer = commands.add_parser("render")
     renderer.add_argument("--ledger", type=Path, required=True)
     renderer.add_argument("--report", type=Path, required=True)
+    renderer.add_argument("--route-id", help="Select the current verified parallel run by route")
     renderer.set_defaults(func=render)
+    resolver = commands.add_parser("resolve-ledger")
+    resolver.add_argument("--repository", type=Path, required=True)
+    resolver.set_defaults(func=resolve_ledger)
     return root
 
 

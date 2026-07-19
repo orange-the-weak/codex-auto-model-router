@@ -155,15 +155,20 @@ For `dependency-parallel-v1`, the executor also receives the immutable plan hash
 
 ## Query and Record fast path
 
+The default Apply brief covers the current run only. Query and history views must be explicitly labeled as historical aggregates. Resolve the project ledger with `python3 scripts/model_usage_ledger.py resolve-ledger --repository <path>` so the nearest Git root owns the history; never mix parent and child repository ledgers.
+
 Before Query or Record, use the visible line with `local-script` and `none`.
 
 - Record the invocation as `skill_run` with the matching mode.
 - Query runs `summary`, then `render` to update only the marked report section.
 - Record appends only user-confirmed or reliable task-metadata execution, then summarizes and renders.
 - Report actual execution proportions as verified Segment attempts, separate from analysis calls and latest recommended allocation.
-- For parallel work, also report model × verified concurrency. Record `parallel_plan` as configured intent. Record `parallel_execution` only when wall clock, cumulative worker duration, peak concurrency, worker count, source, and outcome are genuinely available from task metadata or user confirmation. Never use the ledger event timestamp as a worker start time or turn estimates into observed timing.
+- For parallel work, keep `parallel_plan` as configured intent. Immediately after each worker dispatch is confirmed, call `router_runtime.py worker-start`; immediately after its result is received, call `worker-finish`. These commands capture the coordinator's monotonic clock themselves—never pass timestamps, durations, peak concurrency, or aggregate timing from model text.
+- At the terminal aggregate, call `router_runtime.py finish`. It derives wall clock, cumulative worker time, peak concurrency, and worker count from the stored per-worker intervals, then appends one schema-v2 `parallel_execution`. Missing, reversed, or incomplete traces remain `pending`. Legacy aggregate-only records stay readable but are excluded from verified metrics.
+- Print the returned `parallel_execution_brief` verbatim. Never recompute, round, translate, or reformat its values in the Apply response.
 - Record `routing_efficiency` only from task metadata or user confirmation: routing/orchestration, queue wait, executor startup, switch, Restore, useful execution, model/tool round trips, and state-gate stops. Missing fields stay missing; never guess them.
 - End every Apply chat summary with one concise concurrency line. For serial work say `并发：未启用｜原因：任务未形成有价值的独立并行边界`. Without verified timing say `并发：<effective>/<requested>｜测量：待记录`. With verified timing say `并发：峰值 <n>｜墙钟：<wall>｜累计 worker：<worker>｜有效并发倍率：<worker / wall>x｜并发利用率：<worker / (peak × wall)>%`. The multiplier is an observed work-overlap metric and needs no serial baseline; do not call it actual speedup. Report actual speedup only for an optional controlled A/B run.
+- The canonical wall clock runs from the first dispatch confirmation through the last result receipt on the coordinator's monotonic clock. Never display obsolete compression metrics, and never call factor or utilization speedup.
 - Never infer actual use from a recommendation or configured-but-unverified route.
 
 ## Routed Assess and Retune

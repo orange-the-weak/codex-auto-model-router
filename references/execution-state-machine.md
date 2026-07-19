@@ -29,6 +29,9 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 - `RETURN` is terminal and cannot execute or advance a segment.
 - Report or ledger persistence failure does not invalidate otherwise completed work.
 - Parallel execution has an automatic ceiling of 4. Effective workers are `min(requested, useful independent width, observed total slots - coordinator - running workers)`. A documented/default thread limit is not live capacity. Without observed capacity, dispatch one worker and probe/refill; never pre-create a queue. A user request above 4 requires matching observed free slots and useful width.
+- The Coordinator calls `router_runtime.py worker-start` after each dispatch confirmation and `worker-finish` after each result receipt. The runtime captures a shared monotonic clock; callers never supply time values.
+- A terminal `finish` derives every aggregate from complete per-worker intervals and appends one schema-v2 `parallel_execution`; incomplete evidence remains `pending`, and legacy aggregate-only records stay outside verified history.
+- The coordinator prints the returned `parallel_execution_brief` verbatim and never recomputes its values.
 - The parallel Coordinator exclusively owns the frontier, dispatch, wait-any loop, failure state, and deterministic aggregation. `stop-dispatch-drain-running` starts no new work after the first failure but waits for already active workers.
 - Parallel write tasks declare concrete `write_scopes`; overlapping write scopes and shared `conflict_keys` add dependencies and degrade to serial. The complete DAG, routes, estimates, scopes, conflict keys, `parallelism_source`, requested/effective concurrency, scheduler, aggregation order, and failure policy are covered by `plan_hash` and echoed in worker envelopes. Legacy parallel plans without the source remain valid.
 

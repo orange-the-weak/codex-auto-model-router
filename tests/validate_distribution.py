@@ -36,6 +36,23 @@ if "## Capability check and Dispatch" not in skill_text or "Never create a new t
     fail("same-task routing contract is missing")
 if "A task/agent name alone is not proof of model selection" not in skill_text:
     fail("generic subagent model-safety guard is missing")
+for distribution_text, label in (
+    (skill_text, "SKILL.md"),
+    ((ROOT / "README.md").read_text(encoding="utf-8"), "README.md"),
+    ((ROOT / "README.zh-CN.md").read_text(encoding="utf-8"), "README.zh-CN.md"),
+    ((ROOT / "references" / "parallel-execution.md").read_text(encoding="utf-8"), "parallel-execution.md"),
+):
+    if "worker_time_compression_percent" in distribution_text:
+        fail(f"obsolete compression wording is exposed in {label}")
+for stable_phrase in (
+    "并发：峰值 <n>｜墙钟：<wall>｜累计 worker：<worker>｜有效并发倍率：<factor>x｜并发利用率：<util>%",
+    "并发：<effective>/<requested>｜测量：待记录",
+    "coordinator's monotonic clock",
+    "historical aggregate",
+    "Print the returned `parallel_execution_brief` verbatim",
+):
+    if stable_phrase not in skill_text and stable_phrase not in (ROOT / "references" / "parallel-execution.md").read_text(encoding="utf-8"):
+        fail(f"stable distribution contract is missing: {stable_phrase}")
 if "A normal successful completion needs no separate model-identity or runtime-verification warning" not in skill_text:
     fail("normal completion suppression rule is missing")
 if "Use this order once for the complete plan" not in skill_text or "explicitly model-selectable executor presets" not in skill_text:
@@ -107,19 +124,30 @@ if 'commands.add_parser("claim")' not in ledger_text or '"segment_claim"' not in
 for parallel_ledger_contract in (
     'commands.add_parser("parallel-plan")',
     'commands.add_parser("parallel-execution")',
+    'commands.add_parser("resolve-ledger")',
     '"model_concurrency_usage"',
     '"cumulative_worker_seconds"',
     '"parallelism_source"',
     '"requested_max_parallelism"',
     '"effective_parallel_factor"',
     '"parallel_utilization_percent"',
-    '"worker_time_compression_percent"',
+    '"current_run"',
+    '"historical_summary"',
+    'parallel_run_brief',
+    'pending_parallel_brief',
+    '"parallel_worker_start"',
+    '"parallel_worker_finish"',
+    'PARALLEL_SCHEMA_VERSION = 2',
+    '"worker_intervals"',
+    '"legacy_unverified"',
     'commands.add_parser("efficiency")',
     '"routing_efficiency"',
     '"queue_wait_seconds"',
 ):
     if parallel_ledger_contract not in ledger_text:
         fail(f"parallel ledger contract is missing: {parallel_ledger_contract}")
+if '"worker_time_compression_percent"' in ledger_text:
+    fail("obsolete worker time compression metric remains in the public ledger output")
 policy_text = (ROOT / "scripts" / "route_policy.py").read_text(encoding="utf-8")
 for contract in ("CODEX_THREAD_ID", "thread_settings_applied", "turn_context", "route-already-matched", "selectable-subagent-or-local", "apply-fast-v1", "segmented-v1", "dependency-parallel-v1", "DEFAULT_AUTO_PARALLELISM", "HARD_MAX_PARALLELISM", "parallelism_source", "capacity_evaluation", "smart-reduced", "runtime_total_slots", "coordinator_reserved_slots", "available_worker_slots", "context_capsule", "critical-path-priority-wait-any", "write_scopes", "conflict_keys", "stop-dispatch-drain-running", "validate_fast_envelope", "validate_parallel_envelope", "DEFAULT_MAX_SEGMENTS", "EXTENDED_MAX_SEGMENTS", "HARD_MAX_SEGMENTS", "HARD_MAX_SWITCHES", "budget_source", "plan_hash", "attempt_id", "validate_segment_cursor", "synthetic-test-input", "load_benchmark_evidence", "evidence-snapshot-expired", "prior_failure", "resolve_family_fallback", "gpt56-family-unavailable"):
     if contract not in policy_text:
@@ -143,7 +171,10 @@ for contract in ("dependency-parallel-v1", "wait-any", "stop-dispatch-drain-runn
     if contract not in parallel_reference:
         fail(f"parallel execution reference is missing: {contract}")
 runtime_text = (ROOT / "scripts" / "router_runtime.py").read_text(encoding="utf-8")
-for contract in ("def begin", "def finish", "validate_fast_envelope", "segment_claim", "routing_efficiency", "context_capsule"):
+for contract in (
+    "def begin", "def finish", "def worker_start", "def worker_finish",
+    "validate_fast_envelope", "segment_claim", "routing_efficiency", "context_capsule",
+):
     if contract not in runtime_text:
         fail(f"combined Router runtime contract is missing: {contract}")
 evidence = json.loads(

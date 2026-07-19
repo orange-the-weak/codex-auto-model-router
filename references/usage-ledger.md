@@ -2,13 +2,16 @@
 
 Store project-local history at `.codex/model-routing-history.jsonl`. Keep one compact JSON object per line. Do not store prompts, source code, secrets, or conversation text.
 
+Resolve this path from the nearest Git root with `python3 scripts/model_usage_ledger.py resolve-ledger --repository <path>`, so parent and child repositories never share a ledger. Apply briefs cover the selected current `route_id` only; Query/history must say when values are historical aggregates.
+
 ## Event types
 
 - `segment_claim`: one atomic pre-execution claim with `route_id`, `segment_id`, `attempt_id`, and optional `task_id`. The first append wins; a repeated claim means the envelope was already consumed and must not execute again.
 - `skill_run`: one invocation. Fields: `event_id`, `timestamp`, `mode`, `analysis_model`, `effort`, and optional fallback fields.
 - `execution`: one confirmed Segment attempt. Fields: `event_id`, optional `task_id`, optional `route_id`, optional `segment_id`, `timestamp`, `model`, `effort`, `task_class`, `outcome`, optional non-negative `duration_seconds`, `source`, `verification` (`deterministic`, `manual`, `none`, or `unknown`), and fallback fields. Older records without Segment identifiers remain valid and are treated as whole-task attempts.
 - `parallel_plan`: configured intent for one `dependency-parallel-v1` route. Fields: `route_id`, `protocol`, `parallelism_source` (`standard`, `smart-reduced`, or `user-override`; legacy `adaptive-extended` remains readable), `requested_max_parallelism`, `effective_max_parallelism`, `planned_worker_count`, and `model_plan`. This is never actual use or timing.
-- `parallel_execution`: one verified parallel run. Fields: `route_id`, `wall_clock_seconds`, `cumulative_worker_seconds`, `peak_concurrency`, `worker_count`, `outcome`, and reliable `source`.
+- `parallel_worker_start` / `parallel_worker_finish`: coordinator-captured monotonic boundaries for one `route_id` + `segment_id`; callers supply no timing values.
+- Schema-v2 `parallel_execution`: one verified run with `worker_intervals`, derived aggregates, `measurement_boundary=dispatch-confirmed-to-result-received`, `timing_provenance=coordinator-monotonic-v1`, and `clock_source=python-monotonic-ns`. Older aggregate-only records remain readable under `legacy_unverified` and never affect verified metrics.
 - `routing_efficiency`: observed orchestration metrics from task metadata or user confirmation. Optional fields cover routing, queue wait, executor startup, model switch, Restore, useful execution, model/tool round trips, and state-gate stops. Never fill missing fields with estimates.
 - `allocation`: one recommended snapshot. Fields: `event_id`, `timestamp`, `basis`, and `allocation`, whose percentages total 100.
 
@@ -27,9 +30,9 @@ Report three independent views:
 
 Show counts with percentages. Report success and pressure within comparable task-class/model/effort groups. If there are fewer than five confirmed attempts, label the ratio as an early sample. If there are none, say there is insufficient observed data.
 
-Show total verified parallel wall clock, cumulative worker duration, and peak concurrency only from `parallel_execution`. Coarse work estimates, plan creation time, claim time, and ledger append timestamps are not runtime evidence. Do not infer worker start or stop times.
+Show total verified parallel wall clock, cumulative worker duration, and peak concurrency only from schema-v2 `parallel_execution`. Coarse work estimates, plan creation time, and aggregate values supplied by model text are not runtime evidence.
 
-Derive `effective_parallel_factor = cumulative_worker_seconds / wall_clock_seconds` and `parallel_utilization = cumulative_worker_seconds / (peak_concurrency × wall_clock_seconds)` from verified runs. These describe observed overlap and slot use without needing a serial baseline. Do not call either actual speedup; reserve that label for an optional controlled A/B run.
+Derive the effective parallel factor and utilization from verified runs using canonical wall clock (first worker confirmed started through last result received). These describe observed overlap and slot use without needing a serial baseline. Never display obsolete compression metrics; do not call either metric actual speedup.
 
 ## Retuning rules
 
@@ -47,7 +50,9 @@ Use:
 
 - `claim --ledger <path> --route-id <id> --segment-id <id> --attempt-id <id>` before Segment work.
 - `parallel-plan --ledger <path> --route-id <id> --parallelism-source <source> --requested-max-parallelism <n> --effective-max-parallelism <n> --planned-worker-count <n> --model-plan '<json>'` for configured intent.
-- `parallel-execution --ledger <path> --route-id <id> --wall-clock-seconds <s> --cumulative-worker-seconds <s> --peak-concurrency <n> --worker-count <n> --outcome <outcome> --source <source>` only for verified runtime evidence.
+- `router_runtime.py worker-start --ledger <path> --route-id <id> --segment-id <id>` after dispatch confirmation.
+- `router_runtime.py worker-finish --ledger <path> --route-id <id> --segment-id <id> --outcome <outcome>` after result receipt.
+- The legacy `parallel-execution` CLI remains import-compatible, but its aggregate-only records are unverified and excluded.
 - `efficiency --ledger <path> --route-id <id> --source task-metadata|user-confirmed ...` for observed routing overhead and blocking evidence.
 - `summary --ledger <path>` for JSON aggregation.
 - `record` or `allocation` for append-only updates.
