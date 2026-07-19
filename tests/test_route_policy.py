@@ -62,6 +62,64 @@ class RoutePolicyTests(unittest.TestCase):
             values["segment_budget"], values["switch_budget"], values["budget_source"],
         )
 
+    def rehash_parallel_plan(self, plan):
+        plan["plan_hash"] = POLICY.plan_hash(
+            plan["segments"], plan["route_id"], plan["original"], False,
+            plan["segment_budget"], plan["switch_budget"], plan["budget_source"],
+            plan["routing_evidence"], POLICY.PARALLEL_PROTOCOL, plan["parallel"],
+        )
+        for segment in plan["segments"]:
+            segment["attempt_id"] = POLICY.hashlib.sha256(
+                f"{plan['route_id']}:{plan['plan_hash']}:{segment['segment_id']}".encode()
+            ).hexdigest()
+        return plan
+
+    def parallel_gate(
+        self, plan, segment_id, completed_ids, running_ids, route_id, attempt_id,
+        envelope_parallelism=None, dispatch_capacity="auto", agent_task_name="auto",
+        trusted_plan_hash="auto", trusted_contract_version="auto",
+        dispatch_capacity_trusted=True,
+    ):
+        parallel = plan["parallel"]
+        if dispatch_capacity == "auto":
+            if parallel.get("capacity_source") == "unverified-dispatch-probe" and not running_ids:
+                dispatch_capacity = None
+            else:
+                coordinator_slots = parallel["coordinator_reserved_slots"]
+                total_slots = parallel.get("runtime_total_slots")
+                if total_slots is None:
+                    total_slots = coordinator_slots + len(running_ids) + 1
+                dispatch_capacity = {
+                    "schema_version": 1,
+                    "observation_source": "task-metadata",
+                    "capacity_source": "observed-total-slots",
+                    "runtime_total_slots": total_slots,
+                    "coordinator_reserved_slots": coordinator_slots,
+                    "runtime_running_workers": len(running_ids),
+                    "snapshot_scope": "immediate-pre-dispatch",
+                }
+        if agent_task_name == "auto":
+            agent_task_name = (
+                POLICY._agent_task_name(segment_id)
+                if parallel.get("contract_version") == POLICY.PARALLEL_CONTRACT_VERSION
+                else segment_id
+            )
+        trusted = {}
+        if trusted_plan_hash == "auto" and parallel.get("contract_version") is not None:
+            trusted_plan_hash = plan["plan_hash"]
+        if trusted_contract_version == "auto" and parallel.get("contract_version") is not None:
+            trusted_contract_version = parallel["contract_version"]
+        if trusted_plan_hash != "auto":
+            trusted["trusted_plan_hash"] = trusted_plan_hash
+        if trusted_contract_version != "auto":
+            trusted["trusted_contract_version"] = trusted_contract_version
+        return POLICY.validate_parallel_envelope(
+            plan, segment_id, completed_ids, running_ids, route_id, attempt_id,
+            envelope_parallelism, dispatch_capacity, agent_task_name,
+            dispatch_capacity_trusted=dispatch_capacity_trusted,
+            **trusted,
+        )
+
     def linear_plan(self, current_route=None):
         return POLICY.plan_apply_segments([
             self.segment("analyze", task_kind="complex"),
@@ -71,7 +129,7 @@ class RoutePolicyTests(unittest.TestCase):
     def adaptive_parallel_segments(self, count=6):
         return [
             self.segment(
-                f"task-{index}",
+                f"capacity-lane-{index}",
                 size="large" if index == 0 else "normal",
                 work_estimate="long" if index == 0 else "normal",
                 access_mode="read",
@@ -264,6 +322,35 @@ class RoutePolicyTests(unittest.TestCase):
     def test_spaced_sol_alias_is_supported(self):
         route = POLICY.select_route("assess", model_override="GPT-5.6 Sol", current=current())
         self.assertEqual(route["recommended"]["model"], "gpt-5.6-sol")
+
+    def test_assess_and_retune_defaults_are_fixed_to_sol_high(self):
+        cases = (
+            ("assess", "mechanical", "low", "tiny"),
+            ("assess", "ordinary", "normal", "normal"),
+            ("retune", "complex", "high", "large"),
+        )
+        for mode, task_kind, risk, size in cases:
+            with self.subTest(mode=mode, task_kind=task_kind):
+                route = POLICY.select_route(
+                    mode, task_kind=task_kind, risk=risk, size=size,
+                    current=current("gpt-5.6-sol", "high"),
+                )
+                self.assertEqual(
+                    (route["recommended"]["model"], route["recommended"]["effort"]),
+                    ("gpt-5.6-sol", "high"),
+                )
+                self.assertEqual(route["recommended"]["source"], "fixed-analysis-default")
+
+    def test_explicit_user_override_can_replace_fixed_retune_default(self):
+        route = POLICY.select_route(
+            "retune", model_override="Terra", effort_override="low",
+            current=current("gpt-5.6-sol", "high"),
+        )
+        self.assertEqual(
+            (route["recommended"]["model"], route["recommended"]["effort"]),
+            ("gpt-5.6-terra", "low"),
+        )
+        self.assertEqual(route["recommended"]["source"], "user-override")
 
     def test_spaced_terra_and_very_high_aliases_are_supported(self):
         route = POLICY.select_route(
@@ -582,7 +669,7 @@ class RoutePolicyTests(unittest.TestCase):
     def test_parallel_default_cap_is_four_and_invalid_caps_are_rejected(self):
         plan = POLICY.plan_parallel_segments([
             self.segment(
-                f"task-{index}", access_mode="read",
+                f"capacity-check-{index}", access_mode="read",
                 size="large" if index == 0 else "normal",
             )
             for index in range(5)
@@ -698,13 +785,42 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertEqual(parallel["available_worker_slots"], 2)
         self.assertEqual(parallel["effective_max_parallelism"], 2)
         self.assertEqual(parallel["capacity_source"], "observed-total-slots")
+        self.assertEqual(parallel["capacity_observation"]["snapshot_scope"], "plan-creation")
+        self.assertEqual(
+            parallel["capacity_observation"]["freshness_policy"],
+            "revalidate-before-each-dispatch",
+        )
 
-    def test_unverified_capacity_does_not_create_a_worker_queue(self):
+    def test_unverified_capacity_keeps_plan_cap_but_starts_with_one_probe(self):
         plan = POLICY.plan_parallel_segments(
             self.adaptive_parallel_segments(4), current=current()
         )
-        self.assertEqual(plan["parallel"]["effective_max_parallelism"], 1)
+        self.assertEqual(plan["parallel"]["effective_max_parallelism"], 4)
+        self.assertEqual(plan["parallel"]["available_worker_slots"], 1)
         self.assertEqual(plan["parallel"]["capacity_source"], "unverified-dispatch-probe")
+        first = plan["segments"][0]
+        self.parallel_gate(
+            plan, first["segment_id"], [], [], plan["route_id"], first["attempt_id"]
+        )
+        second = plan["segments"][1]
+        with self.assertRaisesRegex(ValueError, "immediate capacity observation"):
+            self.parallel_gate(
+                plan, second["segment_id"], [], [first["segment_id"]],
+                plan["route_id"], second["attempt_id"], dispatch_capacity=None,
+            )
+        selected = self.parallel_gate(
+            plan, second["segment_id"], [], [first["segment_id"]],
+            plan["route_id"], second["attempt_id"], dispatch_capacity={
+                "schema_version": 1,
+                "observation_source": "task-metadata",
+                "capacity_source": "observed-total-slots",
+                "runtime_total_slots": 4,
+                "coordinator_reserved_slots": 1,
+                "runtime_running_workers": 1,
+                "snapshot_scope": "immediate-pre-dispatch",
+            },
+        )
+        self.assertEqual(selected["segment_id"], second["segment_id"])
 
     def test_context_capsule_excludes_full_plan_and_future_segments(self):
         segments = self.adaptive_parallel_segments(4)
@@ -713,12 +829,18 @@ class RoutePolicyTests(unittest.TestCase):
         plan = POLICY.plan_parallel_segments(
             segments, current=current(), runtime_total_slots=4
         )
-        capsule = POLICY.context_capsule(plan, "task-0")
+        capsule = POLICY.context_capsule(plan, "capacity-lane-0")
         self.assertNotIn("segments", capsule)
         self.assertNotIn("current", capsule)
-        self.assertEqual(capsule["segment_id"], "task-0")
+        self.assertEqual(capsule["segment_id"], "capacity-lane-0")
+        self.assertEqual(capsule["agent_task_name"], "capacity_lane_0")
+        self.assertRegex(capsule["agent_task_name"], r"^[a-z0-9_]+$")
         self.assertEqual(capsule["decisions"], ["Preserve the accepted baseline"])
         self.assertEqual(capsule["prohibited_actions"], ["Do not run a full build"])
+        self.assertEqual(POLICY.validate_context_capsule(plan, capsule), capsule)
+        capsule["agent_task_name"] = "forged-task"
+        with self.assertRaisesRegex(ValueError, "agent_task_name"):
+            POLICY.validate_context_capsule(plan, capsule)
 
     def test_parallel_rejects_unknown_duplicate_and_cyclic_dependencies(self):
         invalid_plans = [
@@ -745,6 +867,74 @@ class RoutePolicyTests(unittest.TestCase):
             POLICY.plan_parallel_segments([
                 self.segment("write", access_mode="write", write_scopes=["src/*"])
             ], current=current())
+
+    def test_scope_aliases_are_normalized_before_hash_and_conflict_checks(self):
+        plan = POLICY.plan_parallel_segments([
+            self.segment(
+                "one", access_mode="write",
+                write_scopes=["Src//./API/", "src/api"],
+                conflict_keys=["Shared//Simulator"],
+            ),
+            self.segment(
+                "two", access_mode="write", write_scopes=["SRC/API/file.py"],
+                conflict_keys=["shared/simulator"],
+            ),
+        ], current=current())
+        first, second = plan["segments"]
+        self.assertEqual(first["write_scopes"], ["src/api"])
+        self.assertEqual(first["conflict_keys"], ["shared/simulator"])
+        self.assertEqual(second["depends_on"], ["one"])
+        self.assertEqual(
+            plan["parallel"]["serialized_conflicts"][0]["reason"],
+            "shared-conflict-key",
+        )
+
+    def test_scope_aliases_reject_root_traversal_and_absolute_values(self):
+        invalid_values = (".", "src/../other", "/tmp/outside", "C:/outside")
+        for field in ("write_scopes", "conflict_keys"):
+            for invalid in invalid_values:
+                with self.subTest(field=field, invalid=invalid):
+                    options = {"access_mode": "read", field: [invalid]}
+                    if field == "write_scopes":
+                        options["access_mode"] = "write"
+                    with self.assertRaises(ValueError):
+                        POLICY.plan_parallel_segments([
+                            self.segment("one", **options)
+                        ], current=current())
+
+    def test_write_scope_rejects_symlink_escape_from_scope_root(self):
+        with tempfile.TemporaryDirectory() as repository, tempfile.TemporaryDirectory() as outside:
+            Path(repository, "escape").symlink_to(Path(outside), target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "resolves outside"):
+                POLICY.plan_parallel_segments([
+                    self.segment(
+                        "one", access_mode="write", write_scopes=["escape/file.py"]
+                    )
+                ], current=current(), scope_root=repository)
+
+    def test_write_scope_symlink_alias_and_real_path_serialize(self):
+        with tempfile.TemporaryDirectory() as repository:
+            real = Path(repository, "real")
+            real.mkdir()
+            Path(repository, "alias").symlink_to(real, target_is_directory=True)
+            plan = POLICY.plan_parallel_segments([
+                self.segment(
+                    "alias-writer", access_mode="write",
+                    write_scopes=["alias/module.py"],
+                ),
+                self.segment(
+                    "real-writer", access_mode="write",
+                    write_scopes=["real/module.py"],
+                ),
+            ], current=current(), scope_root=repository)
+        first, second = plan["segments"]
+        self.assertEqual(first["write_scopes"], ["real/module.py"])
+        self.assertEqual(second["write_scopes"], ["real/module.py"])
+        self.assertEqual(second["depends_on"], ["alias-writer"])
+        self.assertEqual(
+            plan["parallel"]["serialized_conflicts"][0]["reason"],
+            "overlapping-write-scope",
+        )
 
     def test_overlapping_write_scopes_degrade_to_serial(self):
         plan = POLICY.plan_parallel_segments([
@@ -794,22 +984,22 @@ class RoutePolicyTests(unittest.TestCase):
             self.segment("join", depends_on=["one", "two"], access_mode="read"),
         ], current=current(), max_parallelism=2, runtime_total_slots=3)
         one = next(item for item in plan["segments"] if item["segment_id"] == "one")
-        selected = POLICY.validate_parallel_envelope(
+        selected = self.parallel_gate(
             plan, "one", [], [], plan["route_id"], one["attempt_id"]
         )
         self.assertEqual(selected["segment_id"], "one")
         join = next(item for item in plan["segments"] if item["segment_id"] == "join")
         with self.assertRaisesRegex(ValueError, "dependencies are incomplete"):
-            POLICY.validate_parallel_envelope(
+            self.parallel_gate(
                 plan, "join", ["one"], [], plan["route_id"], join["attempt_id"]
             )
         two = next(item for item in plan["segments"] if item["segment_id"] == "two")
         with self.assertRaisesRegex(ValueError, "deterministic frontier priority"):
-            POLICY.validate_parallel_envelope(
+            self.parallel_gate(
                 plan, "two", [], [], plan["route_id"], two["attempt_id"]
             )
         with self.assertRaisesRegex(ValueError, "no available worker slot"):
-            POLICY.validate_parallel_envelope(
+            self.parallel_gate(
                 plan, "one", [], ["two", "join"],
                 plan["route_id"], one["attempt_id"],
             )
@@ -822,7 +1012,7 @@ class RoutePolicyTests(unittest.TestCase):
         ], current=current())
         other = next(item for item in plan["segments"] if item["segment_id"] == "other")
         with self.assertRaisesRegex(ValueError, "completed state has incomplete dependencies"):
-            POLICY.validate_parallel_envelope(
+            self.parallel_gate(
                 plan, "other", ["child"], [], plan["route_id"], other["attempt_id"]
             )
 
@@ -835,11 +1025,152 @@ class RoutePolicyTests(unittest.TestCase):
         after_short = next(
             item for item in plan["segments"] if item["segment_id"] == "after-short"
         )
-        selected = POLICY.validate_parallel_envelope(
+        selected = self.parallel_gate(
             plan, "after-short", ["short"], ["long"],
             plan["route_id"], after_short["attempt_id"],
         )
         self.assertEqual(selected["segment_id"], "after-short")
+
+    def test_parallel_envelope_uses_immediate_global_active_worker_count(self):
+        plan = POLICY.plan_parallel_segments(
+            self.adaptive_parallel_segments(4), current=current(), runtime_total_slots=5
+        )
+        first, second = plan["segments"][:2]
+        full_observation = {
+            "schema_version": 1,
+            "observation_source": "task-metadata",
+            "capacity_source": "observed-total-slots",
+            "runtime_total_slots": 5,
+            "coordinator_reserved_slots": 1,
+            "runtime_running_workers": 4,
+            "snapshot_scope": "immediate-pre-dispatch",
+        }
+        with self.assertRaisesRegex(ValueError, "no observed free worker slot"):
+            self.parallel_gate(
+                plan, second["segment_id"], [], [first["segment_id"]],
+                plan["route_id"], second["attempt_id"],
+                dispatch_capacity=full_observation,
+            )
+        undercounted = dict(full_observation, runtime_running_workers=0)
+        with self.assertRaisesRegex(ValueError, "omits running plan workers"):
+            self.parallel_gate(
+                plan, second["segment_id"], [], [first["segment_id"]],
+                plan["route_id"], second["attempt_id"],
+                dispatch_capacity=undercounted,
+            )
+        untrusted = dict(full_observation, observation_source="model-claim")
+        with self.assertRaisesRegex(ValueError, "trusted task metadata"):
+            self.parallel_gate(
+                plan, second["segment_id"], [], [first["segment_id"]],
+                plan["route_id"], second["attempt_id"],
+                dispatch_capacity=untrusted,
+            )
+        with self.assertRaisesRegex(ValueError, "trusted runtime boundary"):
+            self.parallel_gate(
+                plan, second["segment_id"], [], [first["segment_id"]],
+                plan["route_id"], second["attempt_id"],
+                dispatch_capacity=full_observation,
+                dispatch_capacity_trusted=False,
+            )
+
+    def test_parallel_envelope_rejects_agent_task_name_tampering(self):
+        plan = POLICY.plan_parallel_segments([
+            self.segment("semantic-id", access_mode="read"),
+        ], current=current())
+        segment = plan["segments"][0]
+        with self.assertRaisesRegex(ValueError, "semantic Segment task name"):
+            self.parallel_gate(
+                plan, segment["segment_id"], [], [], plan["route_id"],
+                segment["attempt_id"], agent_task_name="forged-name",
+            )
+
+    def test_parallel_requires_explicit_content_based_segment_id(self):
+        missing = self.segment("semantic-name", access_mode="read")
+        missing.pop("segment_id")
+        with self.assertRaisesRegex(ValueError, "requires an explicit content-based"):
+            POLICY.plan_parallel_segments([missing], current=current())
+        for segment_id in ("segment-1", "worker-2", "task-3", "7"):
+            with self.subTest(segment_id=segment_id):
+                with self.assertRaisesRegex(ValueError, "content-based semantic"):
+                    POLICY.plan_parallel_segments([
+                        self.segment(segment_id, access_mode="read")
+                    ], current=current())
+
+    def test_parallel_envelope_rebuilds_conflicts_after_rehash(self):
+        def conflicting_plan():
+            return POLICY.plan_parallel_segments([
+                self.segment(
+                    "core-write", access_mode="write", write_scopes=["src/core"]
+                ),
+                self.segment(
+                    "api-write", access_mode="write", write_scopes=["src/core/api.py"]
+                ),
+            ], current=current())
+
+        plan = conflicting_plan()
+        second = plan["segments"][1]
+        second["depends_on"] = []
+        plan["parallel"]["serialized_conflicts"] = []
+        self.rehash_parallel_plan(plan)
+        with self.assertRaisesRegex(ValueError, "conflict dependencies"):
+            self.parallel_gate(
+                plan, second["segment_id"], [], [], plan["route_id"],
+                second["attempt_id"],
+            )
+
+        plan = conflicting_plan()
+        plan["parallel"]["serialized_conflicts"] = []
+        self.rehash_parallel_plan(plan)
+        first = plan["segments"][0]
+        with self.assertRaisesRegex(ValueError, "serialized_conflicts"):
+            self.parallel_gate(
+                plan, first["segment_id"], [], [], plan["route_id"],
+                first["attempt_id"],
+            )
+
+    def test_parallel_envelope_rejects_rehashed_fixed_contract_tampering(self):
+        mutations = (
+            ("scheduler", "fifo"),
+            ("failure_policy", "continue-on-error"),
+            ("workers_may_delegate", True),
+            ("coordinator_owns_frontier", False),
+            ("scope_security_policy", {"normalization": "none"}),
+            ("context_policy", "full-chat-copy"),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                plan = POLICY.plan_parallel_segments([
+                    self.segment("protocol-audit", access_mode="read")
+                ], current=current())
+                plan["parallel"][field] = value
+                self.rehash_parallel_plan(plan)
+                segment = plan["segments"][0]
+                with self.assertRaisesRegex(ValueError, f"invalid parallel {field}"):
+                    self.parallel_gate(
+                        plan, segment["segment_id"], [], [], plan["route_id"],
+                        segment["attempt_id"],
+                    )
+
+    def test_parallel_envelope_rejects_rehashed_segment_schema_tampering(self):
+        mutations = (
+            ("model", "gpt-5.5", "invalid GPT-5.6 model"),
+            ("model", "gpt-9", "invalid GPT-5.6 model"),
+            ("effort", "ultra", "invalid reasoning effort"),
+            ("task_kind", "guess", "invalid task_kind"),
+        )
+        for field, value, message in mutations:
+            with self.subTest(field=field, value=value):
+                plan = POLICY.plan_parallel_segments([
+                    self.segment("schema-audit", access_mode="read")
+                ], current=current())
+                plan["segments"][0][field] = value
+                self.rehash_parallel_plan(plan)
+                segment = plan["segments"][0]
+                with self.assertRaisesRegex(ValueError, message):
+                    self.parallel_gate(
+                        plan, segment["segment_id"], [], [], plan["route_id"],
+                        segment["attempt_id"],
+                    )
 
     def test_parallel_envelope_rejects_plan_hash_tampering(self):
         plan = POLICY.plan_parallel_segments([
@@ -848,9 +1179,88 @@ class RoutePolicyTests(unittest.TestCase):
         plan["segments"][0]["goal"] = "tampered"
         segment = plan["segments"][0]
         with self.assertRaisesRegex(ValueError, "plan hash mismatch"):
-            POLICY.validate_parallel_envelope(
+            self.parallel_gate(
                 plan, "one", [], [], plan["route_id"], segment["attempt_id"]
             )
+
+    def test_parallel_v2_rejects_rehashed_route_against_trusted_anchor(self):
+        plan = POLICY.plan_parallel_segments([
+            self.segment("model-review", access_mode="read"),
+        ], current=current())
+        trusted_hash = plan["plan_hash"]
+        plan["segments"][0]["model"] = "gpt-5.6-luna"
+        plan["segments"][0]["effort"] = "low"
+        self.rehash_parallel_plan(plan)
+        segment = plan["segments"][0]
+        with self.assertRaisesRegex(ValueError, "trusted runtime plan hash"):
+            self.parallel_gate(
+                plan, segment["segment_id"], [], [], plan["route_id"],
+                segment["attempt_id"], trusted_plan_hash=trusted_hash,
+                trusted_contract_version=POLICY.PARALLEL_CONTRACT_VERSION,
+            )
+
+    def test_parallel_v2_cannot_downgrade_to_legacy_against_trusted_anchor(self):
+        plan = POLICY.plan_parallel_segments([
+            self.segment("legacy-guard", access_mode="read"),
+        ], current=current())
+        trusted_hash = plan["plan_hash"]
+        plan["parallel"].pop("contract_version")
+        plan["parallel"].pop("dispatch_capacity_policy")
+        plan["parallel"].pop("context_identity_policy")
+        plan["parallel"].pop("scope_security_policy")
+        plan["parallel"].pop("capacity_observation")
+        for item in plan["segments"]:
+            item.pop("declared_dependencies")
+        self.rehash_parallel_plan(plan)
+        segment = plan["segments"][0]
+        with self.assertRaisesRegex(ValueError, "trusted runtime plan hash|contract version"):
+            self.parallel_gate(
+                plan, segment["segment_id"], [], [], plan["route_id"],
+                segment["attempt_id"], trusted_plan_hash=trusted_hash,
+                trusted_contract_version=POLICY.PARALLEL_CONTRACT_VERSION,
+            )
+
+    def test_parallel_v2_requires_runtime_anchor_not_cli_self_attestation(self):
+        plan = POLICY.plan_parallel_segments([
+            self.segment("anchor-check", access_mode="read"),
+        ], current=current())
+        segment = plan["segments"][0]
+        with self.assertRaisesRegex(ValueError, "trusted runtime plan anchor"):
+            POLICY.validate_parallel_envelope(
+                plan, segment["segment_id"], [], [], plan["route_id"],
+                segment["attempt_id"], agent_task_name="anchor_check",
+            )
+
+        envelope = {
+            "plan": plan,
+            "segment_id": segment["segment_id"],
+            "completed_ids": [],
+            "running_ids": [],
+            "route_id": plan["route_id"],
+            "attempt_id": segment["attempt_id"],
+            "parallelism_source": plan["parallel"]["parallelism_source"],
+            "requested_max_parallelism": plan["parallel"]["requested_max_parallelism"],
+            "effective_max_parallelism": plan["parallel"]["effective_max_parallelism"],
+            "agent_task_name": "anchor_check",
+            "dispatch_capacity": {
+                "schema_version": 1,
+                "observation_source": "task-metadata",
+                "capacity_source": "observed-total-slots",
+                "runtime_total_slots": 4,
+                "coordinator_reserved_slots": 1,
+                "runtime_running_workers": 0,
+                "snapshot_scope": "immediate-pre-dispatch",
+            },
+        }
+        completed = subprocess.run(
+            [
+                sys.executable, str(ROOT / "scripts" / "route_policy.py"),
+                "--validate-parallel-envelope-json", json.dumps(envelope),
+            ],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("trusted runtime plan anchor", completed.stderr)
 
     def test_parallel_envelope_rejects_parallelism_source_hash_tampering(self):
         plan = POLICY.plan_parallel_segments(
@@ -859,7 +1269,7 @@ class RoutePolicyTests(unittest.TestCase):
         plan["parallel"]["parallelism_source"] = "standard"
         segment = plan["segments"][0]
         with self.assertRaises(ValueError):
-            POLICY.validate_parallel_envelope(
+            self.parallel_gate(
                 plan, segment["segment_id"], [], [], plan["route_id"],
                 segment["attempt_id"], {
                     "parallelism_source": "standard",
@@ -868,13 +1278,121 @@ class RoutePolicyTests(unittest.TestCase):
                 },
             )
 
+    def test_parallel_envelope_recomputes_all_concurrency_sources(self):
+        standard = POLICY.plan_parallel_segments(
+            self.adaptive_parallel_segments(4), current=current(), runtime_total_slots=5
+        )
+        standard["parallel"]["effective_max_parallelism"] = 1
+        self.rehash_parallel_plan(standard)
+
+        smart = POLICY.plan_parallel_segments(
+            self.adaptive_parallel_segments(3), current=current(), runtime_total_slots=3
+        )
+        smart["parallel"]["effective_max_parallelism"] = 1
+        self.rehash_parallel_plan(smart)
+
+        requested_one = POLICY.plan_parallel_segments(
+            self.adaptive_parallel_segments(4), current=current(),
+            max_parallelism=1, runtime_total_slots=5,
+        )
+        requested_one["parallel"]["effective_max_parallelism"] = 4
+        self.rehash_parallel_plan(requested_one)
+
+        user_capacity_reduced = POLICY.plan_parallel_segments(
+            self.adaptive_parallel_segments(4), current=current(),
+            max_parallelism=2, runtime_total_slots=2,
+        )
+        user_capacity_reduced["parallel"]["effective_max_parallelism"] = 2
+        self.rehash_parallel_plan(user_capacity_reduced)
+
+        for label, plan in (
+            ("standard-4-to-1", standard),
+            ("smart-reduced-not-derived", smart),
+            ("requested-1-effective-4", requested_one),
+            ("user-override-exceeds-capacity", user_capacity_reduced),
+        ):
+            with self.subTest(label=label):
+                segment = plan["segments"][0]
+                with self.assertRaisesRegex(ValueError, "derived capacity"):
+                    self.parallel_gate(
+                        plan, segment["segment_id"], [], [], plan["route_id"],
+                        segment["attempt_id"],
+                    )
+
+    def test_parallel_envelope_requires_positive_integer_concurrency(self):
+        for field, invalid in (
+            ("requested_max_parallelism", 0),
+            ("requested_max_parallelism", True),
+            ("effective_max_parallelism", 0),
+            ("effective_max_parallelism", "4"),
+        ):
+            with self.subTest(field=field, invalid=invalid):
+                plan = POLICY.plan_parallel_segments(
+                    self.adaptive_parallel_segments(4),
+                    current=current(), runtime_total_slots=5,
+                )
+                plan["parallel"][field] = invalid
+                self.rehash_parallel_plan(plan)
+                segment = plan["segments"][0]
+                with self.assertRaisesRegex(ValueError, "must be an integer"):
+                    self.parallel_gate(
+                        plan, segment["segment_id"], [], [], plan["route_id"],
+                        segment["attempt_id"],
+                    )
+
+    def test_parallel_envelope_rejects_rehashed_capacity_evaluation(self):
+        plan = POLICY.plan_parallel_segments(
+            self.adaptive_parallel_segments(4), current=current(), runtime_total_slots=5
+        )
+        plan["parallel"]["capacity_evaluation"]["useful_parallelism"] = 1
+        plan["parallel"]["parallelism_source"] = "smart-reduced"
+        plan["parallel"]["effective_max_parallelism"] = 1
+        plan["parallel"]["reduction_reasons"] = ["dependency-independent-width"]
+        self.rehash_parallel_plan(plan)
+        segment = plan["segments"][0]
+        with self.assertRaisesRegex(ValueError, "capacity evaluation is inconsistent"):
+            self.parallel_gate(
+                plan, segment["segment_id"], [], [], plan["route_id"],
+                segment["attempt_id"],
+            )
+
+    def test_parallel_envelope_rejects_rehashed_runtime_capacity(self):
+        plan = POLICY.plan_parallel_segments(
+            self.adaptive_parallel_segments(4), current=current(), runtime_total_slots=3
+        )
+        plan["parallel"]["available_worker_slots"] = 4
+        plan["parallel"]["effective_max_parallelism"] = 4
+        plan["parallel"]["parallelism_source"] = "standard"
+        plan["parallel"]["reduction_reasons"] = []
+        plan["parallel"]["capacity_observation"]["available_worker_slots"] = 4
+        self.rehash_parallel_plan(plan)
+        segment = plan["segments"][0]
+        with self.assertRaisesRegex(ValueError, "available worker capacity is inconsistent"):
+            self.parallel_gate(
+                plan, segment["segment_id"], [], [], plan["route_id"],
+                segment["attempt_id"],
+            )
+
+    def test_parallel_envelope_rejects_rehashed_capacity_freshness_contract(self):
+        plan = POLICY.plan_parallel_segments(
+            self.adaptive_parallel_segments(4), current=current(), runtime_total_slots=5
+        )
+        plan["parallel"]["capacity_observation"]["freshness_policy"] = "never-refresh"
+        self.rehash_parallel_plan(plan)
+        segment = plan["segments"][0]
+        with self.assertRaisesRegex(ValueError, "capacity observation is inconsistent"):
+            self.parallel_gate(
+                plan, segment["segment_id"], [], [], plan["route_id"],
+                segment["attempt_id"],
+            )
+
     def test_parallel_envelope_requires_matching_concurrency_metadata(self):
         plan = POLICY.plan_parallel_segments([
             self.segment("one", access_mode="read"),
         ], current=current())
         segment = plan["segments"][0]
         with self.assertRaisesRegex(ValueError, "concurrency metadata mismatch"):
-            POLICY.validate_parallel_envelope(
+            self.parallel_gate(
                 plan, "one", [], [], plan["route_id"], segment["attempt_id"],
                 {
                     "parallelism_source": "standard",
@@ -888,19 +1406,26 @@ class RoutePolicyTests(unittest.TestCase):
             self.segment("one", access_mode="read"),
         ], current=current())
         plan["parallel"].pop("parallelism_source")
-        plan["plan_hash"] = POLICY.plan_hash(
-            plan["segments"], plan["route_id"], plan["original"], False,
-            plan["segment_budget"], plan["switch_budget"], plan["budget_source"],
-            plan["routing_evidence"], POLICY.PARALLEL_PROTOCOL, plan["parallel"],
-        )
+        plan["parallel"].pop("capacity_observation")
+        plan["parallel"].pop("dispatch_capacity_policy")
+        plan["parallel"].pop("context_identity_policy")
+        plan["parallel"].pop("scope_security_policy")
+        plan["parallel"].pop("contract_version")
+        for item in plan["segments"]:
+            item.pop("declared_dependencies")
+        # Genuine pre-contract envelopes may carry the ordinal IDs that new
+        # plans reject. Keep them readable without weakening contract v2.
+        plan["segments"][0]["segment_id"] = "segment-1"
+        plan["segments"][0]["source_ids"] = ["segment-1"]
+        plan["parallel"]["priority_order"] = ["segment-1"]
+        plan["parallel"]["initial_frontier"] = ["segment-1"]
+        plan["parallel"]["aggregation_order"] = ["segment-1"]
+        self.rehash_parallel_plan(plan)
         segment = plan["segments"][0]
-        segment["attempt_id"] = POLICY.hashlib.sha256(
-            f"{plan['route_id']}:{plan['plan_hash']}:one".encode("utf-8")
-        ).hexdigest()
-        selected = POLICY.validate_parallel_envelope(
-            plan, "one", [], [], plan["route_id"], segment["attempt_id"]
+        selected = self.parallel_gate(
+            plan, "segment-1", [], [], plan["route_id"], segment["attempt_id"]
         )
-        self.assertEqual(selected["segment_id"], "one")
+        self.assertEqual(selected["segment_id"], "segment-1")
 
     def test_segment_override_wins_when_global_is_absent(self):
         plan = POLICY.plan_apply_segments([

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,38 @@ class LedgerTests(unittest.TestCase):
             "clock_source": LEDGER.PARALLEL_CLOCK_SOURCE,
         }
 
+    def claim_event(self, route_id="route-1", segment_id="one", **overrides):
+        event = {
+            "event": "segment_claim", "route_id": route_id,
+            "plan_hash": "plan-1", "segment_id": segment_id,
+            "attempt_id": f"attempt-{segment_id}", "claim_state": "prepared",
+        }
+        event.update(overrides)
+        return event
+
+    def worker_event(self, event_type, segment_id="one", **overrides):
+        event = {
+            "event": event_type, "route_id": "route-1", "plan_hash": "plan-1",
+            "segment_id": segment_id, "attempt_id": f"attempt-{segment_id}",
+            "monotonic_ns": 1 if event_type == "parallel_worker_start" else 2,
+            "clock_source": LEDGER.PARALLEL_CLOCK_SOURCE,
+            "capture_source": "router-runtime",
+        }
+        event.update(overrides)
+        return event
+
+    def capability_decision(self):
+        return {
+            "schema_version": 1, "verified": True,
+            "source": LEDGER.CAPABILITY_DECISION_SOURCE,
+            "route_id": "route-1", "plan_hash": "plan-1",
+            "segment_id": "one", "attempt_id": "attempt-one",
+            "target_model": "gpt-5.6-sol", "target_effort": "medium",
+            "execution_model": "gpt-5.5", "execution_effort": "medium",
+            "reason": "gpt56-family-unavailable",
+            "availability_complete": True, "available_models": ["gpt-5.5"],
+        }
+
     def test_deduplicates_event_ids(self):
         event = {"event": "skill_run", "event_id": "same", "mode": "query", "analysis_model": "local-script", "effort": "none"}
         self.assertTrue(LEDGER.append_event(self.ledger, event.copy()))
@@ -87,11 +120,25 @@ class LedgerTests(unittest.TestCase):
                 "cumulative_worker_seconds": 288,
                 "peak_concurrency": 3,
             }),
-            "并发：峰值 3｜墙钟：120s｜累计 worker：288s｜有效并发倍率：2.4x｜并发利用率：80%",
+            "并发：峰值 4（含主任务）｜实际用时：2分0秒｜并行任务累计用时：4分48秒｜并行省时估算：58%｜槽位利用：85%",
         )
         self.assertEqual(
             LEDGER.pending_parallel_brief(3, 4),
-            "并发：3/4｜测量：待记录",
+            "并发计划：4 个任务（含主任务）｜测量：待记录",
+        )
+
+    def test_parallel_brief_uses_chinese_rounded_duration_boundaries(self):
+        self.assertEqual(LEDGER._brief_duration(59.5), "1分0秒")
+        self.assertEqual(LEDGER._brief_duration(380.233), "6分20秒")
+        self.assertEqual(LEDGER._brief_duration(905.906), "15分6秒")
+        self.assertEqual(LEDGER._brief_duration(3600.4), "1小时0分0秒")
+        self.assertEqual(
+            LEDGER.parallel_run_brief({
+                "wall_clock_seconds": 380.233,
+                "cumulative_worker_seconds": 905.906,
+                "peak_concurrency": 3,
+            }),
+            "并发：峰值 4（含主任务）｜实际用时：6分20秒｜并行任务累计用时：15分6秒｜并行省时估算：58%｜槽位利用：85%",
         )
 
     def test_replays_anonymized_codex_task_events_into_auditable_intervals(self):
@@ -135,7 +182,7 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(slow_tail["cumulative_worker_seconds"], 30)
         self.assertEqual(
             LEDGER.parallel_run_brief(slow_tail),
-            "并发：峰值 2｜墙钟：20s｜累计 worker：30s｜有效并发倍率：1.5x｜并发利用率：75%",
+            "并发：峰值 3（含主任务）｜实际用时：20秒｜并行任务累计用时：30秒｜并行省时估算：33%｜槽位利用：83%",
         )
 
     def test_interval_metrics_reject_reversed_or_zero_duration(self):
@@ -191,26 +238,33 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(summary["parallel_execution"]["historical_summary"], {
             "count": 1, "wall_clock_seconds": 12.5,
             "cumulative_worker_seconds": 29.0, "peak_concurrency": 3,
+            "visible_peak_concurrency": 4,
             "effective_parallel_factor": 2.32,
-            "parallel_utilization_percent": 77.3,
+            "parallel_time_saving_estimate_percent": 56.9,
+            "leaf_parallel_utilization_percent": 77.3,
+            "parallel_utilization_percent": 83.0,
         })
         self.assertEqual(summary["parallel_execution"]["current_run"], {
             "route_id": "route-1", "schema_version": 2,
             "clock_source": "python-monotonic-ns", "wall_clock_seconds": 12.5,
             "cumulative_worker_seconds": 29.0, "peak_concurrency": 3, "worker_count": 3,
+            "visible_peak_concurrency": 4,
             "outcome": "completed",
             "measurement_boundary": "dispatch-confirmed-to-result-received",
             "timing_provenance": "coordinator-monotonic-v1",
             "effective_parallel_factor": 2.32,
-            "parallel_utilization_percent": 77.3,
+            "parallel_time_saving_estimate_percent": 56.9,
+            "leaf_parallel_utilization_percent": 77.3,
+            "parallel_utilization_percent": 83.0,
         })
         self.assertNotIn("worker_time_compression_percent", json.dumps(summary))
         rendered = LEDGER.render_markdown(summary)
-        self.assertIn("effective parallel factor: 2.32x", rendered)
-        self.assertIn("parallel utilization: 77.3%", rendered)
+        self.assertIn("parallel time-saving estimate: 56.9%", rendered)
+        self.assertIn("slot utilization: 83.0%", rendered)
+        self.assertIn("peak concurrency including main: 4", rendered)
         self.assertIn("Historical verified parallel execution", rendered)
         self.assertIn("Current verified parallel run", rendered)
-        self.assertIn("not serial/parallel speedup", rendered)
+        self.assertIn("not pure model compute or controlled A/B speedup", rendered)
 
     def test_parallel_plan_records_adaptive_concurrency_intent(self):
         plan = {
@@ -302,6 +356,19 @@ class LedgerTests(unittest.TestCase):
                 "worker_intervals": [failed_interval, base["worker_intervals"][1]],
             })
 
+    def test_parallel_execution_terminal_ids_match_complete_intervals(self):
+        base = self.verified_run("route-1", [(0, 10), (0, 10)])
+        identifiers = [item["segment_id"] for item in base["worker_intervals"]]
+        LEDGER.validate_event({
+            **base, "planned_ids": identifiers,
+            "dispatched_ids": identifiers, "skipped_ids": [],
+        })
+        with self.assertRaisesRegex(ValueError, "cover dispatched_ids"):
+            LEDGER.validate_event({
+                **base, "planned_ids": identifiers[:1],
+                "dispatched_ids": identifiers[:1], "skipped_ids": [],
+            })
+
     def test_legacy_parallel_execution_is_readable_but_excluded_from_verified_metrics(self):
         legacy = {
             "event": "parallel_execution", "route_id": "legacy-route",
@@ -317,6 +384,24 @@ class LedgerTests(unittest.TestCase):
         })
         self.assertIn("Excluded from verified metrics: 1", LEDGER.render_markdown(summary))
 
+    def test_verified_parallel_execution_can_upgrade_same_route_from_legacy(self):
+        legacy = {
+            "event": "parallel_execution", "route_id": "upgrade-route",
+            "wall_clock_seconds": 8, "cumulative_worker_seconds": 12,
+            "peak_concurrency": 2, "worker_count": 2,
+            "outcome": "completed", "source": "user-confirmed",
+        }
+        verified = self.verified_run("upgrade-route", [(0, 4), (0, 4)])
+        self.assertTrue(LEDGER.append_event(self.ledger, legacy))
+        self.assertTrue(LEDGER.append_event(self.ledger, verified))
+        self.assertFalse(LEDGER.append_event(self.ledger, verified.copy()))
+        summary = LEDGER.build_summary(
+            *LEDGER.read_events(self.ledger), current_route_id="upgrade-route"
+        )
+        self.assertEqual(summary["parallel_execution"]["legacy_unverified"]["count"], 1)
+        self.assertEqual(summary["parallel_execution"]["historical_summary"]["count"], 1)
+        self.assertEqual(summary["parallel_execution"]["current_run"]["route_id"], "upgrade-route")
+
     def test_parallel_current_run_is_latest_while_historical_summary_aggregates_all_runs(self):
         events = [
             self.verified_run("route-first", [(0, 10), (0, 5)]),
@@ -330,8 +415,11 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(summary["parallel_execution"]["historical_summary"], {
             "count": 2, "wall_clock_seconds": 14,
             "cumulative_worker_seconds": 23, "peak_concurrency": 2,
+            "visible_peak_concurrency": 3,
             "effective_parallel_factor": 1.64,
-            "parallel_utilization_percent": 82.1,
+            "parallel_time_saving_estimate_percent": 39.1,
+            "leaf_parallel_utilization_percent": 82.1,
+            "parallel_utilization_percent": 88.1,
         })
 
     def test_routing_efficiency_records_only_observed_fields(self):
@@ -396,6 +484,7 @@ class LedgerTests(unittest.TestCase):
         command = [
             "claim", "--ledger", str(self.ledger), "--route-id", "route-1",
             "--segment-id", "implement", "--attempt-id", "attempt-1",
+            "--plan-hash", "plan-1",
         ]
         outputs = []
         for _ in range(2):
@@ -409,6 +498,321 @@ class LedgerTests(unittest.TestCase):
         events, warnings = LEDGER.read_events(self.ledger)
         self.assertEqual(warnings, [])
         self.assertEqual([item["event"] for item in events], ["segment_claim"])
+        self.assertEqual(events[0]["claim_state"], "prepared")
+
+    def test_segment_result_atomically_consumes_matching_claim(self):
+        claim = self.claim_event(segment_id="implement", attempt_id="attempt-1")
+        self.assertTrue(LEDGER.append_event(self.ledger, claim))
+        result = {
+            "event": "segment_result", "route_id": "route-1",
+            "plan_hash": "plan-1", "segment_id": "implement",
+            "attempt_id": "attempt-1", "protocol": "segmented-v1",
+            "outcome": "completed",
+        }
+        self.assertTrue(LEDGER.consume_segment_claim(self.ledger, result.copy()))
+        self.assertFalse(LEDGER.consume_segment_claim(self.ledger, result.copy()))
+        with self.assertRaisesRegex(ValueError, "matching segment claim"):
+            LEDGER.consume_segment_claim(self.ledger, {
+                **result, "route_id": "route-2",
+            })
+
+        legacy_ledger = self.root / "legacy-claim.jsonl"
+        legacy_claim = {
+            "event": "segment_claim", "route_id": "legacy-route",
+            "segment_id": "implement", "attempt_id": "legacy-attempt",
+        }
+        legacy_ledger.write_text(json.dumps(legacy_claim) + "\n", encoding="utf-8")
+        self.assertTrue(LEDGER.consume_segment_claim(legacy_ledger, {
+            **result, "route_id": "legacy-route", "plan_hash": "derived-plan",
+            "attempt_id": "legacy-attempt",
+        }))
+
+    def test_finish_transaction_recovers_missing_derivatives_and_rejects_conflict(self):
+        claim = self.claim_event(segment_id="implement", attempt_id="attempt-implement")
+        self.assertTrue(LEDGER.append_event(self.ledger, claim))
+        result = {
+            "event": "segment_result", "route_id": "route-1",
+            "plan_hash": "plan-1", "segment_id": "implement",
+            "attempt_id": "attempt-implement", "protocol": "segmented-v1",
+            "outcome": "completed",
+        }
+        execution = {
+            "event": "execution", "route_id": "route-1", "plan_hash": "plan-1",
+            "segment_id": "implement", "attempt_id": "attempt-implement",
+            "model": "gpt-5.6-terra", "effort": "low", "task_class": "code",
+            "outcome": "completed", "source": "task-metadata",
+            "verification": "deterministic",
+        }
+        metrics = {
+            "event": "routing_efficiency", "route_id": "route-1",
+            "segment_id": "implement", "source": "task-metadata",
+            "tool_round_trips": 2,
+        }
+        stored_result = dict(result)
+        stored_result["finish_payload_hash"] = LEDGER.finish_payload_hash(
+            stored_result, [execution, metrics]
+        )
+        self.assertTrue(LEDGER.append_event(self.ledger, stored_result))
+        recovered = LEDGER.commit_segment_finish(
+            self.ledger, result.copy(), [execution.copy(), metrics.copy()]
+        )
+        self.assertTrue(recovered["recovered"])
+        self.assertTrue(recovered["execution_recorded"])
+        self.assertTrue(recovered["metrics_recorded"])
+        with self.assertRaisesRegex(ValueError, "payload conflicts"):
+            LEDGER.commit_segment_finish(
+                self.ledger, result.copy(), [execution.copy(), {
+                    **metrics, "tool_round_trips": 3,
+                }]
+            )
+
+    def test_finish_transaction_is_retryable_after_fsync_error(self):
+        self.assertTrue(LEDGER.append_event(self.ledger, self.claim_event()))
+        result = {
+            "event": "segment_result", "route_id": "route-1",
+            "plan_hash": "plan-1", "segment_id": "one",
+            "attempt_id": "attempt-one", "protocol": "segmented-v1",
+            "outcome": "completed",
+        }
+        execution = {
+            "event": "execution", "route_id": "route-1", "plan_hash": "plan-1",
+            "segment_id": "one", "attempt_id": "attempt-one",
+            "model": "gpt-5.6-luna", "effort": "low", "task_class": "code",
+            "outcome": "completed", "source": "task-metadata",
+            "verification": "deterministic",
+        }
+        with patch.object(LEDGER.os, "fsync", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                LEDGER.commit_segment_finish(
+                    self.ledger, result.copy(), [execution.copy()]
+                )
+        recovered = LEDGER.commit_segment_finish(
+            self.ledger, result.copy(), [execution.copy()]
+        )
+        self.assertTrue(recovered["recovered"])
+        events, warnings = LEDGER.read_events(self.ledger)
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            [item["event"] for item in events].count("segment_result"), 1
+        )
+        self.assertEqual([item["event"] for item in events].count("execution"), 1)
+
+    def test_failed_worker_finish_latches_route_and_blocks_new_dispatch(self):
+        self.assertTrue(LEDGER.append_event(self.ledger, self.claim_event()))
+        start = self.worker_event("parallel_worker_start")
+        self.assertTrue(LEDGER.append_event(self.ledger, start))
+        self.assertTrue(LEDGER.append_event(self.ledger, self.worker_event(
+            "parallel_worker_finish", outcome="failed",
+        )))
+        events, warnings = LEDGER.read_events(self.ledger)
+        self.assertEqual(warnings, [])
+        latch = [item for item in events if item["event"] == "parallel_stop_latch"]
+        self.assertEqual(len(latch), 1)
+        self.assertEqual(latch[0]["failed_segment_id"], "one")
+        self.assertEqual(
+            latch[0]["event_id"],
+            str(LEDGER.uuid.uuid5(
+                LEDGER.uuid.NAMESPACE_URL,
+                "codex-auto-model-router:parallel_stop_latch:route-1",
+            )),
+        )
+        with self.assertRaisesRegex(ValueError, "failure latch"):
+            LEDGER.prepare_segment_claim(
+                self.ledger, self.claim_event(segment_id="two")
+            )
+        events, _ = LEDGER.read_events(self.ledger)
+        self.assertNotIn(
+            "two", [
+                item.get("segment_id") for item in events
+                if item.get("event") == "segment_claim"
+            ],
+        )
+
+    def test_dispatch_reservation_orders_launch_before_failure_latch(self):
+        def reservation(segment_id):
+            return {
+                "event": "parallel_dispatch_reservation", "route_id": "route-1",
+                "plan_hash": "plan-1", "segment_id": segment_id,
+                "attempt_id": f"attempt-{segment_id}",
+                "reservation_id": f"reservation-{segment_id}",
+                "capture_source": "router-runtime",
+            }
+
+        for identifier in ("one", "two"):
+            claim = self.claim_event(
+                segment_id=identifier, dispatch_reservation_required=True,
+            )
+            self.assertEqual(
+                LEDGER.prepare_segment_claim(
+                    self.ledger, claim, allow_prepared_recovery=True,
+                    reservation_event=reservation(identifier),
+                ),
+                "prepared",
+            )
+        self.assertTrue(LEDGER.append_event(
+            self.ledger, self.worker_event("parallel_worker_start")
+        ))
+        self.assertTrue(LEDGER.append_event(
+            self.ledger,
+            self.worker_event("parallel_worker_finish", outcome="failed"),
+        ))
+        # Segment two was reserved before the latch, so it may still launch
+        # and drain. No Segment three reservation may cross the latch.
+        self.assertTrue(LEDGER.append_event(
+            self.ledger,
+            self.worker_event("parallel_worker_start", segment_id="two", monotonic_ns=3),
+        ))
+        with self.assertRaisesRegex(ValueError, "failure latch"):
+            LEDGER.prepare_segment_claim(
+                self.ledger,
+                self.claim_event(
+                    segment_id="three", dispatch_reservation_required=True,
+                ),
+                reservation_event=reservation("three"),
+            )
+
+    def test_duplicate_worker_finish_cannot_change_outcome_or_create_latch(self):
+        self.assertTrue(LEDGER.append_event(self.ledger, self.claim_event()))
+        self.assertTrue(LEDGER.append_event(
+            self.ledger, self.worker_event("parallel_worker_start")
+        ))
+        self.assertTrue(LEDGER.append_event(
+            self.ledger, self.worker_event("parallel_worker_finish", outcome="completed")
+        ))
+        with self.assertRaisesRegex(ValueError, "outcome conflicts"):
+            LEDGER.append_event(
+                self.ledger, self.worker_event("parallel_worker_finish", outcome="failed")
+            )
+        events, _ = LEDGER.read_events(self.ledger)
+        self.assertNotIn("parallel_stop_latch", [item["event"] for item in events])
+
+        failed_ledger = self.root / "failed-finish.jsonl"
+        self.assertTrue(LEDGER.append_event(failed_ledger, self.claim_event()))
+        self.assertTrue(LEDGER.append_event(
+            failed_ledger, self.worker_event("parallel_worker_start")
+        ))
+        self.assertTrue(LEDGER.append_event(
+            failed_ledger, self.worker_event("parallel_worker_finish", outcome="failed")
+        ))
+        with self.assertRaisesRegex(ValueError, "outcome conflicts"):
+            LEDGER.append_event(
+                failed_ledger, self.worker_event("parallel_worker_finish", outcome="completed")
+            )
+
+    def test_duplicate_failed_finish_repairs_missing_failure_latch(self):
+        self.assertTrue(LEDGER.append_event(self.ledger, self.claim_event()))
+        self.assertTrue(LEDGER.append_event(
+            self.ledger, self.worker_event("parallel_worker_start")
+        ))
+        failed = self.worker_event("parallel_worker_finish", outcome="failed")
+        LEDGER._prepare_event(failed)
+        with self.ledger.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(failed, ensure_ascii=False) + "\n")
+
+        self.assertFalse(LEDGER.append_event(self.ledger, failed.copy()))
+        events, warnings = LEDGER.read_events(self.ledger)
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            len([item for item in events if item["event"] == "parallel_stop_latch"]),
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "failure latch"):
+            LEDGER.prepare_segment_claim(
+                self.ledger, self.claim_event(segment_id="two")
+            )
+
+    def test_prepared_claim_recovery_requires_same_capability_decision(self):
+        claim = self.claim_event(capability_decision_hash="decision-a")
+        self.assertEqual(
+            LEDGER.prepare_segment_claim(
+                self.ledger, claim.copy(), allow_prepared_recovery=True
+            ),
+            "prepared",
+        )
+        self.assertEqual(
+            LEDGER.prepare_segment_claim(
+                self.ledger, claim.copy(), allow_prepared_recovery=True
+            ),
+            "recovered",
+        )
+        with self.assertRaisesRegex(ValueError, "capability decision mismatch"):
+            LEDGER.prepare_segment_claim(
+                self.ledger,
+                {**claim, "capability_decision_hash": "decision-b"},
+                allow_prepared_recovery=True,
+            )
+        with self.assertRaisesRegex(ValueError, "capability decision mismatch"):
+            missing = claim.copy()
+            missing.pop("capability_decision_hash")
+            LEDGER.prepare_segment_claim(
+                self.ledger, missing, allow_prepared_recovery=True
+            )
+
+    def test_unknown_worker_identity_writes_no_event_or_stop_latch(self):
+        self.assertTrue(LEDGER.append_event(self.ledger, self.claim_event()))
+        before, _ = LEDGER.read_events(self.ledger)
+        for event_type in ("parallel_worker_start", "parallel_worker_finish"):
+            event = self.worker_event(
+                event_type, segment_id="typo", attempt_id="typo-attempt",
+            )
+            if event_type == "parallel_worker_finish":
+                event["outcome"] = "failed"
+            with self.assertRaisesRegex(ValueError, "matching prepared claim"):
+                LEDGER.append_event(self.ledger, event)
+        after, _ = LEDGER.read_events(self.ledger)
+        self.assertEqual(before, after)
+        self.assertNotIn("parallel_stop_latch", [item["event"] for item in after])
+
+    def test_legacy_worker_events_remain_readable(self):
+        legacy = self.root / "legacy-workers.jsonl"
+        legacy_events = [
+            {
+                "event": "parallel_worker_start", "route_id": "legacy-route",
+                "segment_id": "one", "monotonic_ns": 1,
+                "clock_source": LEDGER.PARALLEL_CLOCK_SOURCE,
+                "capture_source": "router-runtime",
+            },
+            {
+                "event": "parallel_worker_finish", "route_id": "legacy-route",
+                "segment_id": "one", "monotonic_ns": 2,
+                "clock_source": LEDGER.PARALLEL_CLOCK_SOURCE,
+                "capture_source": "router-runtime", "outcome": "completed",
+            },
+        ]
+        legacy.write_text(
+            "\n".join(json.dumps(item) for item in legacy_events) + "\n",
+            encoding="utf-8",
+        )
+        events, warnings = LEDGER.read_events(legacy)
+        self.assertEqual(events, legacy_events)
+        self.assertEqual(warnings, [])
+
+    def test_new_gpt55_execution_requires_family_unavailable_reason_but_legacy_reads(self):
+        decision = self.capability_decision()
+        event = {
+            "event": "execution", "model": "gpt-5.5", "effort": "medium",
+            "task_class": "code", "outcome": "completed",
+            "source": "task-metadata", "route_id": "route-1",
+            "plan_hash": "plan-1", "segment_id": "one", "attempt_id": "attempt-one",
+            "fallback_from": "gpt-5.6-sol",
+        }
+        with self.assertRaisesRegex(ValueError, "gpt56-family-unavailable"):
+            LEDGER.append_event(self.ledger, event.copy())
+        with self.assertRaisesRegex(ValueError, "capability_decision"):
+            LEDGER.append_event(self.ledger, {
+                **event, "fallback_reason": "gpt56-family-unavailable",
+            })
+        self.assertTrue(LEDGER.append_event(self.ledger, {
+            **event, "fallback_reason": "gpt56-family-unavailable",
+            "capability_decision": decision,
+        }))
+        legacy = self.root / "legacy.jsonl"
+        legacy.write_text(json.dumps({
+            **event, "route_id": "legacy", "segment_id": "old",
+        }) + "\n")
+        events, warnings = LEDGER.read_events(legacy)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(warnings, [])
 
     def test_rejects_empty_segment_identifier(self):
         event = {
@@ -492,6 +896,17 @@ class LedgerTests(unittest.TestCase):
         self.assertIn("after", text)
         self.assertIn("new", text)
         self.assertNotIn("stale", text)
+
+    def test_report_rejects_end_marker_before_start_marker(self):
+        report = self.root / "reversed.md"
+        report.write_text(
+            "<!-- MODEL_USAGE_END -->\nstale\n<!-- MODEL_USAGE_START -->\n"
+        )
+        with self.assertRaisesRegex(SystemExit, "START marker must precede END"):
+            LEDGER.update_report(
+                report,
+                "<!-- MODEL_USAGE_START -->\nnew\n<!-- MODEL_USAGE_END -->",
+            )
 
 
 if __name__ == "__main__":

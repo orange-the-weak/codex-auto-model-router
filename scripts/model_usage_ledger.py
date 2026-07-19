@@ -2,6 +2,7 @@
 """Safely append, aggregate, and render the model-routing usage ledger."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -30,6 +31,7 @@ PARALLEL_MEASUREMENT_BOUNDARIES = ("parallel-run",)
 PARALLEL_SCHEMA_VERSION = 2
 PARALLEL_TIMING_PROVENANCE = "coordinator-monotonic-v1"
 PARALLEL_CLOCK_SOURCE = "python-monotonic-ns"
+ROUTE_CONTRACT_SOURCE = "router-runtime"
 VERIFICATIONS = ("deterministic", "manual", "none", "unknown")
 EFFICIENCY_DURATIONS = (
     "routing_seconds", "queue_wait_seconds", "executor_start_seconds",
@@ -38,6 +40,9 @@ EFFICIENCY_DURATIONS = (
 EFFICIENCY_COUNTS = ("model_round_trips", "tool_round_trips")
 USAGE_START = "<!-- MODEL_USAGE_START -->"
 USAGE_END = "<!-- MODEL_USAGE_END -->"
+GPT56_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+GPT55_MODEL = "gpt-5.5"
+CAPABILITY_DECISION_SOURCE = "capability-interface"
 
 
 def resolve_ledger_path(repository):
@@ -57,22 +62,54 @@ def _brief_number(value, digits):
     return f"{round(value, digits):g}"
 
 
+def _rounded_integer(value):
+    """Round display-only values without changing stored timing precision."""
+    return int(math.floor(value + 0.5))
+
+
+def _brief_duration(seconds):
+    total = _rounded_integer(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}小时{minutes}分{seconds}秒"
+    if minutes:
+        return f"{minutes}分{seconds}秒"
+    return f"{seconds}秒"
+
+
+def parallel_time_saving_estimate(run):
+    """Estimate saved time using concatenated task intervals as a serial proxy.
+
+    This is not controlled serial/parallel A/B evidence. The intervals span
+    dispatch confirmation through result receipt and can include reasoning,
+    tools, and return waiting; they are not pure model-compute measurements.
+    """
+    worker = run["cumulative_worker_seconds"]
+    if worker <= 0:
+        return None
+    return (1 - run["wall_clock_seconds"] / worker) * 100
+
+
 def parallel_run_brief(run):
     wall = run["wall_clock_seconds"]
     worker = run["cumulative_worker_seconds"]
     peak = run["peak_concurrency"]
-    factor = worker / wall if wall > 0 else None
-    utilization = worker * 100 / (peak * wall) if wall > 0 else None
+    visible_peak = peak + 1  # Include the coordinator in user-facing totals.
+    estimate = parallel_time_saving_estimate(run)
+    utilization = (
+        (worker + wall) * 100 / (visible_peak * wall) if wall > 0 else 0
+    )
     return (
-        f"并发：峰值 {peak}｜墙钟：{_brief_number(wall, 3)}s｜"
-        f"累计 worker：{_brief_number(worker, 3)}s｜"
-        f"有效并发倍率：{_brief_number(factor, 2)}x｜"
-        f"并发利用率：{_brief_number(utilization, 1)}%"
+        f"并发：峰值 {visible_peak}（含主任务）｜实际用时：{_brief_duration(wall)}｜"
+        f"并行任务累计用时：{_brief_duration(worker)}｜"
+        f"并行省时估算：{_rounded_integer(estimate) if estimate is not None else 0}%｜"
+        f"槽位利用：{_rounded_integer(utilization)}%"
     )
 
 
 def pending_parallel_brief(effective, requested):
-    return f"并发：{effective}/{requested}｜测量：待记录"
+    return f"并发计划：{effective + 1} 个任务（含主任务）｜测量：待记录"
 
 
 def parallel_metrics_from_intervals(intervals):
@@ -139,7 +176,66 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def validate_event(event):
+def _is_gpt55_model(model):
+    normalized = str(model or "").strip().lower().replace("_", "-")
+    return normalized.startswith("gpt-5.5") or normalized.startswith("gpt 5.5")
+
+
+def capability_decision_hash(decision):
+    encoded = json.dumps(
+        decision, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_capability_decision(decision, identity=None, target=None, execution=None):
+    """Validate identity-bound, pre-execution model availability evidence."""
+    if not isinstance(decision, dict) or decision.get("schema_version") != 1:
+        raise ValueError("GPT-5.5 execution requires capability_decision schema_version=1")
+    if decision.get("verified") is not True or decision.get("source") != CAPABILITY_DECISION_SOURCE:
+        raise ValueError("GPT-5.5 capability_decision must be verified capability-interface evidence")
+    if identity is not None and any(
+        decision.get(field) != expected for field, expected in identity.items()
+    ):
+        raise ValueError("GPT-5.5 capability_decision identity mismatch")
+    if target is not None and (
+        decision.get("target_model") != target[0]
+        or decision.get("target_effort") != target[1]
+    ):
+        raise ValueError("GPT-5.5 capability_decision target mismatch")
+    if execution is not None and (
+        decision.get("execution_model") != execution[0]
+        or decision.get("execution_effort") != execution[1]
+    ):
+        raise ValueError("GPT-5.5 capability_decision execution mismatch")
+    if decision.get("reason") != "gpt56-family-unavailable":
+        raise ValueError("GPT-5.5 capability_decision requires gpt56-family-unavailable")
+
+    complete_surface = decision.get("availability_complete") is True
+    available = decision.get("available_models")
+    complete_surface = complete_surface and isinstance(available, list) and all(
+        isinstance(model, str) and model for model in available
+    )
+    if complete_surface:
+        normalized = {model.strip().lower().replace("_", "-") for model in available}
+        complete_surface = GPT55_MODEL in normalized and not any(
+            model in normalized for model in GPT56_MODELS
+        )
+
+    rejections = decision.get("gpt56_rejections")
+    complete_rejections = isinstance(rejections, dict) and set(rejections) == set(GPT56_MODELS)
+    if complete_rejections:
+        complete_rejections = all(
+            value == "unavailable" for value in rejections.values()
+        )
+    if not (complete_surface or complete_rejections):
+        raise ValueError(
+            "GPT-5.5 capability_decision requires a complete model list or all GPT-5.6 rejections"
+        )
+    return decision
+
+
+def validate_event(event, allow_legacy=False):
     if not isinstance(event, dict):
         raise ValueError("event is not an object")
     event_type = event.get("event")
@@ -163,6 +259,22 @@ def validate_event(event):
             raise ValueError("invalid execution source")
         if event.get("verification", "unknown") not in VERIFICATIONS:
             raise ValueError("invalid execution verification")
+        if _is_gpt55_model(event.get("model")) and not allow_legacy:
+            if event.get("fallback_reason") != "gpt56-family-unavailable":
+                raise ValueError(
+                    "GPT-5.5 execution requires fallback_reason=gpt56-family-unavailable"
+                )
+            identity = {
+                field: event.get(field)
+                for field in ("route_id", "plan_hash", "segment_id", "attempt_id")
+            }
+            if any(not value for value in identity.values()):
+                raise ValueError("GPT-5.5 execution requires complete attempt identity")
+            validate_capability_decision(
+                event.get("capability_decision"), identity=identity,
+                target=(event.get("fallback_from"), event.get("effort")),
+                execution=(event.get("model"), event.get("effort")),
+            )
     elif event_type == "allocation":
         if event.get("basis") not in ("heuristic", "observed", "mixed"):
             raise ValueError("invalid allocation basis")
@@ -175,13 +287,86 @@ def validate_event(event):
             raise ValueError("invalid allocation percentage")
         if abs(sum(values) - 100) > 0.01:
             raise ValueError("allocation percentages must total 100")
+    elif event_type == "route_contract":
+        for identifier in ("route_id", "plan_hash", "protocol"):
+            if not isinstance(event.get(identifier), str) or not event[identifier]:
+                raise ValueError(f"route_contract requires non-empty {identifier}")
+        contract_version = event.get("contract_version")
+        if contract_version is not None and (
+            not isinstance(contract_version, int) or isinstance(contract_version, bool)
+            or contract_version < 1
+        ):
+            raise ValueError("route_contract contract_version must be a positive integer")
+        if event.get("source") != ROUTE_CONTRACT_SOURCE:
+            raise ValueError("route_contract source must be router-runtime")
     elif event_type == "segment_claim":
         for identifier in ("route_id", "segment_id", "attempt_id"):
             if not isinstance(event.get(identifier), str) or not event[identifier]:
                 raise ValueError(f"segment_claim requires non-empty {identifier}")
-    elif event_type in ("parallel_worker_start", "parallel_worker_finish"):
-        for identifier in ("route_id", "segment_id"):
+        if not allow_legacy or "plan_hash" in event:
+            if not isinstance(event.get("plan_hash"), str) or not event["plan_hash"]:
+                raise ValueError("segment_claim requires non-empty plan_hash")
+        if not allow_legacy or "claim_state" in event:
+            if event.get("claim_state") != "prepared":
+                raise ValueError("segment_claim claim_state must be prepared")
+        if "capability_decision_hash" in event and (
+            not isinstance(event["capability_decision_hash"], str)
+            or not event["capability_decision_hash"]
+        ):
+            raise ValueError("segment_claim capability_decision_hash must be non-empty")
+        if "dispatch_reservation_required" in event and not isinstance(
+            event["dispatch_reservation_required"], bool
+        ):
+            raise ValueError("segment_claim dispatch_reservation_required must be boolean")
+    elif event_type == "segment_result":
+        for identifier in (
+            "route_id", "plan_hash", "segment_id", "attempt_id", "protocol",
+        ):
             if not isinstance(event.get(identifier), str) or not event[identifier]:
+                raise ValueError(f"segment_result requires non-empty {identifier}")
+        if event.get("outcome") not in OUTCOMES:
+            raise ValueError("invalid segment_result outcome")
+        if "capability_decision_hash" in event and (
+            not isinstance(event["capability_decision_hash"], str)
+            or not event["capability_decision_hash"]
+        ):
+            raise ValueError("segment_result capability_decision_hash must be non-empty")
+        if "finish_payload_hash" in event and (
+            not isinstance(event["finish_payload_hash"], str)
+            or len(event["finish_payload_hash"]) != 64
+        ):
+            raise ValueError("segment_result finish_payload_hash must be sha256")
+    elif event_type == "parallel_stop_latch":
+        for identifier in ("route_id", "failed_segment_id"):
+            if not isinstance(event.get(identifier), str) or not event[identifier]:
+                raise ValueError(f"parallel_stop_latch requires non-empty {identifier}")
+        if event.get("failure_outcome") not in OUTCOMES[1:]:
+            raise ValueError("parallel_stop_latch requires a non-completed outcome")
+        for identifier in ("plan_hash", "attempt_id"):
+            if not allow_legacy or identifier in event:
+                if not isinstance(event.get(identifier), str) or not event[identifier]:
+                    raise ValueError(f"parallel_stop_latch requires non-empty {identifier}")
+    elif event_type == "parallel_dispatch_reservation":
+        for identifier in (
+            "route_id", "plan_hash", "segment_id", "attempt_id", "reservation_id",
+        ):
+            if not isinstance(event.get(identifier), str) or not event[identifier]:
+                raise ValueError(
+                    f"parallel_dispatch_reservation requires non-empty {identifier}"
+                )
+        if event.get("capture_source") != "router-runtime":
+            raise ValueError("invalid parallel_dispatch_reservation capture_source")
+    elif event_type in ("parallel_worker_start", "parallel_worker_finish"):
+        identifiers = ["route_id", "segment_id"]
+        if not allow_legacy:
+            identifiers.extend(("plan_hash", "attempt_id"))
+        for identifier in identifiers:
+            if not isinstance(event.get(identifier), str) or not event[identifier]:
+                raise ValueError(f"{event_type} requires non-empty {identifier}")
+        for identifier in ("plan_hash", "attempt_id"):
+            if allow_legacy and identifier in event and (
+                not isinstance(event[identifier], str) or not event[identifier]
+            ):
                 raise ValueError(f"{event_type} requires non-empty {identifier}")
         monotonic_ns = event.get("monotonic_ns")
         if not isinstance(monotonic_ns, int) or isinstance(monotonic_ns, bool) or monotonic_ns < 0:
@@ -280,6 +465,41 @@ def validate_event(event):
                 interval["outcome"] != "completed" for interval in intervals
             ):
                 raise ValueError("completed parallel execution contains failed worker")
+            dispatched_ids = event.get("dispatched_ids")
+            skipped_ids = event.get("skipped_ids")
+            if dispatched_ids is not None or skipped_ids is not None:
+                planned_ids = event.get("planned_ids")
+                if (
+                    not isinstance(dispatched_ids, list)
+                    or not isinstance(skipped_ids, list)
+                    or not isinstance(planned_ids, list)
+                ):
+                    raise ValueError(
+                        "parallel execution planned_ids, dispatched_ids, and skipped_ids must be lists"
+                    )
+                if any(
+                    not isinstance(identifier, str) or not identifier
+                    for identifier in planned_ids + dispatched_ids + skipped_ids
+                ):
+                    raise ValueError("invalid parallel execution terminal segment IDs")
+                if (
+                    len(planned_ids) != len(set(planned_ids))
+                    or len(dispatched_ids) != len(set(dispatched_ids))
+                    or len(skipped_ids) != len(set(skipped_ids))
+                ):
+                    raise ValueError("duplicate parallel execution terminal segment ID")
+                if set(dispatched_ids) & set(skipped_ids):
+                    raise ValueError("parallel execution dispatched and skipped IDs overlap")
+                if [
+                    identifier for identifier in planned_ids if identifier in dispatched_ids
+                ] != dispatched_ids or [
+                    identifier for identifier in planned_ids if identifier in skipped_ids
+                ] != skipped_ids or set(planned_ids) != set(dispatched_ids + skipped_ids):
+                    raise ValueError("parallel execution terminal IDs must partition planned_ids")
+                if dispatched_ids != identifiers:
+                    raise ValueError("parallel execution intervals must cover dispatched_ids")
+                if event.get("outcome") == "completed" and skipped_ids:
+                    raise ValueError("completed parallel execution cannot contain skipped_ids")
             derived = parallel_metrics_from_intervals(intervals)
             for field in ("wall_clock_seconds", "cumulative_worker_seconds"):
                 if not math.isclose(event[field], derived[field], abs_tol=1e-9):
@@ -343,7 +563,8 @@ def validate_event(event):
         raise ValueError("segmented execution requires both route_id and segment_id")
     if event_type in (
         "parallel_plan", "parallel_execution", "parallel_worker_start",
-        "parallel_worker_finish", "routing_efficiency",
+        "parallel_worker_finish", "parallel_dispatch_reservation",
+        "parallel_stop_latch", "routing_efficiency", "route_contract",
     ) and not event.get("route_id"):
         raise ValueError(f"{event_type} requires route_id")
     concurrency = event.get("concurrency")
@@ -362,7 +583,7 @@ def load_lines(text, source):
             continue
         try:
             event = json.loads(line)
-            events.append(validate_event(event))
+            events.append(validate_event(event, allow_legacy=True))
         except (json.JSONDecodeError, ValueError) as exc:
             warnings.append(f"skipped invalid event at {source}:{number}: {exc}")
     return events, warnings
@@ -377,21 +598,35 @@ def read_events(path):
     return load_lines(text, path)
 
 
-def append_event(path, event):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if event.get("event") in (
-        "execution", "segment_claim", "parallel_worker_start", "parallel_worker_finish",
+def _prepare_event(event):
+    event_type = event.get("event")
+    if event_type in (
+        "execution", "segment_claim", "segment_result",
+        "parallel_worker_start", "parallel_worker_finish",
+        "parallel_dispatch_reservation",
     ) and event.get("route_id") and event.get("segment_id"):
+        identity_suffix = ""
+        if event_type != "execution" and event.get("plan_hash") and event.get("attempt_id"):
+            identity_suffix = f":{event['plan_hash']}:{event['attempt_id']}"
         event.setdefault("event_id", str(uuid.uuid5(
             uuid.NAMESPACE_URL,
-            f"codex-auto-model-router:{event['event']}:{event['route_id']}:{event['segment_id']}",
+            f"codex-auto-model-router:{event_type}:{event['route_id']}:{event['segment_id']}"
+            f"{identity_suffix}",
         )))
-    elif event.get("event") in ("parallel_plan", "parallel_execution") and event.get("route_id"):
+    elif event_type in (
+        "parallel_plan", "parallel_execution", "parallel_stop_latch",
+        "route_contract",
+    ) and event.get("route_id"):
+        schema_suffix = (
+            ":verified-v2"
+            if event_type == "parallel_execution" and is_verified_parallel_run(event)
+            else ""
+        )
         event.setdefault("event_id", str(uuid.uuid5(
             uuid.NAMESPACE_URL,
-            f"codex-auto-model-router:{event['event']}:{event['route_id']}",
+            f"codex-auto-model-router:{event_type}:{event['route_id']}{schema_suffix}",
         )))
-    elif event.get("event") == "routing_efficiency" and event.get("route_id"):
+    elif event_type == "routing_efficiency" and event.get("route_id"):
         efficiency_kind = (
             "gate-stop" if event.get("state_gate") == "stopped"
             and not any(field in event for field in EFFICIENCY_DURATIONS + EFFICIENCY_COUNTS)
@@ -406,38 +641,392 @@ def append_event(path, event):
         event.setdefault("event_id", str(uuid.uuid4()))
     event.setdefault("timestamp", now())
     validate_event(event)
-    encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    return event
+
+
+def _is_duplicate(existing, event):
+    if any(item.get("event_id") == event["event_id"] for item in existing):
+        return True
+    event_type = event.get("event")
+    if event_type in (
+        "execution", "segment_claim", "segment_result",
+        "parallel_worker_start", "parallel_worker_finish",
+        "parallel_dispatch_reservation",
+    ) and event.get("route_id"):
+        return any(
+            item.get("event") == event_type
+            and item.get("route_id") == event.get("route_id")
+            and item.get("segment_id") == event.get("segment_id")
+            and (
+                event_type == "execution"
+                or (
+                    item.get("plan_hash") == event.get("plan_hash")
+                    and item.get("attempt_id") == event.get("attempt_id")
+                )
+            )
+            for item in existing
+        )
+    if event_type == "parallel_execution" and event.get("route_id"):
+        verified = is_verified_parallel_run(event)
+        return any(
+            item.get("event") == event_type
+            and item.get("route_id") == event.get("route_id")
+            and is_verified_parallel_run(item) == verified
+            for item in existing
+        )
+    if event_type in (
+        "parallel_plan", "parallel_stop_latch", "route_contract",
+    ) and event.get("route_id"):
+        return any(
+            item.get("event") == event_type
+            and item.get("route_id") == event.get("route_id")
+            for item in existing
+        )
+    return False
+
+
+def _failure_latch(event, existing):
+    if (
+        event.get("event") not in ("parallel_worker_finish", "segment_result")
+        or event.get("outcome") == "completed"
+        or (
+            event.get("event") == "segment_result"
+            and event.get("protocol") != "dependency-parallel-v1"
+        )
+    ):
+        return None
+    latch = {
+        "event": "parallel_stop_latch",
+        "route_id": event["route_id"],
+        "plan_hash": event["plan_hash"],
+        "failed_segment_id": event["segment_id"],
+        "attempt_id": event["attempt_id"],
+        "failure_outcome": event["outcome"],
+    }
+    return _prepare_event(latch)
+
+
+def _matching_claim(existing, event):
+    return next((
+        item for item in existing
+        if item.get("event") == "segment_claim"
+        and item.get("route_id") == event.get("route_id")
+        and item.get("plan_hash") == event.get("plan_hash")
+        and item.get("segment_id") == event.get("segment_id")
+        and item.get("attempt_id") == event.get("attempt_id")
+    ), None)
+
+
+def _matching_worker_event(existing, event_type, event):
+    return next((
+        item for item in existing
+        if item.get("event") == event_type
+        and item.get("route_id") == event.get("route_id")
+        and item.get("plan_hash") == event.get("plan_hash")
+        and item.get("segment_id") == event.get("segment_id")
+        and item.get("attempt_id") == event.get("attempt_id")
+    ), None)
+
+
+def _matching_dispatch_reservation(existing, event):
+    return next((
+        item for item in existing
+        if item.get("event") == "parallel_dispatch_reservation"
+        and item.get("route_id") == event.get("route_id")
+        and item.get("plan_hash") == event.get("plan_hash")
+        and item.get("segment_id") == event.get("segment_id")
+        and item.get("attempt_id") == event.get("attempt_id")
+    ), None)
+
+
+def _route_is_latched(existing, event):
+    return any(
+        item.get("event") == "parallel_stop_latch"
+        and item.get("route_id") == event.get("route_id")
+        and item.get("plan_hash", event.get("plan_hash")) == event.get("plan_hash")
+        for item in existing
+    )
+
+
+def _semantic_payload(event):
+    return {
+        key: value for key, value in event.items()
+        if key not in ("event_id", "timestamp")
+    }
+
+
+def _matching_natural_event(existing, event):
+    return next((item for item in existing if _is_duplicate([item], event)), None)
+
+
+def _require_same_payload(existing_event, candidate, label):
+    if _semantic_payload(existing_event) != _semantic_payload(candidate):
+        raise ValueError(f"{label} payload conflicts with recorded event")
+
+
+def finish_payload_hash(result_event, derived_events):
+    payload = {
+        "result": _semantic_payload(result_event),
+        "derived": [_semantic_payload(item) for item in derived_events if item is not None],
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def bind_route_contract(path, event):
+    """Persist one immutable route contract or verify the existing anchor."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_event(event)
     with path.open("a+", encoding="utf-8") as handle:
         with locked_file(handle, exclusive=True):
             handle.seek(0)
             existing_text = handle.read()
             existing, _ = load_lines(existing_text, path)
-            if any(item.get("event_id") == event["event_id"] for item in existing):
+            matching = next((
+                item for item in existing
+                if item.get("event") == "route_contract"
+                and item.get("route_id") == event.get("route_id")
+            ), None)
+            if matching is not None:
+                _require_same_payload(matching, event, "route contract")
                 return False
-            if event.get("event") in (
-                "execution", "segment_claim", "parallel_worker_start", "parallel_worker_finish",
-            ) and event.get("route_id"):
-                if any(
-                    item.get("event") == event.get("event")
+            _write_events(handle, existing_text, [event])
+            return True
+
+
+def route_contract(path, route_id):
+    events, _ = read_events(path)
+    return next((
+        item for item in events
+        if item.get("event") == "route_contract" and item.get("route_id") == route_id
+    ), None)
+
+
+def prepare_segment_claim(
+    path, event, allow_prepared_recovery=False, reservation_event=None,
+):
+    """Atomically create/recover a claim and reserve parallel dispatch."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    event.setdefault("claim_state", "prepared")
+    _prepare_event(event)
+    if reservation_event is not None:
+        _prepare_event(reservation_event)
+    with path.open("a+", encoding="utf-8") as handle:
+        with locked_file(handle, exclusive=True):
+            handle.seek(0)
+            existing_text = handle.read()
+            existing, _ = load_lines(existing_text, path)
+            if _route_is_latched(existing, event):
+                raise ValueError("parallel route dispatch stopped by failure latch")
+            matching = _matching_claim(existing, event)
+            if matching is None:
+                conflicting = any(
+                    item.get("event") == "segment_claim"
                     and item.get("route_id") == event.get("route_id")
                     and item.get("segment_id") == event.get("segment_id")
                     for item in existing
-                ):
-                    return False
-            if event.get("event") in ("parallel_plan", "parallel_execution") and event.get("route_id"):
-                if any(
-                    item.get("event") == event.get("event")
-                    and item.get("route_id") == event.get("route_id")
-                    for item in existing
-                ):
-                    return False
-            handle.seek(0, os.SEEK_END)
-            if existing_text and not existing_text.endswith("\n"):
-                handle.write("\n")
-            handle.write(encoded + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+                )
+                if conflicting:
+                    raise ValueError("segment claim identity conflicts with existing claim")
+                pending = [event]
+                if reservation_event is not None:
+                    pending.append(reservation_event)
+                _write_events(handle, existing_text, pending)
+                return "prepared"
+            if matching.get("capability_decision_hash") != event.get(
+                "capability_decision_hash"
+            ):
+                raise ValueError("recovered segment claim capability decision mismatch")
+            if any(
+                item.get("event") == "segment_result"
+                and item.get("route_id") == event.get("route_id")
+                and item.get("plan_hash") == event.get("plan_hash")
+                and item.get("segment_id") == event.get("segment_id")
+                and item.get("attempt_id") == event.get("attempt_id")
+                for item in existing
+            ):
+                return "consumed"
+            if _matching_worker_event(existing, "parallel_worker_start", event):
+                return "dispatch-confirmed"
+            if reservation_event is not None:
+                matching_reservation = _matching_dispatch_reservation(
+                    existing, reservation_event
+                )
+                if matching_reservation is None:
+                    _write_events(handle, existing_text, [reservation_event])
+                else:
+                    _require_same_payload(
+                        matching_reservation, reservation_event,
+                        "parallel dispatch reservation",
+                    )
+            return "recovered" if allow_prepared_recovery else "already-claimed"
+
+
+def _validate_worker_transition(existing, event):
+    matching_claim = _matching_claim(existing, event)
+    if matching_claim is None:
+        raise ValueError("parallel worker event requires a matching prepared claim")
+    if any(
+        item.get("event") == "segment_result"
+        and item.get("route_id") == event.get("route_id")
+        and item.get("plan_hash") == event.get("plan_hash")
+        and item.get("segment_id") == event.get("segment_id")
+        and item.get("attempt_id") == event.get("attempt_id")
+        for item in existing
+    ):
+        raise ValueError("parallel worker event refers to a consumed claim")
+    if event.get("event") == "parallel_worker_start":
+        reservation = _matching_dispatch_reservation(existing, event)
+        if matching_claim.get("dispatch_reservation_required") and reservation is None:
+            raise ValueError("parallel worker start requires a dispatch reservation")
+        # A reservation is the total-order boundary. A later failure latch may
+        # not cancel work whose dispatch right was already reserved.
+        if _route_is_latched(existing, event) and reservation is None:
+            raise ValueError("parallel route dispatch stopped by failure latch")
+        return
+    if _matching_worker_event(existing, "parallel_worker_start", event) is None:
+        raise ValueError("parallel worker finish requires a matching dispatch-confirmed start")
+
+
+def _write_events(handle, existing_text, events):
+    handle.seek(0, os.SEEK_END)
+    prefix = "\n" if existing_text and not existing_text.endswith("\n") else ""
+    encoded = "\n".join(
+        json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        for event in events
+    )
+    handle.write(prefix + encoded + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def append_event(path, event):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_event(event)
+    with path.open("a+", encoding="utf-8") as handle:
+        with locked_file(handle, exclusive=True):
+            handle.seek(0)
+            existing_text = handle.read()
+            existing, _ = load_lines(existing_text, path)
+            duplicate = _is_duplicate(existing, event)
+            if duplicate and event.get("event") == "parallel_worker_finish":
+                matching = _matching_worker_event(
+                    existing, "parallel_worker_finish", event
+                )
+                if matching is not None and matching.get("outcome") != event.get("outcome"):
+                    raise ValueError("parallel worker finish outcome conflicts with recorded event")
+            if event.get("event") in (
+                "parallel_worker_start", "parallel_worker_finish",
+            ) and not duplicate:
+                _validate_worker_transition(existing, event)
+            pending = [] if duplicate else [event]
+            latch_source = (
+                matching
+                if duplicate
+                and event.get("event") == "parallel_worker_finish"
+                and matching is not None
+                else event
+            )
+            latch = _failure_latch(latch_source, existing + pending)
+            if latch is not None and not _is_duplicate(existing + pending, latch):
+                pending.append(latch)
+            if pending:
+                _write_events(handle, existing_text, pending)
+            return not duplicate
+
+
+def consume_segment_claim(path, result_event, claim_required=True):
+    """Atomically bind one terminal result to one real, unconsumed claim."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_event(result_event)
+    with path.open("a+", encoding="utf-8") as handle:
+        with locked_file(handle, exclusive=True):
+            handle.seek(0)
+            existing_text = handle.read()
+            existing, _ = load_lines(existing_text, path)
+            if _is_duplicate(existing, result_event) or any(
+                item.get("event") == "execution"
+                and item.get("route_id") == result_event["route_id"]
+                and item.get("segment_id") == result_event["segment_id"]
+                for item in existing
+            ):
+                return False
+            if claim_required:
+                matching_claim = next((
+                    item for item in existing
+                    if item.get("event") == "segment_claim"
+                    and item.get("route_id") == result_event["route_id"]
+                    and item.get("segment_id") == result_event["segment_id"]
+                    and item.get("attempt_id") == result_event["attempt_id"]
+                    and item.get("plan_hash", result_event["plan_hash"])
+                    == result_event["plan_hash"]
+                ), None)
+                if matching_claim is None:
+                    raise ValueError("finish requires a matching segment claim")
+                decision_hash = matching_claim.get("capability_decision_hash")
+                if decision_hash != result_event.get("capability_decision_hash"):
+                    raise ValueError("finish capability decision does not match segment claim")
+            pending = [result_event]
+            latch = _failure_latch(result_event, existing + pending)
+            if latch is not None and not _is_duplicate(existing + pending, latch):
+                pending.append(latch)
+            _write_events(handle, existing_text, pending)
     return True
+
+
+def commit_segment_finish(path, result_event, derived_events, claim_required=True):
+    """Recoverably append a terminal result and its deterministic derivatives.
+
+    One lock orders claim consumption, failure latching, and all derivative
+    events. If an OS interruption leaves a prefix on disk, the same payload may
+    be retried to append only missing events; any changed payload is rejected.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    derived_events = [item for item in derived_events if item is not None]
+    result_event = dict(result_event)
+    result_event["finish_payload_hash"] = finish_payload_hash(
+        result_event, derived_events
+    )
+    candidates = [result_event, *derived_events]
+    for candidate in candidates:
+        _prepare_event(candidate)
+    with path.open("a+", encoding="utf-8") as handle:
+        with locked_file(handle, exclusive=True):
+            handle.seek(0)
+            existing_text = handle.read()
+            existing, _ = load_lines(existing_text, path)
+            if claim_required and _matching_claim(existing, result_event) is None:
+                raise ValueError("finish requires a matching segment claim")
+            matching_claim = _matching_claim(existing, result_event)
+            if matching_claim is not None and (
+                matching_claim.get("capability_decision_hash")
+                != result_event.get("capability_decision_hash")
+            ):
+                raise ValueError("finish capability decision does not match segment claim")
+
+            pending = []
+            recorded = {}
+            for candidate in candidates:
+                matching = _matching_natural_event(existing + pending, candidate)
+                if matching is None:
+                    pending.append(candidate)
+                    recorded[candidate["event"]] = True
+                else:
+                    _require_same_payload(matching, candidate, candidate["event"])
+                    recorded[candidate["event"]] = False
+            latch = _failure_latch(result_event, existing + pending)
+            if latch is not None and not _is_duplicate(existing + pending, latch):
+                pending.append(latch)
+            if pending:
+                _write_events(handle, existing_text, pending)
+            return {
+                "result_recorded": recorded.get("segment_result", False),
+                "execution_recorded": recorded.get("execution", False),
+                "metrics_recorded": recorded.get("routing_efficiency", False),
+                "recovered": not recorded.get("segment_result", False),
+            }
 
 
 def proportions(counter):
@@ -516,8 +1105,13 @@ def build_summary(events, warnings, current_route_id=None):
     efficiency_events = [item for item in events if item.get("event") == "routing_efficiency"]
     parallel_wall = sum(item["wall_clock_seconds"] for item in parallel_runs)
     parallel_worker = sum(item["cumulative_worker_seconds"] for item in parallel_runs)
-    parallel_capacity = sum(
-        item["peak_concurrency"] * item["wall_clock_seconds"] for item in parallel_runs
+    leaf_parallel_capacity = sum(
+        item["peak_concurrency"] * item["wall_clock_seconds"]
+        for item in parallel_runs
+    )
+    visible_parallel_capacity = sum(
+        (item["peak_concurrency"] + 1) * item["wall_clock_seconds"]
+        for item in parallel_runs
     )
     current_parallel_event = next(
         (
@@ -543,11 +1137,28 @@ def build_summary(events, warnings, current_route_id=None):
             "wall_clock_seconds": wall,
             "cumulative_worker_seconds": worker,
             "peak_concurrency": current_parallel_event["peak_concurrency"],
+            "visible_peak_concurrency": current_parallel_event["peak_concurrency"] + 1,
             "worker_count": current_parallel_event["worker_count"],
             "outcome": current_parallel_event["outcome"],
             "effective_parallel_factor": round(worker / wall, 2) if wall > 0 else None,
+            "parallel_time_saving_estimate_percent": (
+                round(parallel_time_saving_estimate(current_parallel_event), 1)
+                if worker > 0 else None
+            ),
+            "leaf_parallel_utilization_percent": (
+                round(
+                    worker * 100
+                    / (current_parallel_event["peak_concurrency"] * wall),
+                    1,
+                )
+                if wall > 0 else None
+            ),
             "parallel_utilization_percent": (
-                round(worker * 100 / (current_parallel_event["peak_concurrency"] * wall), 1)
+                round(
+                    (worker + wall) * 100
+                    / ((current_parallel_event["peak_concurrency"] + 1) * wall),
+                    1,
+                )
                 if wall > 0 else None
             ),
         }
@@ -573,10 +1184,26 @@ def build_summary(events, warnings, current_route_id=None):
                 "wall_clock_seconds": round(parallel_wall, 3),
                 "cumulative_worker_seconds": round(parallel_worker, 3),
                 "peak_concurrency": max((item["peak_concurrency"] for item in parallel_runs), default=None),
+                "visible_peak_concurrency": (
+                    max((item["peak_concurrency"] for item in parallel_runs), default=0) + 1
+                    if parallel_runs else None
+                ),
                 "effective_parallel_factor": round(parallel_worker / parallel_wall, 2) if parallel_wall > 0 else None,
+                "parallel_time_saving_estimate_percent": (
+                    round((1 - parallel_wall / parallel_worker) * 100, 1)
+                    if parallel_worker > 0 else None
+                ),
+                "leaf_parallel_utilization_percent": (
+                    round(parallel_worker * 100 / leaf_parallel_capacity, 1)
+                    if leaf_parallel_capacity > 0 else None
+                ),
                 "parallel_utilization_percent": (
-                    round(parallel_worker * 100 / parallel_capacity, 1)
-                    if parallel_capacity > 0 else None
+                    round(
+                        (parallel_worker + parallel_wall) * 100
+                        / visible_parallel_capacity,
+                        1,
+                    )
+                    if visible_parallel_capacity > 0 else None
                 ),
             },
         },
@@ -655,13 +1282,16 @@ def render_markdown(summary):
         "### Historical verified parallel execution",
         "",
         (
-            f"Aggregate of {historical_parallel['count']} verified run(s): wall clock: "
-            f"{historical_parallel['wall_clock_seconds']:g}s; cumulative worker time: "
-            f"{historical_parallel['cumulative_worker_seconds']:g}s; peak concurrency: "
-            f"{historical_parallel['peak_concurrency'] if historical_parallel['peak_concurrency'] is not None else '—'}; effective parallel factor: "
-            f"{historical_parallel['effective_parallel_factor'] if historical_parallel['effective_parallel_factor'] is not None else '—'}x; parallel utilization: "
+            f"Aggregate of {historical_parallel['count']} verified run(s): actual elapsed: "
+            f"{historical_parallel['wall_clock_seconds']:g}s; cumulative parallel-task time: "
+            f"{historical_parallel['cumulative_worker_seconds']:g}s; peak concurrency including main: "
+            f"{historical_parallel['visible_peak_concurrency'] if historical_parallel['visible_peak_concurrency'] is not None else '—'}; parallel time-saving estimate: "
+            f"{historical_parallel['parallel_time_saving_estimate_percent'] if historical_parallel['parallel_time_saving_estimate_percent'] is not None else '—'}%; slot utilization: "
             f"{historical_parallel['parallel_utilization_percent'] if historical_parallel['parallel_utilization_percent'] is not None else '—'}%. "
-            "The factor measures observed work overlap, not serial/parallel speedup."
+            "The estimate is 1 - wall clock / cumulative parallel-task time, using "
+            "dispatch-confirmed-to-result-received task intervals concatenated as a "
+            "serial proxy. It includes reasoning, tools, and result-return waiting; it "
+            "is not pure model compute or controlled A/B speedup."
             if historical_parallel["count"] else
             "Insufficient verified parallel timing data."
         ),
@@ -708,12 +1338,12 @@ def render_markdown(summary):
                 f"v{current_parallel['schema_version']}; measurement boundary: "
                 f"`{current_parallel['measurement_boundary']}`; timing provenance: "
                 f"`{current_parallel['timing_provenance']}`; clock: "
-                f"`{current_parallel['clock_source']}`; wall clock: "
-                f"{current_parallel['wall_clock_seconds']:g}s; cumulative worker time: "
-                f"{current_parallel['cumulative_worker_seconds']:g}s; peak concurrency: "
-                f"{current_parallel['peak_concurrency']}; effective parallel factor: "
-                f"{current_parallel['effective_parallel_factor'] if current_parallel['effective_parallel_factor'] is not None else '—'}x; "
-                f"parallel utilization: {current_parallel['parallel_utilization_percent'] if current_parallel['parallel_utilization_percent'] is not None else '—'}%."
+                f"`{current_parallel['clock_source']}`; actual elapsed: "
+                f"{current_parallel['wall_clock_seconds']:g}s; cumulative parallel-task time: "
+                f"{current_parallel['cumulative_worker_seconds']:g}s; peak concurrency including main: "
+                f"{current_parallel['visible_peak_concurrency']}; parallel time-saving estimate: "
+                f"{current_parallel['parallel_time_saving_estimate_percent'] if current_parallel['parallel_time_saving_estimate_percent'] is not None else '—'}%; "
+                f"slot utilization: {current_parallel['parallel_utilization_percent'] if current_parallel['parallel_utilization_percent'] is not None else '—'}%."
             ),
             "",
         ]
@@ -756,6 +1386,8 @@ def update_report(path, block):
             starts, ends = text.count(USAGE_START), text.count(USAGE_END)
             if starts != ends or starts > 1:
                 raise SystemExit("report has unmatched or duplicate model-usage markers")
+            if starts == 1 and text.index(USAGE_START) > text.index(USAGE_END):
+                raise SystemExit("report model-usage START marker must precede END marker")
             if starts == 1:
                 before = text.split(USAGE_START, 1)[0].rstrip()
                 after = text.split(USAGE_END, 1)[1].lstrip("\n")
@@ -781,7 +1413,8 @@ def record(args):
     if args.duration_seconds is not None and (not math.isfinite(args.duration_seconds) or args.duration_seconds < 0):
         raise SystemExit("duration must be finite and non-negative")
     event = {"event": args.event}
-    for key in ("event_id", "task_id", "route_id", "segment_id", "mode", "analysis_model", "model", "effort",
+    for key in ("event_id", "task_id", "route_id", "plan_hash", "segment_id", "attempt_id",
+                "mode", "analysis_model", "model", "effort",
                 "task_class", "outcome", "source", "fallback_from", "fallback_to",
                 "fallback_reason", "verification", "concurrency"):
         value = getattr(args, key, None)
@@ -789,6 +1422,14 @@ def record(args):
             event[key] = value
     if args.duration_seconds is not None:
         event["duration_seconds"] = args.duration_seconds
+    if args.capability_decision_json is not None:
+        try:
+            decision = json.loads(args.capability_decision_json)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"--capability-decision-json must be a JSON object: {exc}") from exc
+        if not isinstance(decision, dict):
+            raise SystemExit("--capability-decision-json must be a JSON object")
+        event["capability_decision"] = decision
     print(json.dumps({"appended": append_event(args.ledger, event), "event_id": event.get("event_id")}, ensure_ascii=False))
 
 
@@ -870,11 +1511,16 @@ def claim(args):
         "route_id": args.route_id,
         "segment_id": args.segment_id,
         "attempt_id": args.attempt_id,
+        "plan_hash": args.plan_hash,
+        "claim_state": "prepared",
     }
     if args.task_id:
         event["task_id"] = args.task_id
-    claimed = append_event(args.ledger, event)
-    print(json.dumps({"claimed": claimed, "event_id": event.get("event_id")}, ensure_ascii=False))
+    state = prepare_segment_claim(args.ledger, event)
+    print(json.dumps({
+        "claimed": state == "prepared", "claim_state": state,
+        "event_id": event.get("event_id"),
+    }, ensure_ascii=False))
 
 
 def summarize(args):
@@ -907,7 +1553,9 @@ def parser():
     rec.add_argument("--event-id")
     rec.add_argument("--task-id")
     rec.add_argument("--route-id")
+    rec.add_argument("--plan-hash")
     rec.add_argument("--segment-id")
+    rec.add_argument("--attempt-id")
     rec.add_argument("--mode", choices=MODES)
     rec.add_argument("--analysis-model")
     rec.add_argument("--model")
@@ -919,6 +1567,7 @@ def parser():
     rec.add_argument("--fallback-from")
     rec.add_argument("--fallback-to")
     rec.add_argument("--fallback-reason")
+    rec.add_argument("--capability-decision-json")
     rec.add_argument("--duration-seconds", type=float)
     rec.add_argument("--concurrency", type=int, help="Verified active worker count for this Segment")
     rec.set_defaults(func=record)
@@ -970,6 +1619,7 @@ def parser():
     claimer.add_argument("--route-id", required=True)
     claimer.add_argument("--segment-id", required=True)
     claimer.add_argument("--attempt-id", required=True)
+    claimer.add_argument("--plan-hash", required=True)
     claimer.add_argument("--task-id")
     claimer.set_defaults(func=claim)
     report = commands.add_parser("summary")

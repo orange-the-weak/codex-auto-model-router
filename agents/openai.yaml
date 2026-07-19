@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Auto Model Router"
   short_description: "为 GPT-5.6 快速选择模型、推理强度与安全并发上限"
-  default_prompt: "Use $codex-auto-model-router to re-evaluate this request, choose the lowest sufficient GPT-5.6 route, parallelize only independent work, capture worker timing through the coordinator runtime, stop on failure, and report the runtime-generated current-run concurrency brief."
+  default_prompt: "Use $codex-auto-model-router to re-evaluate this request, choose the lowest sufficient GPT-5.6 route, parallelize only independent work within observed free slots, name leaf agents from task content, capture parallel-task timing through the coordinator runtime, stop on failure, and report the runtime-generated current-run concurrency brief."

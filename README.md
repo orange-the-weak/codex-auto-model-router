@@ -19,12 +19,18 @@ Send this in Codex:
 $skill-installer Install Codex Auto Model Router from https://github.com/orange-the-weak/codex-auto-model-router
 ```
 
-Restart Codex afterward. To install all 24 optional custom-agent presets or migrate from the old name:
+Restart Codex afterward. To install all 24 optional custom-agent presets or migrate from the old name, clone the repository and run the installer for your platform:
 
 ```bash
 git clone https://github.com/orange-the-weak/codex-auto-model-router.git
 cd codex-auto-model-router
 ./install.sh
+```
+
+Windows PowerShell:
+
+```powershell
+.\install.ps1
 ```
 
 ## Evidence-backed routing
@@ -50,19 +56,21 @@ For an illustrative mixed workload, the current policy estimates **15–30% fast
 - Re-evaluates every applicable request instead of inheriting the previous route.
 - Uses a one-Segment fast path: a locally matched route skips the full DAG, cursor, replay claim, and Restore chain. Multi-Segment state gates are combined into one `begin` and one `finish` call.
 - Splits analysis, implementation, verification, or review only when different routes materially help.
-- Caps automatic concurrency at 4, then reduces it to useful independent width and observed free workers. Total agent slots reserve the coordinator and subtract running workers.
-- Without observed capacity, dispatches one worker and refills only after another slot is confirmed. Requests above 4 require proven free capacity; no pre-created queue.
+- Caps automatic concurrency at 4 parallel tasks, then reduces it to useful independent width and observed free slots. The coordinator reserves one slot, so a four-slot Codex session normally peaks at three parallel tasks.
+- Counts the coordinator in the visible summary: `Concurrency plan: 4 tasks (including main)`. Internal capacity still remains one coordinator plus three leaf tasks.
+- Without observed capacity, dispatches one task and refills only after another slot is confirmed. Requests above 4 require proven free capacity; no pre-created queue.
 - Uses critical-path-priority wait-any scheduling to reduce tail latency. Compatible short siblings may merge; long tasks split only at real independent boundaries.
-- Keeps the full conversation in the coordinator; workers receive only a bounded context capsule with necessary decisions, scope, acceptance, and immutable IDs.
+- Keeps the full conversation in the coordinator; parallel tasks receive only a bounded context capsule with necessary decisions, scope, acceptance, and immutable IDs.
+- Names each leaf agent from its task content, such as `runtime_ledger_audit`, instead of Router-generated random or ordinal labels. Any extra decorative nickname comes from the Codex client.
 - Requires disjoint write scopes and serializes Git index, lockfiles, project files, migrations, deploy targets, shared simulators, and other mutable resources through conflict keys.
 - Uses a standard 4-segment/4-switch budget, adaptive 6/6 for genuinely complex or large plans, and an explicit hard limit of 8/8. Restore counts as a switch.
 - Keeps fallback inside GPT-5.6: Sol tries Terra then Luna; Terra tries Sol then Luna; Luna tries Terra then Sol. GPT-5.5 is allowed only when the complete 5.6 family is unavailable.
 - Announces the selected model and reasoning once per segment, stops on failure, and restores a verified original GPT-5.6 route once.
 - Records only verified execution in a local JSONL ledger; recommendations never count as observed use.
-- Captures each worker's dispatch-confirmed and result-received boundaries on one coordinator monotonic clock, then derives wall-clock, cumulative worker time, peak concurrency, and utilization. Models never supply timing numbers.
+- Captures each parallel task's dispatch-confirmed and result-received boundaries on one coordinator monotonic clock, then derives actual elapsed time, cumulative parallel-task time, peak concurrency, and slot utilization. Models never supply timing numbers.
 - Keeps older aggregate-only records readable but excludes them from verified history.
 - Tracks verified routing, queue, startup, switch/Restore, useful-execution, round-trip, and state-gate overhead without guessing missing data.
-- Ends each Apply brief with the runtime-generated current-run concurrency line, reproduced verbatim; Query/history is labeled as a historical aggregate. Reliable schema-v2 timing comes only from complete per-worker intervals; otherwise the brief says `测量：待记录`. The overlap factor is not claimed as actual speedup.
+- Ends each Apply brief with the runtime-generated current-run concurrency line, reproduced verbatim; Query/history is labeled as a historical aggregate. Reliable schema-v2 timing comes only from complete per-task intervals; otherwise the brief says `测量：待记录`. `并行省时估算` compares observed overlap with concatenating the same tasks; it is not a controlled A/B speedup result.
 
 ## Use
 
@@ -77,8 +85,8 @@ Example notice:
 
 ```text
 Codex automatic routing | Segment 1/3: Analyze the change | Model: GPT-5.6 Sol | Reasoning: high | High ambiguity
-Codex automatic routing | Parallel plan: 3 tasks | Concurrency: 3/4 | Free workers: 3 | Source: smart-reduced | Critical-path priority
-并发：峰值 3｜墙钟：120s｜累计 worker：288s｜有效并发倍率：2.4x｜并发利用率：80%
+Codex automatic routing | Concurrency plan: 4 tasks (including main) | Source: smart-reduced | Critical-path priority
+并发：峰值 4（含主任务）｜实际用时：2分0秒｜并行任务累计用时：4分48秒｜并行省时估算：58%｜槽位利用：85%
 ```
 
 Reports are written to `docs/codex-model-routing-report.md`; verified usage is stored in `.codex/model-routing-history.jsonl`. The ledger contains routing metadata and outcomes, not prompts, source code, secrets, or conversation text.

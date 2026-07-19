@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -8,6 +10,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def fail(message):
     raise SystemExit(message)
+
+
+gitignore_text = (ROOT / ".gitignore").read_text(encoding="utf-8")
+for ignored_private_output in (
+    "benchmarks/gpt56-matrix/",
+    "docs/xiaohongshu-launch-post/",
+    "README 2.md",
+    "README.zh-CN 2.md",
+):
+    if ignored_private_output not in gitignore_text:
+        fail(f"private or duplicate output is not excluded: {ignored_private_output}")
 
 
 skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
@@ -30,6 +43,8 @@ if "$codex-auto-model-router" not in values.get("default_prompt", ""):
     fail("openai.yaml default prompt does not invoke the skill")
 if "## Visible routing protocol" not in skill_text or "Codex 自动路由｜Segment <index>/<total>：<task segment>" not in skill_text:
     fail("visible routing protocol is missing")
+if "含主任务，先派发" in skill_text:
+    fail("unknown-capacity prompt does not use the unified concurrency plan shape")
 if "## Path dispatch" not in skill_text or "ROUTE_PROJECT_MODELS_EXECUTOR=1`" not in skill_text:
     fail("coordinator/router/executor path dispatch is missing")
 if "## Capability check and Dispatch" not in skill_text or "Never create a new top-level Codex task" not in skill_text:
@@ -45,8 +60,8 @@ for distribution_text, label in (
     if "worker_time_compression_percent" in distribution_text:
         fail(f"obsolete compression wording is exposed in {label}")
 for stable_phrase in (
-    "并发：峰值 <n>｜墙钟：<wall>｜累计 worker：<worker>｜有效并发倍率：<factor>x｜并发利用率：<util>%",
-    "并发：<effective>/<requested>｜测量：待记录",
+    "并发：峰值 <leaf peak + 1>（含主任务）｜实际用时：<h时m分s秒>｜并行任务累计用时：<h时m分s秒>｜并行省时估算：<1 - actual / cumulative>%｜槽位利用：<(cumulative + actual) / ((leaf peak + 1) × actual)>%",
+    "并发计划：<leaf cap + 1> 个任务（含主任务）｜测量：待记录",
     "coordinator's monotonic clock",
     "historical aggregate",
     "Print the returned `parallel_execution_brief` verbatim",
@@ -94,6 +109,8 @@ for parallel_contract in (
     "Automatic planning requests at most 4",
     "Create an executor only after confirming a free slot",
     "End every Apply chat summary with one concise concurrency line",
+    "agent_task_name",
+    "并发计划：<effective + coordinator> 个任务（含主任务）",
 ):
     if parallel_contract not in skill_text:
         fail(f"parallel routing contract is missing: {parallel_contract}")
@@ -107,7 +124,7 @@ for invariant in (
     "GPT-5.5 is legal only after the capability check proves the complete GPT-5.6 family unavailable",
     "A non-5.6 original is audit-only after verified GPT-5.6 execution",
     "`apply-fast-v1` has no cursor",
-    "observed total slots - coordinator - running workers",
+    "observed total slots - coordinator - running tasks",
     "scripts/router_runtime.py begin",
     "context capsule",
 ):
@@ -115,6 +132,9 @@ for invariant in (
         fail(f"state-machine invariant is missing: {invariant}")
 
 ledger_text = (ROOT / "scripts" / "model_usage_ledger.py").read_text(encoding="utf-8")
+ledger_reference = (ROOT / "references" / "usage-ledger.md").read_text(encoding="utf-8")
+if "claim --ledger <path> --route-id <id> --plan-hash <hash> --segment-id <id> --attempt-id <id>" not in ledger_reference:
+    fail("usage ledger claim example is missing required immutable identity")
 if 'MODES = ("assess", "apply", "query", "record", "retune")' not in ledger_text:
     fail("Apply ledger mode is missing")
 if "import msvcrt" not in ledger_text or "import fcntl" not in ledger_text:
@@ -138,6 +158,7 @@ for parallel_ledger_contract in (
     '"parallel_worker_start"',
     '"parallel_worker_finish"',
     'PARALLEL_SCHEMA_VERSION = 2',
+    '"visible_peak_concurrency"',
     '"worker_intervals"',
     '"legacy_unverified"',
     'commands.add_parser("efficiency")',
@@ -153,21 +174,23 @@ for contract in ("CODEX_THREAD_ID", "thread_settings_applied", "turn_context", "
     if contract not in policy_text:
         fail(f"route policy contract is missing: {contract}")
 
-install_text = (ROOT / "install.sh").read_text(encoding="utf-8")
-if 'cp "$ROOT/scripts/"*.py' not in install_text:
-    fail("installer does not copy every bundled policy script")
-if 'cp "$ROOT/references/benchmark-evidence.json"' not in install_text:
-    fail("installer does not copy the benchmark evidence snapshot")
-if 'SKILL_TARGET="$CODEX_HOME/skills/codex-auto-model-router"' not in install_text:
-    fail("installer target does not match the renamed skill")
-if 'LEGACY_SKILL_TARGET="$CODEX_HOME/skills/codex-model-router"' not in install_text:
-    fail("installer does not migrate the legacy skill name")
-if 'project-model-router*.toml' in install_text or 'project-model-executor*.toml' in install_text:
-    fail("installer uses an unsafe broad legacy-agent cleanup glob")
+for installer_name in ("install.sh", "install.ps1"):
+    if not (ROOT / installer_name).is_file():
+        fail(f"missing cross-platform installer: {installer_name}")
+if not (ROOT / "tests" / "test_installation.py").is_file():
+    fail("installer contract test is missing")
+installer_tests = subprocess.run(
+    [sys.executable, "-m", "unittest", "tests/test_installation.py"],
+    cwd=ROOT,
+    text=True,
+    capture_output=True,
+)
+if installer_tests.returncode:
+    fail(f"installer contract tests failed:\n{installer_tests.stdout}\n{installer_tests.stderr}")
 
 preset_mapping = (ROOT / "references" / "preset-mapping.md").read_text(encoding="utf-8")
 parallel_reference = (ROOT / "references" / "parallel-execution.md").read_text(encoding="utf-8")
-for contract in ("dependency-parallel-v1", "wait-any", "stop-dispatch-drain-running", "write_scopes", "conflict_keys", "parallelism_source=standard|smart-reduced|user-override", "observed_total_slots", "coordinator_slots", "bounded context capsule", "parallel_utilization", "without requiring a serial baseline"):
+for contract in ("dependency-parallel-v1", "wait-any", "stop-dispatch-drain-running", "write_scopes", "conflict_keys", "parallelism_source=standard|smart-reduced|user-override", "observed_total_slots", "coordinator_slots", "bounded context capsule", "agent_task_name", "并发计划：<N> 个任务（含主任务）", "并行省时估算", "not a controlled serial A/B speedup"):
     if contract not in parallel_reference:
         fail(f"parallel execution reference is missing: {contract}")
 runtime_text = (ROOT / "scripts" / "router_runtime.py").read_text(encoding="utf-8")
@@ -255,12 +278,30 @@ readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
 if "https://github.com/orange-the-weak/codex-auto-model-router" not in readme_text:
     fail("README install URL does not match the current repository remote")
 
+release_candidates = subprocess.run(
+    ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+    cwd=ROOT,
+    text=True,
+    capture_output=True,
+    check=True,
+).stdout.splitlines()
+local_home_marker = "/Users/" + "yumingcheng/"
+for relative in release_candidates:
+    if relative.startswith("benchmarks/gpt56-matrix/results/") and relative != "benchmarks/gpt56-matrix/results/.gitkeep":
+        fail(f"private benchmark result is a release candidate: {relative}")
+    if relative.startswith("docs/xiaohongshu-launch-post/"):
+        fail(f"unrelated launch content is a release candidate: {relative}")
+    if relative in ("README 2.md", "README.zh-CN 2.md"):
+        fail(f"duplicate top-level README is a release candidate: {relative}")
+    path = ROOT / relative
+    if path.is_file() and local_home_marker in path.read_text(encoding="utf-8", errors="ignore"):
+        fail(f"local absolute path is exposed in release candidate: {relative}")
+
 for forbidden in ("s" + "k-" + "live", "BEGIN " + "PRIVATE KEY", "api" + "_key"):
-    for path in ROOT.rglob("*"):
+    for relative in release_candidates:
+        path = ROOT / relative
         if (
             path.is_file()
-            and ".git" not in path.parts
-            and "__pycache__" not in path.parts
             and path.suffix != ".pyc"
             and forbidden in path.read_text(encoding="utf-8", errors="ignore")
         ):

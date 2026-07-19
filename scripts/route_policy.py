@@ -6,7 +6,9 @@ import hashlib
 import itertools
 import json
 import os
+import posixpath
 import re
+import unicodedata
 import uuid
 from datetime import date, timedelta
 from pathlib import Path
@@ -22,6 +24,10 @@ FAMILY_FALLBACK_ORDER = {
 RUNTIME_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 THREAD_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 SEGMENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+AGENT_TASK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,47}$")
+GENERIC_ORDINAL_SEGMENT_ID_RE = re.compile(
+    r"^(?:segment|worker|task|agent|job)-?\d+$"
+)
 MAX_CANDIDATE_SEGMENTS = 16
 DEFAULT_MAX_SEGMENTS = 4
 DEFAULT_MAX_SWITCHES = 4
@@ -35,6 +41,25 @@ EXTENDED_AUTO_PARALLELISM = 6
 ADAPTIVE_MIN_READY_TASKS = 5
 HARD_MAX_PARALLELISM = MAX_CANDIDATE_SEGMENTS
 DEFAULT_COORDINATOR_SLOTS = 1
+DISPATCH_CAPACITY_POLICY = "immediate-observation-or-single-probe"
+CONTEXT_IDENTITY_POLICY = "agent-task-name-is-normalized-semantic-segment-id"
+SCOPE_SECURITY_POLICY = {
+    "normalization": "unicode-nfc-posix-normpath-casefold",
+    "repository_boundary": "resolved-path-must-remain-under-scope-root",
+    "symlink_policy": "reject-resolved-outside-scope-root",
+}
+PARALLEL_CONTRACT_VERSION = 2
+_TRUSTED_ANCHOR_UNSET = object()
+PARALLEL_FIXED_CONTRACT = {
+    "scheduler": "critical-path-priority-wait-any",
+    "failure_policy": "stop-dispatch-drain-running",
+    "coordinator_owns_frontier": True,
+    "workers_may_delegate": False,
+    "timing_kind": "estimate-only",
+    "context_policy": "bounded-worker-capsule",
+    "context_identity_policy": CONTEXT_IDENTITY_POLICY,
+    "scope_security_policy": SCOPE_SECURITY_POLICY,
+}
 FAST_PROTOCOL = "apply-fast-v1"
 SEGMENTED_PROTOCOL = "segmented-v1"
 PARALLEL_PROTOCOL = "dependency-parallel-v1"
@@ -363,11 +388,9 @@ def recommended_route(
     evidence = evidence or load_benchmark_evidence()
 
     if mode in ("assess", "retune"):
-        if risk == "high" or task_kind == "complex":
-            return "gpt-5.6-sol", "high", "adaptive-default"
-        if risk == "low" and task_kind == "mechanical":
-            return "gpt-5.6-sol", "low", "adaptive-default"
-        return "gpt-5.6-sol", "medium", "default"
+        # Router analysis is intentionally fixed at the user-approved route.
+        # select_route still applies an explicit user override afterwards.
+        return "gpt-5.6-sol", "high", "fixed-analysis-default"
 
     if evidence.get("status") != "active":
         return _legacy_recommended_route(mode, task_kind, risk, size)
@@ -501,6 +524,26 @@ def _optional_segment_list(value, field, segment_id):
     return [item.strip() for item in value]
 
 
+def _validate_parallel_segment_id(value):
+    """Require a stable content-based ID for every parallel leaf task."""
+    if not isinstance(value, str) or not SEGMENT_ID_RE.fullmatch(value):
+        raise ValueError(f"invalid segment_id: {value}")
+    if value.isdigit() or GENERIC_ORDINAL_SEGMENT_ID_RE.fullmatch(value):
+        raise ValueError(
+            "parallel segment_id must be a content-based semantic identifier"
+        )
+    return value
+
+
+def _agent_task_name(segment_id):
+    """Map a semantic Segment ID to Codex's lowercase task-name grammar."""
+    _validate_parallel_segment_id(segment_id)
+    task_name = segment_id.replace("-", "_")
+    if not AGENT_TASK_NAME_RE.fullmatch(task_name):
+        raise ValueError("parallel agent_task_name is not Codex-compatible")
+    return task_name
+
+
 def _merge_adjacent_segments(segments):
     merged = []
     for segment in segments:
@@ -565,11 +608,18 @@ def context_capsule(plan, segment_id):
     )
     if segment is None:
         raise ValueError("context capsule segment is missing")
+    parallel = plan.get("parallel") if isinstance(plan.get("parallel"), dict) else {}
     return {
         "protocol": plan.get("protocol"),
         "route_id": plan.get("route_id"),
         "plan_hash": plan.get("plan_hash"),
         "segment_id": segment_id,
+        # Codex agent tools accept lowercase letters, digits, and underscores.
+        # Keep the name stable and semantic while normalizing the Segment slug.
+        "agent_task_name": _agent_task_name(segment_id),
+        "context_identity_policy": parallel.get(
+            "context_identity_policy", CONTEXT_IDENTITY_POLICY
+        ),
         "attempt_id": segment.get("attempt_id"),
         "model": segment.get("model"),
         "effort": segment.get("effort"),
@@ -580,11 +630,25 @@ def context_capsule(plan, segment_id):
         "access_mode": segment.get("access_mode"),
         "write_scopes": segment.get("write_scopes", []),
         "conflict_keys": segment.get("conflict_keys", []),
+        "scope_security_policy": parallel.get("scope_security_policy"),
         "decisions": segment.get("decisions", []),
         "prohibited_actions": segment.get("prohibited_actions", [
             "do-not-replan", "do-not-delegate", "do-not-touch-out-of-scope-files",
         ]),
     }
+
+
+def validate_context_capsule(plan, capsule):
+    """Reject capsule identity or content tampering against the immutable plan."""
+    if not isinstance(capsule, dict):
+        raise ValueError("context capsule must be an object")
+    segment_id = capsule.get("segment_id")
+    if capsule.get("agent_task_name") != _agent_task_name(segment_id):
+        raise ValueError("context capsule has invalid semantic agent_task_name")
+    expected = context_capsule(plan, segment_id)
+    if capsule != expected:
+        raise ValueError("context capsule does not match the immutable plan")
+    return expected
 
 
 def _bounded_integer(value, field, maximum):
@@ -599,7 +663,57 @@ def _scopes_overlap(left, right):
     return left == right or left.startswith(right + "/") or right.startswith(left + "/")
 
 
-def _normalized_scope_list(value, field, segment_id, required=False):
+def _normalized_scope_item(value, field, segment_id, scope_root):
+    """Canonicalize ownership/conflict tokens before hashing or comparison."""
+    item = unicodedata.normalize("NFC", value.strip().replace("\\", "/"))
+    if "\x00" in item or any(ord(character) < 32 for character in item):
+        raise ValueError(f"segment {segment_id} has invalid {field}")
+    if (
+        item.startswith("/") or item.startswith("//")
+        or re.match(r"^[A-Za-z]:/", item)
+    ):
+        raise ValueError(
+            f"segment {segment_id} {field} must contain repository-relative values"
+        )
+    raw_parts = item.split("/")
+    if ".." in raw_parts:
+        raise ValueError(
+            f"segment {segment_id} {field} cannot traverse outside the repository"
+        )
+    item = posixpath.normpath(item)
+    if item in ("", ".", "..") or item.startswith("../"):
+        raise ValueError(
+            f"segment {segment_id} {field} must contain a concrete relative value"
+        )
+    if field == "write_scopes" and any(character in item for character in "*?[]"):
+        raise ValueError(
+            f"segment {segment_id} {field} must contain concrete repository-relative paths"
+        )
+    if field == "write_scopes":
+        root = Path(scope_root if scope_root is not None else Path.cwd()).resolve()
+        resolved = (root / Path(*item.split("/"))).resolve(strict=False)
+        try:
+            resolved_relative = resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                f"segment {segment_id} {field} resolves outside the repository"
+            ) from exc
+        # Hash and compare the resolved repository-relative ownership path.
+        # This makes an in-repository symlink alias conflict with its real path.
+        item = resolved_relative.as_posix()
+        if item in ("", "."):
+            raise ValueError(
+                f"segment {segment_id} {field} must resolve to a concrete repository path"
+            )
+    # macOS repositories are commonly case-insensitive. Conservatively folding
+    # every ownership token may serialize extra work on case-sensitive hosts,
+    # but it prevents case-only aliases from bypassing conflict checks.
+    return unicodedata.normalize("NFC", item).casefold()
+
+
+def _normalized_scope_list(
+    value, field, segment_id, required=False, scope_root=None,
+):
     if value is None:
         value = []
     if isinstance(value, str):
@@ -610,16 +724,134 @@ def _normalized_scope_list(value, field, segment_id, required=False):
     for item in value:
         if not isinstance(item, str) or not item.strip():
             raise ValueError(f"segment {segment_id} has invalid {field}")
-        item = item.strip().replace("\\", "/").rstrip("/")
-        if field == "write_scopes" and (
-            item.startswith("/") or item in (".", "..") or ".." in item.split("/")
-            or any(character in item for character in "*?[]")
+        result.append(_normalized_scope_item(item, field, segment_id, scope_root))
+    return sorted(set(result))
+
+
+def _validate_parallel_segment_schema(segments, require_semantic_id=False):
+    """Validate the executable task schema independently of the plan hash."""
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("parallel plan has no segments")
+    seen_ids = set()
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            raise ValueError("parallel segment must be an object")
+        segment_id = segment.get("segment_id")
+        if require_semantic_id:
+            segment_id = _validate_parallel_segment_id(segment_id)
+        elif not isinstance(segment_id, str) or not SEGMENT_ID_RE.fullmatch(segment_id):
+            raise ValueError(f"invalid segment_id: {segment_id}")
+        if segment_id in seen_ids:
+            raise ValueError(f"duplicate segment_id: {segment_id}")
+        seen_ids.add(segment_id)
+        if segment.get("index") != index + 1:
+            raise ValueError(f"segment {segment_id} has invalid index")
+
+        dependencies = segment.get("depends_on")
+        if (
+            not isinstance(dependencies, list)
+            or any(not isinstance(item, str) for item in dependencies)
+            or len(set(dependencies)) != len(dependencies)
+            or any(item not in seen_ids - {segment_id} for item in dependencies)
         ):
             raise ValueError(
-                f"segment {segment_id} {field} must contain concrete repository-relative paths"
+                f"segment {segment_id} dependencies must reference unique earlier segments"
             )
-        result.append(item)
-    return sorted(set(result))
+        declared = segment.get("declared_dependencies")
+        if declared is not None and (
+            not isinstance(declared, list)
+            or any(not isinstance(item, str) for item in declared)
+            or len(set(declared)) != len(declared)
+            or any(item not in seen_ids - {segment_id} for item in declared)
+        ):
+            raise ValueError(
+                f"segment {segment_id} declared_dependencies must reference unique earlier segments"
+            )
+
+        if segment.get("task_kind") not in ("mechanical", "ordinary", "complex"):
+            raise ValueError(f"invalid task_kind for segment {segment_id}")
+        if segment.get("risk") not in ("low", "normal", "high"):
+            raise ValueError(f"invalid risk for segment {segment_id}")
+        if segment.get("size") not in ("tiny", "normal", "large"):
+            raise ValueError(f"invalid size for segment {segment_id}")
+        expected_signals = _task_signals(
+            segment["task_kind"], segment["risk"], segment["size"],
+            segment.get("ambiguity"), segment.get("coupling"),
+            segment.get("verification"), segment.get("consequence"),
+            segment.get("prior_failure"),
+        )
+        if any(segment.get(key) != value for key, value in expected_signals.items()):
+            raise ValueError(f"segment {segment_id} has invalid task evidence")
+
+        if segment.get("model") not in MODELS:
+            raise ValueError(f"segment {segment_id} has invalid GPT-5.6 model")
+        if segment.get("effort") not in ("low", "medium", "high", "xhigh"):
+            raise ValueError(f"segment {segment_id} has invalid reasoning effort")
+        if segment.get("work_estimate") not in ("short", "normal", "long"):
+            raise ValueError(f"segment {segment_id} has invalid work_estimate")
+        if segment.get("access_mode") not in ("read", "write"):
+            raise ValueError(f"segment {segment_id} has invalid access_mode")
+        if segment.get("dispatch") != "parallel-executor":
+            raise ValueError(f"segment {segment_id} has invalid dispatch")
+        if _segment_text(
+            segment.get("reason"), "reason", segment_id
+        ) != segment.get("reason"):
+            raise ValueError(f"segment {segment_id} has non-canonical reason")
+
+        if _segment_text(segment.get("goal"), "goal", segment_id) != segment.get("goal"):
+            raise ValueError(f"segment {segment_id} has non-canonical goal")
+        if _segment_list(
+            segment.get("acceptance"), "acceptance", segment_id
+        ) != segment.get("acceptance"):
+            raise ValueError(f"segment {segment_id} has non-canonical acceptance")
+        if _segment_text(
+            segment.get("validation_budget"), "validation_budget", segment_id
+        ) != segment.get("validation_budget"):
+            raise ValueError(f"segment {segment_id} has non-canonical validation_budget")
+        for field in ("decisions", "prohibited_actions"):
+            if _optional_segment_list(
+                segment.get(field), field, segment_id
+            ) != segment.get(field):
+                raise ValueError(f"segment {segment_id} has non-canonical {field}")
+        source_ids = segment.get("source_ids")
+        if not isinstance(source_ids, list) or not source_ids:
+            raise ValueError(f"segment {segment_id} requires source_ids")
+        for source_id in source_ids:
+            if require_semantic_id:
+                _validate_parallel_segment_id(source_id)
+            elif not isinstance(source_id, str) or not SEGMENT_ID_RE.fullmatch(source_id):
+                raise ValueError(f"invalid source segment_id: {source_id}")
+
+        write_scopes = _normalized_scope_list(
+            segment.get("write_scopes"), "write_scopes", segment_id,
+            segment["access_mode"] == "write",
+        )
+        conflict_keys = _normalized_scope_list(
+            segment.get("conflict_keys"), "conflict_keys", segment_id,
+        )
+        if write_scopes != segment.get("write_scopes"):
+            raise ValueError(f"segment {segment_id} has non-canonical write_scopes")
+        if conflict_keys != segment.get("conflict_keys"):
+            raise ValueError(f"segment {segment_id} has non-canonical conflict_keys")
+
+
+def _expected_parallel_conflicts(segments, require_declared_dependencies):
+    """Rebuild conflict serialization from declared dependencies and scopes."""
+    rebuilt = []
+    for segment in segments:
+        declared = segment.get("declared_dependencies")
+        if declared is None:
+            if require_declared_dependencies:
+                raise ValueError("parallel contract requires declared_dependencies")
+            declared = segment.get("depends_on", [])
+        copy = dict(segment)
+        copy["depends_on"] = list(declared)
+        rebuilt.append(copy)
+    serialized = _serialize_parallel_conflicts(rebuilt)
+    expected_dependencies = {
+        item["segment_id"]: item["depends_on"] for item in rebuilt
+    }
+    return expected_dependencies, serialized
 
 
 def _dependency_reachable(by_id, ancestor, descendant, memo):
@@ -800,12 +1032,166 @@ def _parallel_capacity_evaluation(segments, initial_frontier):
     }
 
 
+def _parallel_capacity_observation(
+    capacity_source, runtime_total_slots, coordinator_slots,
+    runtime_running_workers, runtime_max_threads, available_worker_slots,
+):
+    """Describe the immutable planning snapshot without claiming it stays live."""
+    return {
+        "schema_version": 1,
+        "capacity_source": capacity_source,
+        "runtime_total_slots": runtime_total_slots,
+        "coordinator_reserved_slots": coordinator_slots,
+        "runtime_running_workers": runtime_running_workers,
+        "runtime_max_threads": runtime_max_threads,
+        "available_worker_slots": available_worker_slots,
+        "snapshot_scope": "plan-creation",
+        "freshness_policy": "revalidate-before-each-dispatch",
+    }
+
+
+def _validated_parallel_capacity(parallel):
+    """Recompute the available-slot bound from immutable capacity inputs."""
+    capacity_source = parallel.get("capacity_source")
+    runtime_total_slots = parallel.get("runtime_total_slots")
+    runtime_max_threads = parallel.get("runtime_max_threads")
+    coordinator_slots = _bounded_integer(
+        parallel.get("coordinator_reserved_slots"),
+        "coordinator_reserved_slots", 8,
+    )
+    runtime_running_workers = parallel.get("runtime_running_workers")
+    if (
+        not isinstance(runtime_running_workers, int)
+        or isinstance(runtime_running_workers, bool)
+        or runtime_running_workers < 0
+    ):
+        raise ValueError("runtime_running_workers must be a non-negative integer")
+
+    if capacity_source == "observed-total-slots":
+        runtime_total_slots = _bounded_integer(
+            runtime_total_slots, "runtime_total_slots", 64
+        )
+        if runtime_max_threads is not None:
+            raise ValueError("observed total-slot capacity conflicts with runtime_max_threads")
+        available_worker_slots = max(
+            0, runtime_total_slots - coordinator_slots - runtime_running_workers
+        )
+        if parallel.get("runtime_max_threads_source") is not None:
+            raise ValueError("observed total-slot capacity has legacy source metadata")
+    elif capacity_source == "legacy-observed-worker-capacity":
+        if runtime_total_slots is not None or runtime_running_workers != 0:
+            raise ValueError("legacy worker capacity has inconsistent runtime metadata")
+        available_worker_slots = _bounded_integer(
+            runtime_max_threads, "runtime_max_threads", 64
+        )
+        if parallel.get("runtime_max_threads_source") != "runtime-config":
+            raise ValueError("legacy worker capacity source metadata is inconsistent")
+    elif capacity_source == "unverified-dispatch-probe":
+        if (
+            runtime_total_slots is not None
+            or runtime_max_threads is not None
+            or runtime_running_workers != 0
+            or parallel.get("runtime_max_threads_source") is not None
+        ):
+            raise ValueError("unverified capacity probe has observed runtime metadata")
+        available_worker_slots = 1
+    else:
+        raise ValueError("invalid parallel capacity_source")
+
+    if available_worker_slots < 1:
+        raise ValueError("parallel plan has no observed free worker slot")
+    if parallel.get("available_worker_slots") != available_worker_slots:
+        raise ValueError("parallel available worker capacity is inconsistent")
+
+    expected_observation = _parallel_capacity_observation(
+        capacity_source, runtime_total_slots, coordinator_slots,
+        runtime_running_workers, runtime_max_threads, available_worker_slots,
+    )
+    # Older valid envelopes predate this explicit freshness contract.
+    observation = parallel.get("capacity_observation")
+    if observation is not None and observation != expected_observation:
+        raise ValueError("parallel capacity observation is inconsistent")
+    return available_worker_slots
+
+
+def _validated_dispatch_capacity(
+    parallel, running_ids, observation, observation_is_trusted=False,
+):
+    """Return trusted free slots for this dispatch, or authorize one probe."""
+    policy = parallel.get("dispatch_capacity_policy")
+    if policy is None:
+        # Backward compatibility for already-issued envelopes whose immutable
+        # planning snapshot also served as their dispatch-time capacity input.
+        return max(0, parallel["effective_max_parallelism"] - len(running_ids))
+    if policy != DISPATCH_CAPACITY_POLICY:
+        raise ValueError("invalid dispatch capacity policy")
+    if observation is None:
+        if parallel.get("capacity_source") == "unverified-dispatch-probe" and not running_ids:
+            return 1
+        raise ValueError("parallel dispatch requires an immediate capacity observation")
+    if not isinstance(observation, dict):
+        raise ValueError("parallel dispatch capacity observation must be an object")
+    if observation_is_trusted is not True:
+        raise ValueError(
+            "dispatch capacity observation must come from the trusted runtime boundary"
+        )
+    if observation.get("schema_version") != 1:
+        raise ValueError("invalid dispatch capacity observation schema")
+    if observation.get("observation_source") != "task-metadata":
+        raise ValueError("dispatch capacity observation is not trusted task metadata")
+    if observation.get("capacity_source") != "observed-total-slots":
+        raise ValueError("dispatch capacity must use observed total slots")
+    if observation.get("snapshot_scope") != "immediate-pre-dispatch":
+        raise ValueError("dispatch capacity observation is not immediate")
+    coordinator_slots = _bounded_integer(
+        observation.get("coordinator_reserved_slots"),
+        "dispatch coordinator_reserved_slots", 8,
+    )
+    if coordinator_slots != parallel.get("coordinator_reserved_slots"):
+        raise ValueError("dispatch coordinator reservation differs from the plan")
+    total_slots = _bounded_integer(
+        observation.get("runtime_total_slots"), "dispatch runtime_total_slots", 64
+    )
+    running_workers = observation.get("runtime_running_workers")
+    if (
+        not isinstance(running_workers, int) or isinstance(running_workers, bool)
+        or running_workers < 0
+    ):
+        raise ValueError("dispatch runtime_running_workers must be a non-negative integer")
+    if running_workers < len(running_ids):
+        raise ValueError("dispatch capacity omits running plan workers")
+    return max(0, total_slots - coordinator_slots - running_workers)
+
+
+def _validate_parallel_trusted_anchor(
+    plan, contract_version, trusted_plan_hash, trusted_contract_version,
+):
+    """Bind an issued v2 plan to runtime-owned state, not caller JSON."""
+    anchor_supplied = (
+        trusted_plan_hash is not _TRUSTED_ANCHOR_UNSET
+        or trusted_contract_version is not _TRUSTED_ANCHOR_UNSET
+    )
+    if not anchor_supplied:
+        if contract_version == PARALLEL_CONTRACT_VERSION:
+            raise ValueError("parallel v2 dispatch requires a trusted runtime plan anchor")
+        return
+    if (
+        trusted_plan_hash is _TRUSTED_ANCHOR_UNSET
+        or trusted_contract_version is _TRUSTED_ANCHOR_UNSET
+    ):
+        raise ValueError("trusted runtime plan anchor is incomplete")
+    if trusted_plan_hash != plan.get("plan_hash"):
+        raise ValueError("parallel plan differs from the trusted runtime plan hash")
+    if trusted_contract_version != contract_version:
+        raise ValueError("parallel contract version differs from the trusted runtime anchor")
+
+
 def plan_parallel_segments(
     raw_segments, current=None, model_override=None, effort_override=None,
     report_model=None, report_effort=None, max_segments=None, max_switches=None,
     max_parallelism=None, runtime_max_threads=None, runtime_total_slots=None,
     runtime_running_workers=0, coordinator_slots=DEFAULT_COORDINATOR_SLOTS,
-    evidence_path=None,
+    evidence_path=None, scope_root=None,
 ):
     """Create a dependency-aware, wait-any Apply plan without executing it."""
     if not isinstance(raw_segments, list) or not raw_segments:
@@ -851,9 +1237,11 @@ def plan_parallel_segments(
     for index, raw in enumerate(raw_segments):
         if not isinstance(raw, dict):
             raise ValueError(f"segment {index + 1} is not an object")
-        segment_id = raw.get("segment_id") or f"segment-{index + 1}"
-        if not isinstance(segment_id, str) or not SEGMENT_ID_RE.fullmatch(segment_id):
-            raise ValueError(f"invalid segment_id: {segment_id}")
+        if "segment_id" not in raw or raw.get("segment_id") is None:
+            raise ValueError(
+                "dependency-parallel-v1 requires an explicit content-based segment_id"
+            )
+        segment_id = _validate_parallel_segment_id(raw.get("segment_id"))
         if segment_id in seen_ids:
             raise ValueError(f"duplicate segment_id: {segment_id}")
         dependencies = raw.get("depends_on", [])
@@ -883,10 +1271,12 @@ def plan_parallel_segments(
         single["work_estimate"] = work_estimate
         single["access_mode"] = access_mode
         single["write_scopes"] = _normalized_scope_list(
-            raw.get("write_scopes"), "write_scopes", segment_id, access_mode == "write"
+            raw.get("write_scopes"), "write_scopes", segment_id,
+            access_mode == "write", scope_root,
         )
         single["conflict_keys"] = _normalized_scope_list(
-            raw.get("conflict_keys"), "conflict_keys", segment_id
+            raw.get("conflict_keys"), "conflict_keys", segment_id,
+            scope_root=scope_root,
         )
         routed.append(single)
     segments = _merge_short_siblings(routed)
@@ -894,6 +1284,8 @@ def plan_parallel_segments(
         raise ValueError(
             f"Apply plan exceeds the hard limit of {HARD_MAX_SEGMENTS} routed segments after merging"
         )
+    for segment in segments:
+        segment["declared_dependencies"] = list(segment["depends_on"])
     serialized_conflicts = _serialize_parallel_conflicts(segments)
     critical, priority_order, initial_frontier = _critical_path_priorities(segments)
     capacity_evaluation = _parallel_capacity_evaluation(segments, initial_frontier)
@@ -918,8 +1310,16 @@ def plan_parallel_segments(
             raise ValueError(
                 "max_parallelism above four exceeds independent ready-task capacity"
             )
+    # The immutable effective value is a plan cap, not a stale dispatch-time
+    # availability claim. Unknown capacity starts with one safe probe but may
+    # refill up to this cap after an immediate observation proves more slots.
+    plan_capacity_cap = (
+        available_worker_slots
+        if capacity_source != "unverified-dispatch-probe"
+        else HARD_MAX_PARALLELISM
+    )
     effective_parallelism = min(
-        requested_parallelism, available_worker_slots, useful_parallelism
+        requested_parallelism, plan_capacity_cap, useful_parallelism
     )
     if user_parallelism is not None:
         parallelism_source = "user-override"
@@ -928,7 +1328,10 @@ def plan_parallel_segments(
     else:
         parallelism_source = "standard"
     reduction_reasons = []
-    if available_worker_slots < requested_parallelism:
+    if (
+        capacity_source != "unverified-dispatch-probe"
+        and available_worker_slots < requested_parallelism
+    ):
         reduction_reasons.append("runtime-capacity")
     if useful_parallelism < requested_parallelism:
         reduction_reasons.append("dependency-independent-width")
@@ -946,7 +1349,8 @@ def plan_parallel_segments(
         "effort": current.get("effort") if current.get("status") in ("verified", "synthetic") else None,
     }
     parallel = {
-        "scheduler": "critical-path-priority-wait-any",
+        "contract_version": PARALLEL_CONTRACT_VERSION,
+        "scheduler": PARALLEL_FIXED_CONTRACT["scheduler"],
         "parallelism_source": parallelism_source,
         "requested_max_parallelism": requested_parallelism,
         "runtime_total_slots": runtime_total_slots,
@@ -954,6 +1358,11 @@ def plan_parallel_segments(
         "runtime_running_workers": runtime_running_workers,
         "available_worker_slots": available_worker_slots,
         "capacity_source": capacity_source,
+        "dispatch_capacity_policy": DISPATCH_CAPACITY_POLICY,
+        "capacity_observation": _parallel_capacity_observation(
+            capacity_source, runtime_total_slots, coordinator_slots,
+            runtime_running_workers, runtime_max_threads, available_worker_slots,
+        ),
         "runtime_max_threads": runtime_max_threads,
         "runtime_max_threads_source": (
             "runtime-config" if runtime_max_threads is not None else None
@@ -967,11 +1376,13 @@ def plan_parallel_segments(
         "initial_frontier": initial_frontier,
         "aggregation_order": [item["segment_id"] for item in segments],
         "serialized_conflicts": serialized_conflicts,
-        "failure_policy": "stop-dispatch-drain-running",
-        "coordinator_owns_frontier": True,
-        "workers_may_delegate": False,
-        "timing_kind": "estimate-only",
-        "context_policy": "bounded-worker-capsule",
+        "failure_policy": PARALLEL_FIXED_CONTRACT["failure_policy"],
+        "coordinator_owns_frontier": PARALLEL_FIXED_CONTRACT["coordinator_owns_frontier"],
+        "workers_may_delegate": PARALLEL_FIXED_CONTRACT["workers_may_delegate"],
+        "timing_kind": PARALLEL_FIXED_CONTRACT["timing_kind"],
+        "context_policy": PARALLEL_FIXED_CONTRACT["context_policy"],
+        "context_identity_policy": PARALLEL_FIXED_CONTRACT["context_identity_policy"],
+        "scope_security_policy": dict(SCOPE_SECURITY_POLICY),
     }
     result = {
         "route_id": route_id, "mode": "apply", "protocol": PARALLEL_PROTOCOL,
@@ -1005,15 +1416,36 @@ def plan_parallel_segments(
 
 def validate_parallel_envelope(
     plan, segment_id, completed_ids, running_ids, route_id, attempt_id,
-    envelope_parallelism=None,
+    envelope_parallelism=None, dispatch_capacity=None, agent_task_name=None,
+    *, trusted_plan_hash=_TRUSTED_ANCHOR_UNSET,
+    trusted_contract_version=_TRUSTED_ANCHOR_UNSET,
+    dispatch_capacity_trusted=False,
 ):
     if not isinstance(plan, dict) or plan.get("protocol") != PARALLEL_PROTOCOL:
         raise ValueError("invalid parallel plan protocol")
     if route_id != plan.get("route_id"):
         raise ValueError("envelope route_id mismatch")
     segments = plan.get("segments")
-    if not isinstance(segments, list) or not segments:
-        raise ValueError("parallel plan has no segments")
+    parallel = plan.get("parallel")
+    if not isinstance(parallel, dict):
+        raise ValueError("parallel plan metadata is missing")
+    contract_version = parallel.get("contract_version")
+    if contract_version not in (None, PARALLEL_CONTRACT_VERSION):
+        raise ValueError("unsupported parallel contract version")
+    _validate_parallel_trusted_anchor(
+        plan, contract_version, trusted_plan_hash, trusted_contract_version,
+    )
+    if contract_version is None and any(
+        parallel.get(field) is not None
+        for field in (
+            "dispatch_capacity_policy", "context_identity_policy",
+            "scope_security_policy", "capacity_observation",
+        )
+    ):
+        raise ValueError("legacy parallel envelope contains v2-only contract fields")
+    _validate_parallel_segment_schema(
+        segments, require_semantic_id=contract_version == PARALLEL_CONTRACT_VERSION,
+    )
     by_id = {item.get("segment_id"): item for item in segments}
     if segment_id not in by_id:
         raise ValueError("parallel segment is missing")
@@ -1037,9 +1469,54 @@ def validate_parallel_envelope(
         raise ValueError("parallel segment dependencies are incomplete")
     if segment_id in completed_ids or segment_id in running_ids:
         raise ValueError("parallel segment was already dispatched")
-    parallel = plan.get("parallel")
-    if not isinstance(parallel, dict):
-        raise ValueError("parallel plan metadata is missing")
+    for field in (
+        "scheduler", "failure_policy", "coordinator_owns_frontier",
+        "workers_may_delegate", "timing_kind", "context_policy",
+    ):
+        value = parallel.get(field)
+        if (
+            contract_version == PARALLEL_CONTRACT_VERSION
+            and value != PARALLEL_FIXED_CONTRACT[field]
+        ) or (
+            contract_version is None and value is not None
+            and value != PARALLEL_FIXED_CONTRACT[field]
+        ):
+            raise ValueError(f"invalid parallel {field}")
+    for field in ("context_identity_policy", "scope_security_policy"):
+        value = parallel.get(field)
+        if value is not None and value != PARALLEL_FIXED_CONTRACT[field]:
+            raise ValueError(f"invalid parallel {field}")
+        if contract_version == PARALLEL_CONTRACT_VERSION and value is None:
+            raise ValueError(f"parallel contract is missing {field}")
+    if (
+        contract_version == PARALLEL_CONTRACT_VERSION
+        and parallel.get("dispatch_capacity_policy") != DISPATCH_CAPACITY_POLICY
+    ):
+        raise ValueError("invalid dispatch capacity policy")
+
+    expected_dependencies, expected_serialized = _expected_parallel_conflicts(
+        segments, contract_version == PARALLEL_CONTRACT_VERSION,
+    )
+    if contract_version == PARALLEL_CONTRACT_VERSION:
+        if any(
+            item["depends_on"] != expected_dependencies[item["segment_id"]]
+            for item in segments
+        ):
+            raise ValueError("parallel conflict dependencies are inconsistent")
+        if parallel.get("serialized_conflicts") != expected_serialized:
+            raise ValueError("parallel serialized_conflicts are inconsistent")
+    else:
+        # Old envelopes did not retain declared dependencies. They cannot
+        # reproduce the exact explanatory list, but every scope/key conflict
+        # must still be ordered in the executable graph.
+        for later_index, later in enumerate(segments):
+            for earlier in segments[:later_index]:
+                if not _parallel_segments_conflict(earlier, later):
+                    continue
+                if not _dependency_reachable(
+                    by_id, earlier["segment_id"], later["segment_id"], {},
+                ):
+                    raise ValueError("legacy parallel conflict is not serialized")
     parallelism_source = parallel.get("parallelism_source")
     if parallelism_source is not None and parallelism_source not in (
         "standard", "smart-reduced", "adaptive-extended", "user-override"
@@ -1047,34 +1524,91 @@ def validate_parallel_envelope(
         raise ValueError("invalid parallelism_source")
     requested_parallelism = parallel.get("requested_max_parallelism")
     effective_parallelism = parallel.get("effective_max_parallelism")
-    if parallelism_source == "standard" and requested_parallelism != DEFAULT_AUTO_PARALLELISM:
-        raise ValueError("standard parallelism must request four workers")
+    requested_parallelism = _bounded_integer(
+        requested_parallelism, "requested_max_parallelism", HARD_MAX_PARALLELISM
+    )
+    effective_parallelism = _bounded_integer(
+        effective_parallelism, "effective_max_parallelism", HARD_MAX_PARALLELISM
+    )
+    identity_policy = parallel.get("context_identity_policy")
+    if identity_policy == CONTEXT_IDENTITY_POLICY:
+        expected_agent_task_name = _agent_task_name(segment_id)
+        if agent_task_name is not None and agent_task_name != expected_agent_task_name:
+            raise ValueError("agent_task_name must match the semantic Segment task name")
+    if identity_policy == CONTEXT_IDENTITY_POLICY and agent_task_name is None:
+        raise ValueError("parallel envelope is missing agent_task_name")
+
+    try:
+        critical, expected_priority, expected_frontier = _critical_path_priorities(segments)
+    except (KeyError, RecursionError) as exc:
+        raise ValueError("parallel dependency metadata is invalid") from exc
+    if parallel.get("priority_order") != expected_priority:
+        raise ValueError("parallel priority order is inconsistent")
+    if parallel.get("initial_frontier") != expected_frontier:
+        raise ValueError("parallel initial frontier is inconsistent")
+    if any(
+        item.get("critical_path_work") != critical.get(item.get("segment_id"))
+        for item in segments
+    ):
+        raise ValueError("parallel critical-path metadata is inconsistent")
+    expected_capacity = _parallel_capacity_evaluation(segments, expected_frontier)
+    if parallel.get("capacity_evaluation") != expected_capacity:
+        raise ValueError("parallel capacity evaluation is inconsistent")
+    if (
+        parallel.get("available_task_count") != len(segments)
+        or parallel.get("model_segment_count") != len(segments)
+    ):
+        raise ValueError("parallel task-count metadata is inconsistent")
+    if parallel.get("aggregation_order") != [item.get("segment_id") for item in segments]:
+        raise ValueError("parallel aggregation order is inconsistent")
+
+    available_slots = _validated_parallel_capacity(parallel)
+    useful_parallelism = expected_capacity["useful_parallelism"]
+    plan_capacity_cap = (
+        available_slots
+        if parallel.get("capacity_source") != "unverified-dispatch-probe"
+        else HARD_MAX_PARALLELISM
+    )
+    derived_effective = min(
+        requested_parallelism, plan_capacity_cap, useful_parallelism
+    )
+    if effective_parallelism != derived_effective:
+        raise ValueError("parallel effective concurrency does not match derived capacity")
+    if parallelism_source == "standard" and (
+        requested_parallelism != DEFAULT_AUTO_PARALLELISM
+        or effective_parallelism != DEFAULT_AUTO_PARALLELISM
+    ):
+        raise ValueError("standard parallelism must request and use four workers")
     if parallelism_source == "smart-reduced" and (
         requested_parallelism != DEFAULT_AUTO_PARALLELISM
-        or not isinstance(effective_parallelism, int)
         or not 1 <= effective_parallelism < DEFAULT_AUTO_PARALLELISM
     ):
-        raise ValueError("smart-reduced parallelism must reduce the default four")
+        raise ValueError("smart-reduced parallelism must precisely reduce the default four")
     if parallelism_source == "adaptive-extended" and (
         requested_parallelism != EXTENDED_AUTO_PARALLELISM
         or parallel.get("adaptive_evaluation", {}).get("eligible") is not True
     ):
         raise ValueError("adaptive parallelism lacks deterministic benefit evidence")
     if parallelism_source == "user-override":
-        _bounded_integer(requested_parallelism, "requested_max_parallelism", HARD_MAX_PARALLELISM)
-        capacity = parallel.get("capacity_evaluation")
-        if requested_parallelism > DEFAULT_AUTO_PARALLELISM and capacity is not None:
+        if requested_parallelism > DEFAULT_AUTO_PARALLELISM:
             if parallel.get("capacity_source") not in (
                 "observed-total-slots", "legacy-observed-worker-capacity"
             ) and parallel.get("runtime_max_threads_source") != "runtime-config":
                 raise ValueError("parallel override above four lacks observed runtime capacity")
-            available_slots = parallel.get(
-                "available_worker_slots", parallel.get("runtime_max_threads", 0)
-            )
             if available_slots < requested_parallelism:
                 raise ValueError("parallel override above four exceeds runtime capacity")
-            if capacity.get("useful_parallelism", 0) < requested_parallelism:
+            if useful_parallelism < requested_parallelism:
                 raise ValueError("parallel override above four exceeds useful task capacity")
+    expected_reductions = []
+    if (
+        parallel.get("capacity_source") != "unverified-dispatch-probe"
+        and available_slots < requested_parallelism
+    ):
+        expected_reductions.append("runtime-capacity")
+    if useful_parallelism < requested_parallelism:
+        expected_reductions.append("dependency-independent-width")
+    if parallel.get("reduction_reasons") != expected_reductions:
+        raise ValueError("parallel reduction metadata is inconsistent")
     if envelope_parallelism is not None:
         expected_envelope = {
             "parallelism_source": parallelism_source,
@@ -1089,8 +1623,13 @@ def validate_parallel_envelope(
         if identifier not in completed_ids and identifier not in running_ids
         and all(dependency in completed_ids for dependency in by_id[identifier]["depends_on"])
     ]
-    if len(running_ids) >= parallel.get("effective_max_parallelism", 0):
+    if len(running_ids) >= effective_parallelism:
         raise ValueError("parallel plan has no available worker slot")
+    immediate_free_slots = _validated_dispatch_capacity(
+        parallel, running_ids, dispatch_capacity, dispatch_capacity_trusted
+    )
+    if immediate_free_slots < 1:
+        raise ValueError("parallel dispatch has no observed free worker slot")
     expected = ready[0] if ready else None
     if expected is None or segment_id != expected:
         raise ValueError("parallel segment is not the deterministic frontier priority")
@@ -1507,6 +2046,10 @@ def parser():
     root.add_argument("--runtime-total-slots", type=int, help="Observed total slots including this coordinator")
     root.add_argument("--runtime-running-workers", type=int, default=0, help="Workers already occupying observed slots")
     root.add_argument("--coordinator-slots", type=int, default=DEFAULT_COORDINATOR_SLOTS)
+    root.add_argument(
+        "--scope-root", type=Path,
+        help="Repository root used to reject write-scope symlink escapes",
+    )
     root.add_argument("--context-capsule-segment", help="Emit bounded worker context for this segment")
     root.add_argument("--validate-envelope-json", help="JSON object containing plan, cursor, segment_id, and completed_ids")
     root.add_argument("--validate-fast-envelope-json", help="Compact one-Segment continuation envelope")
@@ -1567,6 +2110,8 @@ def main():
                     "requested_max_parallelism": envelope.get("requested_max_parallelism"),
                     "effective_max_parallelism": envelope.get("effective_max_parallelism"),
                 } if envelope.get("plan", {}).get("parallel", {}).get("parallelism_source") is not None else None,
+                envelope.get("dispatch_capacity"),
+                envelope.get("agent_task_name"),
             )
         except (json.JSONDecodeError, AttributeError, ValueError) as exc:
             raise SystemExit(f"invalid parallel envelope: {exc}") from exc
@@ -1598,6 +2143,7 @@ def main():
         args.max_segments is not None or args.max_switches is not None
         or args.parallel or args.max_parallelism is not None or args.runtime_max_threads is not None
         or args.runtime_total_slots is not None or args.runtime_running_workers != 0
+        or args.scope_root is not None
     ):
         raise SystemExit("segment budget and parallel options require --segments-json")
     try:
@@ -1642,6 +2188,7 @@ def main():
                 planner_options["runtime_total_slots"] = args.runtime_total_slots
                 planner_options["runtime_running_workers"] = args.runtime_running_workers
                 planner_options["coordinator_slots"] = args.coordinator_slots
+                planner_options["scope_root"] = args.scope_root
             route = planner(raw_segments, **planner_options)
             if args.context_capsule_segment:
                 print(json.dumps(

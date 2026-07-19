@@ -2,7 +2,7 @@
 
 Use this reference to choose the lowest sufficient Codex model and reasoning effort. Task evidence comes first; the versioned offline prior in [benchmark-evidence.md](benchmark-evidence.md) breaks ties and calibrates effort. It expires after 90 days and never creates a runtime network dependency.
 
-These criteria primarily route follow-on execution tasks. For the assessment itself, default to `GPT-5.6 Sol` / `medium`, honor the user's model or effort override, and otherwise select `low`, `medium`, `high`, or `xhigh` using the task-difficulty rules and exact presets in `SKILL.md`.
+These criteria primarily route follow-on execution tasks. Assess and Retune default to `GPT-5.6 Sol` / `high` for stable policy analysis; an explicit user model or effort override still wins.
 
 ## Model tiers
 

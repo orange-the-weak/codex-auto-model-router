@@ -21,19 +21,20 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 - The bundled benchmark snapshot is an offline, stale-aware prior. Its audit metadata is immutable in new plans and covered by `plan_hash`; legacy envelopes without that field remain valid. Missing, invalid, or expired evidence falls back without a network request.
 - The standard budget is 4/4, eligible complex or large plans may expand to 6/6, and explicit user budgets may reach the absolute 8/8 hard limit. Switch counts include final Restore.
 - Dispatch performs at most one same-task continuation per segment boundary and at most one explicitly model-selectable subagent fallback per segment.
-- Availability fallback stays inside GPT-5.6 while Sol, Terra, or Luna is selectable. GPT-5.5 is legal only after the capability check proves the complete GPT-5.6 family unavailable.
+- Availability fallback stays inside GPT-5.6 while Sol, Terra, or Luna is selectable. Every non-target route uses a verified capability decision bound to the complete attempt identity. GPT-5.5 is legal only after the capability check proves the complete GPT-5.6 family unavailable; a reason string alone never authorizes it.
 - Only reliable task metadata or explicit user confirmation establishes actual model identity.
 - Never make a persistent same-task switch when the original model or effort is unknown.
 - A failed segment stops the plan. Never retry by cycling through routes or re-planning.
 - A verified GPT-5.6 original remains immutable across intermediate switches. Make one Restore attempt only when that original is Sol, Terra, or Luna and the final/failed Segment is not already on it. A non-5.6 original is audit-only after verified GPT-5.6 execution.
 - `RETURN` is terminal and cannot execute or advance a segment.
 - Report or ledger persistence failure does not invalidate otherwise completed work.
-- Parallel execution has an automatic ceiling of 4. Effective workers are `min(requested, useful independent width, observed total slots - coordinator - running workers)`. A documented/default thread limit is not live capacity. Without observed capacity, dispatch one worker and probe/refill; never pre-create a queue. A user request above 4 requires matching observed free slots and useful width.
-- The Coordinator calls `router_runtime.py worker-start` after each dispatch confirmation and `worker-finish` after each result receipt. The runtime captures a shared monotonic clock; callers never supply time values.
-- A terminal `finish` derives every aggregate from complete per-worker intervals and appends one schema-v2 `parallel_execution`; incomplete evidence remains `pending`, and legacy aggregate-only records stay outside verified history.
+- Parallel execution has an automatic ceiling of 4 leaf tasks. The capacity rule is `observed total slots - coordinator - running tasks`, applied globally; effective concurrency is the minimum of requested concurrency, useful independent width, and that free capacity. Four total slots normally mean one coordinator plus a peak of three leaf tasks; the visible chat combines these as `并发计划：4 个任务（含主任务）`. A documented/default thread limit is not live capacity. Store only the dispatch-capacity policy in `plan_hash`; immediately before every dispatch, the runtime boundary supplies a trusted capacity observation independently of the caller envelope. A JSON field that labels itself `task-metadata` is not proof. Without observed capacity, dispatch one task as a probe, then require a runtime observation before refill. A user request above 4 requires matching observed free slots and useful width.
+- The Coordinator calls `router_runtime.py worker-start` after each dispatch confirmation and `worker-finish` after each result receipt, always with matching route/plan/segment/attempt identity. The runtime captures a shared monotonic clock; callers never supply time values. A prepared parallel claim may be recovered only until dispatch confirmation.
+- A terminal `finish` consumes the matching claim through one atomic `segment_result`, derives frontier/cursor state from ledger results, and derives every parallel aggregate from complete per-task intervals. Caller-supplied completion state is never authoritative; incomplete evidence remains `pending`, and legacy aggregate-only records stay outside verified history.
 - The coordinator prints the returned `parallel_execution_brief` verbatim and never recomputes its values.
-- The parallel Coordinator exclusively owns the frontier, dispatch, wait-any loop, failure state, and deterministic aggregation. `stop-dispatch-drain-running` starts no new work after the first failure but waits for already active workers.
-- Parallel write tasks declare concrete `write_scopes`; overlapping write scopes and shared `conflict_keys` add dependencies and degrade to serial. The complete DAG, routes, estimates, scopes, conflict keys, `parallelism_source`, requested/effective concurrency, scheduler, aggregation order, and failure policy are covered by `plan_hash` and echoed in worker envelopes. Legacy parallel plans without the source remain valid.
+- The parallel Coordinator exclusively owns the frontier, dispatch, wait-any loop, failure state, and deterministic aggregation. The first failure atomically writes a route-level stop latch; `stop-dispatch-drain-running` then rejects new claims while allowing already active tasks to finish.
+- Parallel write tasks declare concrete `write_scopes`; resolve every scope to its real repository-relative path before hashing and comparison, so a symlink alias and its target conflict. Escapes are rejected. Overlapping write scopes and shared `conflict_keys` add dependencies and degrade to serial. Contract-v2 plans retain pre-conflict `declared_dependencies`; the receiver rebuilds conflict dependencies and `serialized_conflicts`, validates fixed scheduler/failure/delegation/ownership/security semantics, and accepts only GPT-5.6 Sol/Terra/Luna with a routed effort. The complete DAG and protocol metadata remain covered by `plan_hash`.
+- On first accepted `begin`, the runtime atomically binds `route_id` to the issued `plan_hash`, protocol, and contract version. Every later begin, finish, worker event, and dispatch reservation checks that trusted anchor. Recomputing a valid hash after changing a route is insufficient, and an issued v2 route cannot strip its contract marker to enter the legacy path. Only a route genuinely first seen without a contract version may use legacy validation.
 
 ## Plan normalization
 
@@ -52,11 +53,11 @@ Normalize in this order:
 
 Do not mutate the returned plan after execution starts. If new work appears, finish or stop the current route and require a new user invocation.
 
-For `dependency-parallel-v1`, normalize the DAG as specified in [parallel-execution.md](parallel-execution.md). The existing 4/6/8 Segment budgets remain unchanged; executor dispatch does not count as a persistent main-thread model switch.
+For `dependency-parallel-v1`, require an explicit content-based `segment_id` for every leaf and normalize the DAG as specified in [parallel-execution.md](parallel-execution.md). Missing IDs and ordinal-only names such as `segment-1` or `worker-2` are invalid. The existing 4/6/8 Segment budgets remain unchanged; executor dispatch does not count as a persistent main-thread model switch.
 
 ## Transitions
 
-Use `scripts/router_runtime.py begin` before project work and `finish` after it. These commands combine deterministic validation, replay claim when required, runtime-route inspection, verified ledger recording, and next-state resolution. They reduce tool/model round trips without weakening state gates.
+Use `scripts/router_runtime.py begin` before project work and `finish` after it. `begin` binds or checks the trusted route contract, validates the immutable envelope, receives immediate capacity from the runtime metadata boundary, validates the semantic agent name and actual runtime model/effort, then prepares a claim. The standalone policy CLI can inspect legacy/static structure but cannot self-authorize a v2 dispatch by echoing plan or capacity fields. `finish` consumes the bound claim/result identity and derives next state from the ledger. These commands reduce tool/model round trips without weakening state gates.
 
 | State | Success | Failure |
 |---|---|---|
@@ -88,7 +89,7 @@ Every Apply continuation carries:
 - repository, report, and ledger paths
 - accumulated completed-segment results and changed-file summary
 
-The coordinator retains the complete immutable plan and conversation context. Each worker receives only its context capsule: goal, necessary prior decisions, dependencies, selected route, access/write scopes, conflict keys, acceptance, validation budget, prohibited actions, and immutable IDs/hashes. The receiver validates the capsule against coordinator state and claims only when the execution can replay. Any mismatch or repeated claim is terminal.
+The coordinator retains the complete immutable plan and conversation context. Each parallel task receives only its context capsule: goal, necessary prior decisions, dependencies, selected route, access/write scopes, conflict keys, acceptance, validation budget, prohibited actions, and immutable IDs/hashes. `agent_task_name` is the content-based semantic `segment_id` normalized to Codex's `[a-z0-9_]+` task-name grammar (for example, `runtime-ledger-audit` becomes `runtime_ledger_audit`). The Router never invents a random or ordinal name. The receiver validates the capsule against coordinator state and atomically claims `route_id + plan_hash + segment_id + attempt_id` only when the execution can replay. Any mismatch, repeated claim, or latched route failure is terminal.
 
 ## Same-task chain
 
@@ -120,4 +121,4 @@ Never treat a generic subagent name as model evidence. Never count a configured 
 
 `ROUTED_MODE=APPLY_ONESHOT` is accepted only as a one-segment plan. It executes once and proceeds directly to Restore; it cannot create or advance additional implementation segments.
 
-Legacy `segmented-v1` plans remain readable. `apply-fast-v1` is used only for new one-Segment plans. `dependency-parallel-v1` remains opt-in or selected by a valid non-linear dependency graph.
+Legacy `segmented-v1` plans remain readable. `apply-fast-v1` is used only for new one-Segment plans. `dependency-parallel-v1` remains opt-in or selected by a valid non-linear dependency graph. Legacy status comes from the runtime's first trusted route binding; removing `contract_version` from an already-bound v2 plan never grants legacy compatibility.

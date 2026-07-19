@@ -44,7 +44,7 @@ Use one segment by default. Add a boundary only when the next stage has a differ
 
 Each candidate segment must contain:
 
-- `segment_id`: lowercase stable identifier unique within `route_id`
+- `segment_id`: lowercase stable identifier unique within `route_id`; for parallel work, make it a short content-based slug such as `runtime-ledger-audit` or `windows-install-check`, never a random name
 - `goal`: bounded work owned only by this segment
 - `depends_on`: for `segmented-v1`, empty for the first segment and otherwise exactly the previous ID; for `dependency-parallel-v1`, zero or more earlier Segment IDs
 - `task_kind`: `mechanical`, `ordinary`, or `complex`
@@ -73,20 +73,25 @@ Adaptive budgets:
 
 ## Dependency-aware parallel planning
 
-Enable `--parallel` only when useful independent work exists. Automatic planning requests at most 4, then reduces it by dependency-independent width and **observed free worker slots**. When metadata exposes total slots, pass `--runtime-total-slots <n>`; the planner reserves one coordinator slot and subtracts already-running workers from `--runtime-running-workers`. Do not treat a documented/default thread limit as live free capacity. With no observed capacity, dispatch one worker, confirm the next free slot, then refill; never pre-create a queue. A user request above 4 is legal only when observed free slots and useful independent width both meet it.
+Enable `--parallel` only when useful independent work exists. Automatic planning requests at most 4 parallel tasks, then reduces it by dependency-independent width and **observed free execution slots**. When metadata exposes total slots, pass `--runtime-total-slots <n>`; the planner reserves one coordinator slot and subtracts already-running executors from `--runtime-running-workers`. Thus a four-slot Codex session normally peaks at three parallel tasks: one slot remains with the main thread for dispatch and aggregation. Do not treat a documented/default thread limit as live free capacity. With no observed capacity, dispatch one task, confirm the next free slot, then refill; never pre-create a queue. A user request above 4 is legal only when observed free slots and useful independent width both meet it.
 
 - Keep a single task intact when its state or file boundaries are coupled. Split one long task only across real independent boundaries with separate acceptance checks and ownership.
 - Estimate work coarsely as short, normal, or long. Compute critical-path weight from this estimate and dispatch ready tasks in descending critical-path order, breaking ties by normalized plan order. Use wait-any list scheduling: when any worker completes, update the frontier and fill the next free slot; do not impose wave barriers.
 - Merge at most three short siblings only when they have identical dependencies and successors, the same selected model/effort and task class, and compatible mutation ownership.
 - Prefer read-only workers for broad discovery. Every write worker must own concrete repository-relative `write_scopes`; concurrently running write scopes must not overlap. Use `conflict_keys` to serialize Git index, lockfiles, project files, migrations, deployment targets, shared simulators, and other shared mutable resources. Any conflict adds a deterministic dependency and degrades to serial.
 - The coordinator exclusively owns the full plan, conversation context, ready/running/completed frontier, wait-any loop, and final summary. Workers receive only a bounded context capsule: goal, necessary decisions, paths/ownership, dependencies, acceptance, validation budget, prohibited actions, and immutable IDs/hashes. Never copy the full chat or future plan into every worker.
+- When creating a Codex leaf agent, pass the capsule's `agent_task_name`, deterministically normalized from the semantic `segment_id` to Codex's `[a-z0-9_]+` grammar. Do not generate random Router names or generic `worker_1` labels. A client may still display its own decorative nickname; that UI alias is outside the Skill's control.
 - Failure policy is `stop-dispatch-drain-running`: after the first failed worker, start nothing else, wait for already running workers, preserve their bounded results, mark undispatched work skipped, and summarize deterministically in normalized Segment order. Never retry a failed Segment by cycling models.
 - Hash the full DAG, routes, coarse work estimates, write scopes, conflict keys, `parallelism_source=standard|smart-reduced|user-override`, requested/effective concurrency, scheduler, aggregation order, and failure policy. Echo the source and both caps in every worker envelope; validate them against the immutable plan, completed/running sets, dependencies, confirmed free capacity, and attempt ID. Legacy `adaptive-extended` plans and plans without `parallelism_source` remain readable.
 - Create an executor only after confirming a free slot. Keep later nodes in the immutable plan but do not pre-create, queue, or block agents beyond effective capacity; refill exactly one free slot after a worker returns.
 
 Immediately before parallel dispatch show:
 
-`Codex 自动路由｜并行计划：<tasks> 个任务｜并发：<effective>/<requested>｜可用 worker：<observed>｜来源：<standard|smart-reduced|user-override>｜调度：关键路径优先`
+When total-slot metadata is available, count the coordinator in the visible total and show:
+
+`Codex 自动路由｜并发计划：<effective + coordinator> 个任务（含主任务）｜来源：<standard|smart-reduced|user-override>｜调度：关键路径优先`
+
+Without verified capacity, show `并发计划：2 个任务（含主任务）`; internally dispatch one leaf task as the probe without adding that implementation detail to the visible line.
 
 Then show the normal per-Segment model line once for each dispatched worker. This makes both automatic model and concurrency selection visible.
 
@@ -95,12 +100,12 @@ Then show the normal per-Segment model line once for each dispatched worker. Thi
 Use this order once for the complete plan:
 
 1. Search available Codex task tools for `send_message_to_thread` (normally `codex_app__send_message_to_thread`). Use native same-task chaining only when the interface explicitly accepts `model` and `thinking`. Never create a new top-level Codex task. Linear routing uses only the verified `current.thread_id`; parallel routing may create bounded leaf executor agents through the available agent tool, never an unverified generic task interface.
-2. Read the tool's supported-model list when exposed. Before any non-target execution, run `scripts/route_policy.py --resolve-fallback --target-model <model> --target-effort <effort> --available-model <id> ...`. Unknown availability means try the selected GPT-5.6 target first; it never authorizes GPT-5.5.
+2. Read the tool's supported-model list when exposed. Before any non-target execution, run `scripts/route_policy.py --resolve-fallback --target-model <model> --target-effort <effort> --available-model <id> ...`. Bind the verified capability result to `route_id + plan_hash + segment_id + attempt_id` as `capability_decision` in the continuation envelope. Unknown availability means try the selected GPT-5.6 target first; it never authorizes GPT-5.5.
 3. If the original model and effort are verified, execute a locally matched first segment or send the first mismatched segment to the same task with its exact model and effort. Each successful segment sends at most one follow-up for the next segment. This is intentional bounded continuation, not recursive planning.
 4. If the target is rejected for availability before execution, use the resolver's deterministic GPT-5.6 substitute: Sol → Terra → Luna, Terra → Sol → Luna, or Luna → Terra → Sol. These bounded capability attempts are not Segment retries.
 5. If persistent same-task switching is unsafe or unavailable, execute through explicitly model-selectable executor presets that target GPT-5.6 when the subagent interface proves the selection. A task/agent name alone is not proof of model selection.
 6. Execute locally only when the current model is GPT-5.6 or the capability check proves that Sol, Terra, and Luna are all unavailable. Never accept `available-default`, the current model, or GPT-5.5 while any GPT-5.6 route remains selectable. Do not restore to an original GPT-5.5 setting after a GPT-5.6 Segment succeeds.
-7. Use GPT-5.5 only after the capability surface explicitly exposes no GPT-5.6 model, or all three 5.6 candidates are rejected as unavailable before Segment execution. Record `fallback_from`, `fallback_to`, and `fallback_reason=gpt56-family-unavailable`; never silently downgrade.
+7. Use GPT-5.5 only after the capability surface explicitly exposes no GPT-5.6 model, or all three 5.6 candidates are rejected as unavailable before Segment execution. Record the identity-bound structured `capability_decision`, `fallback_from`, `fallback_to`, and `fallback_reason=gpt56-family-unavailable`; a free-text reason alone is never sufficient.
 
 Never make a persistent same-task switch when the original model or effort is unknown. The policy returns `selectable-subagent-or-local` in that case.
 
@@ -111,6 +116,7 @@ The coordinator retains the full immutable plan. A worker or one-Segment continu
 - `ROUTE_PROJECT_MODELS_ROUTED_TURN=1` and `ROUTED_MODE=APPLY_SEGMENT`
 - one immutable `route_id`, protocol version, `plan_hash`, `segment_id`, and `attempt_id`
 - current `segment_id`, index, selected model/effort, goal, dependencies, acceptance, and validation budget
+- content-based `agent_task_name`, deterministically normalized from the semantic `segment_id`, for Codex leaf-agent creation
 - verified `original_model` and `original_effort`
 - repository, report, and ledger paths
 - only the necessary prior decisions and bounded changed-file/result summary
@@ -137,7 +143,7 @@ Immediately before every Assess, Retune, Apply segment, Query, or Record, show o
 
 When `ROUTED_MODE=APPLY_SEGMENT`:
 
-1. Run `scripts/router_runtime.py begin --ledger <path> --envelope-json '<json>'`. It validates protocol/identity/frontier, performs an atomic claim only when continuation can replay, inspects runtime metadata, and returns the bounded context capsule. If its state gate stops, do no project work.
+1. Run `scripts/router_runtime.py begin --ledger <path> --envelope-json '<json>'`. It validates protocol/identity/frontier and immediate dispatch capacity, verifies that the actual runtime model/effort equals the selected or capability-approved route, then prepares an atomic claim and returns the bounded context capsule. Unknown or mismatched runtime identity stops before project tools or edits.
 2. A local `apply-fast-v1` Segment whose selected route already matches skips claim, cursor, full-plan continuation, and Restore. A switched fast Segment retains one compact claim and one final Restore decision.
 3. Show the segment's visible routing line, then execute only its goal. Read applicable repository instructions, preserve unrelated changes, and stay within its validation budget.
 4. Run `scripts/router_runtime.py finish` once with the bounded result. It inspects current metadata, records actual execution only from task metadata or user confirmation, accepts optional observed overhead metrics, and resolves `advance|refill-frontier|restore|return|stop`.
@@ -163,12 +169,12 @@ Before Query or Record, use the visible line with `local-script` and `none`.
 - Query runs `summary`, then `render` to update only the marked report section.
 - Record appends only user-confirmed or reliable task-metadata execution, then summarizes and renders.
 - Report actual execution proportions as verified Segment attempts, separate from analysis calls and latest recommended allocation.
-- For parallel work, keep `parallel_plan` as configured intent. Immediately after each worker dispatch is confirmed, call `router_runtime.py worker-start`; immediately after its result is received, call `worker-finish`. These commands capture the coordinator's monotonic clock themselves—never pass timestamps, durations, peak concurrency, or aggregate timing from model text.
-- At the terminal aggregate, call `router_runtime.py finish`. It derives wall clock, cumulative worker time, peak concurrency, and worker count from the stored per-worker intervals, then appends one schema-v2 `parallel_execution`. Missing, reversed, or incomplete traces remain `pending`. Legacy aggregate-only records stay readable but are excluded from verified metrics.
+- For parallel work, keep `parallel_plan` as configured intent. Immediately after each parallel task dispatch is confirmed, call `router_runtime.py worker-start` with `route_id`, `plan_hash`, `segment_id`, and `attempt_id`; immediately after its result is received, call `worker-finish` with the same identity. These commands capture the coordinator's monotonic clock themselves—never pass timestamps, durations, peak concurrency, or aggregate timing from model text. A prepared parallel claim may be recovered only until dispatch is confirmed; a confirmed dispatch cannot replay.
+- At the terminal aggregate, call `router_runtime.py finish`. It derives actual elapsed time, cumulative parallel-task time, peak concurrency, and task count from the stored per-task intervals, then appends one schema-v2 `parallel_execution`. Missing, reversed, or incomplete traces remain `pending`. Legacy aggregate-only records stay readable but are excluded from verified metrics.
 - Print the returned `parallel_execution_brief` verbatim. Never recompute, round, translate, or reformat its values in the Apply response.
 - Record `routing_efficiency` only from task metadata or user confirmation: routing/orchestration, queue wait, executor startup, switch, Restore, useful execution, model/tool round trips, and state-gate stops. Missing fields stay missing; never guess them.
-- End every Apply chat summary with one concise concurrency line. For serial work say `并发：未启用｜原因：任务未形成有价值的独立并行边界`. Without verified timing say `并发：<effective>/<requested>｜测量：待记录`. With verified timing say `并发：峰值 <n>｜墙钟：<wall>｜累计 worker：<worker>｜有效并发倍率：<worker / wall>x｜并发利用率：<worker / (peak × wall)>%`. The multiplier is an observed work-overlap metric and needs no serial baseline; do not call it actual speedup. Report actual speedup only for an optional controlled A/B run.
-- The canonical wall clock runs from the first dispatch confirmation through the last result receipt on the coordinator's monotonic clock. Never display obsolete compression metrics, and never call factor or utilization speedup.
+- End every Apply chat summary with one concise concurrency line. For serial work say `并发：未启用｜原因：任务未形成有价值的独立并行边界`. Without verified timing say `并发计划：<leaf peak + 1> 个任务（含主任务）｜测量：待记录`. With verified timing say `并发：峰值 <leaf peak + 1>（含主任务）｜实际用时：<h时m分s秒>｜并行任务累计用时：<h时m分s秒>｜并行省时估算：<1 - actual / cumulative>%｜槽位利用：<(cumulative + actual) / ((leaf peak + 1) × actual)>%`. The visible peak and utilization include the main task; raw ledger `peak_concurrency` remains leaf-task concurrency for compatibility. Round displayed durations and percentages to whole units. `并行省时估算` compares the observed overlap with the same leaf tasks concatenated; it is not a controlled serial A/B or claimed actual speedup. Report actual speedup only for an optional controlled A/B run.
+- The canonical elapsed interval runs from the first dispatch confirmation through the last result receipt on the coordinator's monotonic clock. Keep raw seconds and nanoseconds internally for compatibility, but never display obsolete compression/factor labels.
 - Never infer actual use from a recommendation or configured-but-unverified route.
 
 ## Routed Assess and Retune
@@ -186,7 +192,7 @@ Perform only the requested read-only analysis. Save the report to `<repository>/
 
 ## Assessment and routing principles
 
-Inventory representative project evidence without builds or tests. Route each recurring task by ambiguity, scope, coupling, verification difficulty, consequence of error, and whether a well-scoped attempt already failed. Luna/low fits clear mechanical work; Terra/low or medium fits bounded ordinary engineering; Sol/medium fits bounded complex work; Sol/high fits high ambiguity, coupling, judgment, or consequence. Reserve Sol/xhigh for failed complex attempts or explicit user choice. Prefer a bounded segment over higher effort.
+Assess and Retune use GPT-5.6 Sol/high by default so policy changes receive consistent analysis; an explicit user model or effort override still wins. Inventory representative project evidence without builds or tests. Route each follow-on task by ambiguity, scope, coupling, verification difficulty, consequence of error, and whether a well-scoped attempt already failed. Luna/low fits clear mechanical work; Terra/low or medium fits bounded ordinary engineering; Sol/medium fits bounded complex work; Sol/high fits high ambiguity, coupling, judgment, or consequence. Reserve Sol/xhigh for failed complex attempts or explicit user choice. Prefer a bounded segment over higher effort.
 
 ## Report and ledger output
 
