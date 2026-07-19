@@ -48,7 +48,21 @@ class InstallationTests(unittest.TestCase):
             command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer_root / "install.ps1")]
         else:
             command = ["sh", str(installer_root / "install.sh")]
-        return subprocess.run(command, cwd=installer_root, env=environment, check=check, text=True, capture_output=True)
+        result = subprocess.run(
+            command,
+            cwd=installer_root,
+            env=environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if check and result.returncode != 0:
+            self.fail(
+                f"installer exited with {result.returncode}\n"
+                f"stdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}"
+            )
+        return result
 
     def isolated_installer_copy(self):
         replica = Path(self.temp_dir.name) / "installer-replica"
