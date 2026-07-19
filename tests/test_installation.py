@@ -254,8 +254,14 @@ class InstallationTests(unittest.TestCase):
         self.assertNotIn("project-model-*.toml", installer)
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if powershell:
+            escaped_installer = str(ROOT / "install.ps1").replace("'", "''")
             subprocess.run(
-                [powershell, "-NoProfile", "-Command", "[scriptblock]::Create((Get-Content -Raw -LiteralPath $args[0])) | Out-Null", str(ROOT / "install.ps1")],
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-Command",
+                    f"[scriptblock]::Create((Get-Content -Raw -LiteralPath '{escaped_installer}')) | Out-Null",
+                ],
                 check=True,
                 text=True,
                 capture_output=True,
