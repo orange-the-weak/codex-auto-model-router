@@ -58,7 +58,7 @@ for budget_contract in (
 ):
     if budget_contract not in skill_text:
         fail(f"adaptive budget contract is missing: {budget_contract}")
-if "Re-evaluate every applicable Apply request" not in skill_text or "never show `current-route` or `keep` placeholders" not in skill_text:
+if "Never inherit the previous request's strength" not in skill_text or "never show `current-route` or `keep` placeholders" not in skill_text:
     fail("per-request dynamic routing contract is missing")
 if "Never make a persistent same-task switch when the original model or effort is unknown" not in skill_text:
     fail("safe-restore rule is missing")
@@ -72,9 +72,9 @@ for parallel_contract in (
     "stop-dispatch-drain-running",
     "write_scopes",
     "conflict_keys",
-    "workers are leaves and may not delegate",
+    "Workers receive only a bounded context capsule",
     "parallelism_source=standard|smart-reduced|user-override",
-    "Never auto-expand above 4",
+    "Automatic planning requests at most 4",
     "Create an executor only after confirming a free slot",
     "End every Apply chat summary with one concise concurrency line",
 ):
@@ -83,12 +83,16 @@ for parallel_contract in (
 state_machine = (ROOT / "references" / "execution-state-machine.md").read_text(encoding="utf-8")
 for invariant in (
     "one immutable `route_id`",
-    "immutable adaptive budget",
+    "standard budget is 4/4",
     "absolute 8/8 hard limit",
     "A failed segment stops the plan",
     "`RETURN` is terminal",
     "GPT-5.5 is legal only after the capability check proves the complete GPT-5.6 family unavailable",
     "A non-5.6 original is audit-only after verified GPT-5.6 execution",
+    "`apply-fast-v1` has no cursor",
+    "observed total slots - coordinator - running workers",
+    "scripts/router_runtime.py begin",
+    "context capsule",
 ):
     if invariant not in state_machine:
         fail(f"state-machine invariant is missing: {invariant}")
@@ -108,12 +112,16 @@ for parallel_ledger_contract in (
     '"parallelism_source"',
     '"requested_max_parallelism"',
     '"effective_parallel_factor"',
+    '"parallel_utilization_percent"',
     '"worker_time_compression_percent"',
+    'commands.add_parser("efficiency")',
+    '"routing_efficiency"',
+    '"queue_wait_seconds"',
 ):
     if parallel_ledger_contract not in ledger_text:
         fail(f"parallel ledger contract is missing: {parallel_ledger_contract}")
 policy_text = (ROOT / "scripts" / "route_policy.py").read_text(encoding="utf-8")
-for contract in ("CODEX_THREAD_ID", "thread_settings_applied", "turn_context", "route-already-matched", "selectable-subagent-or-local", "segmented-v1", "dependency-parallel-v1", "DEFAULT_AUTO_PARALLELISM", "HARD_MAX_PARALLELISM", "parallelism_source", "capacity_evaluation", "smart-reduced", "runtime_max_threads", "critical-path-priority-wait-any", "write_scopes", "conflict_keys", "stop-dispatch-drain-running", "validate_parallel_envelope", "DEFAULT_MAX_SEGMENTS", "EXTENDED_MAX_SEGMENTS", "HARD_MAX_SEGMENTS", "HARD_MAX_SWITCHES", "budget_source", "plan_hash", "attempt_id", "validate_segment_cursor", "synthetic-test-input", "load_benchmark_evidence", "evidence-snapshot-expired", "prior_failure", "resolve_family_fallback", "gpt56-family-unavailable"):
+for contract in ("CODEX_THREAD_ID", "thread_settings_applied", "turn_context", "route-already-matched", "selectable-subagent-or-local", "apply-fast-v1", "segmented-v1", "dependency-parallel-v1", "DEFAULT_AUTO_PARALLELISM", "HARD_MAX_PARALLELISM", "parallelism_source", "capacity_evaluation", "smart-reduced", "runtime_total_slots", "coordinator_reserved_slots", "available_worker_slots", "context_capsule", "critical-path-priority-wait-any", "write_scopes", "conflict_keys", "stop-dispatch-drain-running", "validate_fast_envelope", "validate_parallel_envelope", "DEFAULT_MAX_SEGMENTS", "EXTENDED_MAX_SEGMENTS", "HARD_MAX_SEGMENTS", "HARD_MAX_SWITCHES", "budget_source", "plan_hash", "attempt_id", "validate_segment_cursor", "synthetic-test-input", "load_benchmark_evidence", "evidence-snapshot-expired", "prior_failure", "resolve_family_fallback", "gpt56-family-unavailable"):
     if contract not in policy_text:
         fail(f"route policy contract is missing: {contract}")
 
@@ -131,9 +139,13 @@ if 'project-model-router*.toml' in install_text or 'project-model-executor*.toml
 
 preset_mapping = (ROOT / "references" / "preset-mapping.md").read_text(encoding="utf-8")
 parallel_reference = (ROOT / "references" / "parallel-execution.md").read_text(encoding="utf-8")
-for contract in ("dependency-parallel-v1", "wait-any", "stop-dispatch-drain-running", "write_scopes", "conflict_keys", "parallelism_source=standard|smart-reduced|user-override", "no pre-created executor queue"):
+for contract in ("dependency-parallel-v1", "wait-any", "stop-dispatch-drain-running", "write_scopes", "conflict_keys", "parallelism_source=standard|smart-reduced|user-override", "observed_total_slots", "coordinator_slots", "bounded context capsule", "parallel_utilization", "without requiring a serial baseline"):
     if contract not in parallel_reference:
         fail(f"parallel execution reference is missing: {contract}")
+runtime_text = (ROOT / "scripts" / "router_runtime.py").read_text(encoding="utf-8")
+for contract in ("def begin", "def finish", "validate_fast_envelope", "segment_claim", "routing_efficiency", "context_capsule"):
+    if contract not in runtime_text:
+        fail(f"combined Router runtime contract is missing: {contract}")
 evidence = json.loads(
     (ROOT / "references" / "benchmark-evidence.json").read_text(encoding="utf-8")
 )

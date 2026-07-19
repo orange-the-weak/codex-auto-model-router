@@ -89,16 +89,19 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(summary["parallel_execution"]["wall_clock_seconds"], 12.5)
         self.assertEqual(summary["parallel_execution"]["cumulative_worker_seconds"], 29.0)
         self.assertEqual(summary["parallel_execution"]["effective_parallel_factor"], 2.32)
+        self.assertEqual(summary["parallel_execution"]["parallel_utilization_percent"], 77.3)
         self.assertEqual(summary["parallel_execution"]["worker_time_compression_percent"], 56.9)
         self.assertEqual(summary["parallel_execution"]["latest"], {
             "route_id": "route-1", "wall_clock_seconds": 12.5,
             "cumulative_worker_seconds": 29.0, "peak_concurrency": 3,
             "effective_parallel_factor": 2.32,
+            "parallel_utilization_percent": 77.3,
             "worker_time_compression_percent": 56.9,
         })
         rendered = LEDGER.render_markdown(summary)
         self.assertIn("effective parallel factor: 2.32x", rendered)
-        self.assertIn("not a controlled serial A/B", rendered)
+        self.assertIn("parallel utilization: 77.3%", rendered)
+        self.assertIn("not serial/parallel speedup", rendered)
 
     def test_parallel_plan_records_adaptive_concurrency_intent(self):
         plan = {
@@ -166,6 +169,46 @@ class LedgerTests(unittest.TestCase):
                 "wall_clock_seconds": 1, "cumulative_worker_seconds": 1,
                 "peak_concurrency": 1, "worker_count": 1,
                 "outcome": "completed", "source": "configured-only",
+            })
+
+    def test_parallel_execution_rejects_impossible_worker_overlap(self):
+        with self.assertRaisesRegex(ValueError, "exceeds observed concurrency capacity"):
+            LEDGER.validate_event({
+                "event": "parallel_execution", "route_id": "route-1",
+                "wall_clock_seconds": 10, "cumulative_worker_seconds": 31,
+                "peak_concurrency": 3, "worker_count": 3,
+                "outcome": "completed", "source": "task-metadata",
+            })
+
+    def test_routing_efficiency_records_only_observed_fields(self):
+        event = {
+            "event": "routing_efficiency", "route_id": "route-1",
+            "segment_id": "implement", "source": "task-metadata",
+            "routing_seconds": 1.2, "queue_wait_seconds": 0.4,
+            "model_round_trips": 2, "tool_round_trips": 3,
+            "state_gate": "passed",
+        }
+        self.assertTrue(LEDGER.append_event(self.ledger, event))
+        self.assertFalse(LEDGER.append_event(self.ledger, event.copy()))
+        summary = LEDGER.build_summary(*LEDGER.read_events(self.ledger))
+        self.assertEqual(summary["routing_efficiency"]["count"], 1)
+        self.assertEqual(summary["routing_efficiency"]["durations"]["routing_seconds"], 1.2)
+        self.assertEqual(summary["routing_efficiency"]["round_trips"]["tool_round_trips"], 3)
+        self.assertIsNone(summary["routing_efficiency"]["durations"]["restore_seconds"])
+        self.assertEqual(summary["routing_efficiency"]["round_trips"]["model_round_trips"], 2)
+        self.assertIsNone(summary["routing_efficiency"]["durations"]["useful_execution_seconds"])
+        self.assertEqual(summary["routing_efficiency"]["state_gates"]["passed"], 1)
+
+    def test_routing_efficiency_rejects_guessed_or_empty_metrics(self):
+        with self.assertRaisesRegex(ValueError, "task metadata or user confirmation"):
+            LEDGER.validate_event({
+                "event": "routing_efficiency", "route_id": "route-1",
+                "source": "estimated", "routing_seconds": 1,
+            })
+        with self.assertRaisesRegex(ValueError, "at least one observed metric"):
+            LEDGER.validate_event({
+                "event": "routing_efficiency", "route_id": "route-1",
+                "source": "task-metadata",
             })
 
     def test_records_segment_identifiers(self):

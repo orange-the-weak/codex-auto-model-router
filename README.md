@@ -1,15 +1,15 @@
-# Codex Auto Model Router
+# Codex Auto Model Router — Dynamic Per-Segment Routing
 
 [![Codex Skill](https://img.shields.io/badge/OpenAI%20Codex-Skill-111827)](https://github.com/openai/skills)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Evidence-calibrated GPT-5.6 model, reasoning, and dependency-aware concurrency selection for OpenAI Codex.** Route each bounded task to Sol, Terra, or Luna at the lowest sufficient effort—inside Codex, with no external API or API key.
+**Automatic, dynamic per-segment model, reasoning, and concurrency routing for GPT-5.6 in OpenAI Codex.** Evidence-calibrated routing sends each bounded task to Sol, Terra, or Luna at the lowest sufficient effort—with no external API or API key.
 
 [中文说明](README.zh-CN.md)
 
 ## Why this tool?
 
-GPT-5.6 adds three model tiers and several reasoning levels to Codex. This Skill turns that repeated choice into a bounded workflow: evaluate the current task, switch only at useful segment boundaries, and restore a verified original GPT-5.6 route when finished.
+GPT-5.6 adds three model tiers and several reasoning levels to Codex. This Skill automatically re-evaluates each useful Segment, dynamically switches only when the work benefits, and restores a verified original GPT-5.6 route when finished.
 
 ## Quick start
 
@@ -48,17 +48,20 @@ For an illustrative mixed workload, the current policy estimates **15–30% fast
 ## How it works
 
 - Re-evaluates every applicable request instead of inheriting the previous route.
-- Keeps simple work in one segment; splits analysis, implementation, verification, or review only when different routes materially help.
-- Runs genuinely independent work with `dependency-parallel-v1`: automatic concurrency is capped at 4 and reduces to runtime capacity and useful independent width. It never auto-expands above 4.
-- Creates an executor only after a free slot is confirmed. A user request above 4 requires matching observed runtime capacity and enough independent ready work; otherwise it is rejected instead of queued.
+- Uses a one-Segment fast path: a locally matched route skips the full DAG, cursor, replay claim, and Restore chain. Multi-Segment state gates are combined into one `begin` and one `finish` call.
+- Splits analysis, implementation, verification, or review only when different routes materially help.
+- Caps automatic concurrency at 4, then reduces it to useful independent width and observed free workers. Total agent slots reserve the coordinator and subtract running workers.
+- Without observed capacity, dispatches one worker and refills only after another slot is confirmed. Requests above 4 require proven free capacity; no pre-created queue.
 - Uses critical-path-priority wait-any scheduling to reduce tail latency. Compatible short siblings may merge; long tasks split only at real independent boundaries.
+- Keeps the full conversation in the coordinator; workers receive only a bounded context capsule with necessary decisions, scope, acceptance, and immutable IDs.
 - Requires disjoint write scopes and serializes Git index, lockfiles, project files, migrations, deploy targets, shared simulators, and other mutable resources through conflict keys.
 - Uses a standard 4-segment/4-switch budget, adaptive 6/6 for genuinely complex or large plans, and an explicit hard limit of 8/8. Restore counts as a switch.
 - Keeps fallback inside GPT-5.6: Sol tries Terra then Luna; Terra tries Sol then Luna; Luna tries Terra then Sol. GPT-5.5 is allowed only when the complete 5.6 family is unavailable.
 - Announces the selected model and reasoning once per segment, stops on failure, and restores a verified original GPT-5.6 route once.
 - Records only verified execution in a local JSONL ledger; recommendations never count as observed use.
 - Separates configured parallel plans from verified model × concurrency, wall-clock, cumulative worker time, and peak-concurrency statistics.
-- Ends each task brief with concurrency and speedup status; measured parallel runs use worker-time compression, while actual speedup is reserved for a verified comparable serial baseline.
+- Tracks verified routing, queue, startup, switch/Restore, useful-execution, round-trip, and state-gate overhead without guessing missing data.
+- Ends each task brief with effective parallel factor and utilization. These use observed worker and wall time, so no serial baseline is required; actual speedup remains optional controlled A/B evidence.
 
 ## Use
 
@@ -73,8 +76,8 @@ Example notice:
 
 ```text
 Codex automatic routing | Segment 1/3: Analyze the change | Model: GPT-5.6 Sol | Reasoning: high | High ambiguity
-Codex automatic routing | Parallel plan: 3 tasks | Concurrency: 3/4 | Source: smart-reduced | max_threads=6 | Critical-path priority
-Concurrency: peak 3 | Wall: 120s | Effective parallel factor: 2.4x | Worker-time compression: 58.3% (not a controlled serial A/B)
+Codex automatic routing | Parallel plan: 3 tasks | Concurrency: 3/4 | Free workers: 3 | Source: smart-reduced | Critical-path priority
+Concurrency: peak 3 | Wall: 120s | Worker total: 288s | Effective parallel factor: 2.4x | Utilization: 80%
 ```
 
 Reports are written to `docs/codex-model-routing-report.md`; verified usage is stored in `.codex/model-routing-history.jsonl`. The ledger contains routing metadata and outcomes, not prompts, source code, secrets, or conversation text.

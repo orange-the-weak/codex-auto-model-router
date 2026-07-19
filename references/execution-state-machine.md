@@ -1,4 +1,4 @@
-# Segmented and dependency-parallel execution state machine
+# Fast, segmented, and dependency-parallel execution state machine
 
 Use this state machine for Apply:
 
@@ -13,9 +13,9 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 ## Invariants
 
 - One invocation has one mode and one immutable `route_id`.
-- Apply has one normalized plan under an immutable adaptive budget: linear `segmented-v1` or DAG-based `dependency-parallel-v1`.
+- Apply has one normalized plan: one Segment uses `apply-fast-v1`, multiple sequential Segments use `segmented-v1`, and independent work may use `dependency-parallel-v1`.
 - Each segment has one stable `segment_id`, one selected route, one goal, immutable predecessors, and one verification budget.
-- The cursor advances only after the current segment succeeds; an atomic pre-execution claim prevents the same Segment envelope from executing twice.
+- `apply-fast-v1` has no cursor. A local matched Segment skips the replay claim; a switched/continued Segment keeps an atomic claim. Multi-Segment cursors advance only after success.
 - Adjacent segments with the same model and effort are merged before execution.
 - Every new Apply request and every candidate Segment is routed from its own evidence. A previous request or Segment route never biases selection in either direction: simple work can move down, and complex work can move up.
 - The bundled benchmark snapshot is an offline, stale-aware prior. Its audit metadata is immutable in new plans and covered by `plan_hash`; legacy envelopes without that field remain valid. Missing, invalid, or expired evidence falls back without a network request.
@@ -28,13 +28,15 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 - A verified GPT-5.6 original remains immutable across intermediate switches. Make one Restore attempt only when that original is Sol, Terra, or Luna and the final/failed Segment is not already on it. A non-5.6 original is audit-only after verified GPT-5.6 execution.
 - `RETURN` is terminal and cannot execute or advance a segment.
 - Report or ledger persistence failure does not invalidate otherwise completed work.
-- Parallel execution has an automatic ceiling of 4 and only reduces it from dependency-independent width, model task count, and runtime capacity. It never auto-expands. A user request above 4 requires observed matching `agents.max_threads` and enough independent ready work; otherwise it is rejected instead of queued. Executors are created only after a free slot is confirmed.
+- Parallel execution has an automatic ceiling of 4. Effective workers are `min(requested, useful independent width, observed total slots - coordinator - running workers)`. A documented/default thread limit is not live capacity. Without observed capacity, dispatch one worker and probe/refill; never pre-create a queue. A user request above 4 requires matching observed free slots and useful width.
 - The parallel Coordinator exclusively owns the frontier, dispatch, wait-any loop, failure state, and deterministic aggregation. `stop-dispatch-drain-running` starts no new work after the first failure but waits for already active workers.
 - Parallel write tasks declare concrete `write_scopes`; overlapping write scopes and shared `conflict_keys` add dependencies and degrade to serial. The complete DAG, routes, estimates, scopes, conflict keys, `parallelism_source`, requested/effective concurrency, scheduler, aggregation order, and failure policy are covered by `plan_hash` and echoed in worker envelopes. Legacy parallel plans without the source remain valid.
 
 ## Plan normalization
 
-The policy script validates a JSON array and returns `protocol=segmented-v1`, a unique `route_id`, the normalized segments, dispatch decisions, switch count, and Restore requirement.
+The policy script validates a JSON array and returns `apply-fast-v1` for one normalized Segment or `segmented-v1` for multiple sequential Segments, plus a unique `route_id`, routes, budgets, and Restore decision.
+
+`apply-fast-v1` avoids a full DAG/cursor envelope. If the selected route already matches, execute locally and return. If it differs, send one compact continuation with immutable identity, claim once, execute, and Restore once when required.
 
 Normalize in this order:
 
@@ -50,6 +52,8 @@ Do not mutate the returned plan after execution starts. If new work appears, fin
 For `dependency-parallel-v1`, normalize the DAG as specified in [parallel-execution.md](parallel-execution.md). The existing 4/6/8 Segment budgets remain unchanged; executor dispatch does not count as a persistent main-thread model switch.
 
 ## Transitions
+
+Use `scripts/router_runtime.py begin` before project work and `finish` after it. These commands combine deterministic validation, replay claim when required, runtime-route inspection, verified ledger recording, and next-state resolution. They reduce tool/model round trips without weakening state gates.
 
 | State | Success | Failure |
 |---|---|---|
@@ -67,7 +71,7 @@ For `dependency-parallel-v1`, normalize the DAG as specified in [parallel-execut
 | RESTORE | RETURN | stop after one failed Restore attempt |
 | RETURN | terminal result | terminal result |
 
-## Immutable plan envelope
+## Coordinator state and worker capsule
 
 Every Apply continuation carries:
 
@@ -81,7 +85,7 @@ Every Apply continuation carries:
 - repository, report, and ledger paths
 - accumulated completed-segment results and changed-file summary
 
-The receiver runs the policy script's envelope validator, recomputes `plan_hash` and `attempt_id`, and validates the outer `route_id`, selected budgets and source, original route, Restore decision, zero-based cursor, named Segment, and ordered completed IDs. It then atomically claims `(route_id, segment_id, attempt_id)` in the ledger before project work. Any mismatch or repeated claim is terminal.
+The coordinator retains the complete immutable plan and conversation context. Each worker receives only its context capsule: goal, necessary prior decisions, dependencies, selected route, access/write scopes, conflict keys, acceptance, validation budget, prohibited actions, and immutable IDs/hashes. The receiver validates the capsule against coordinator state and claims only when the execution can replay. Any mismatch or repeated claim is terminal.
 
 ## Same-task chain
 
@@ -113,4 +117,4 @@ Never treat a generic subagent name as model evidence. Never count a configured 
 
 `ROUTED_MODE=APPLY_ONESHOT` is accepted only as a one-segment plan. It executes once and proceeds directly to Restore; it cannot create or advance additional implementation segments.
 
-Legacy `segmented-v1` plans remain readable. New plans may include the optional local-node fields without changing legacy model nodes. `dependency-parallel-v1` is opt-in or selected by a valid non-linear dependency graph and uses its own frontier envelope validator.
+Legacy `segmented-v1` plans remain readable. `apply-fast-v1` is used only for new one-Segment plans. `dependency-parallel-v1` remains opt-in or selected by a valid non-linear dependency graph.

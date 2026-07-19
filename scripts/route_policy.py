@@ -34,7 +34,9 @@ DEFAULT_AUTO_PARALLELISM = 4
 EXTENDED_AUTO_PARALLELISM = 6
 ADAPTIVE_MIN_READY_TASKS = 5
 HARD_MAX_PARALLELISM = MAX_CANDIDATE_SEGMENTS
-DEFAULT_CODEX_MAX_THREADS = 6
+DEFAULT_COORDINATOR_SLOTS = 1
+FAST_PROTOCOL = "apply-fast-v1"
+SEGMENTED_PROTOCOL = "segmented-v1"
 PARALLEL_PROTOCOL = "dependency-parallel-v1"
 DEFAULT_EVIDENCE_PATH = Path(__file__).resolve().parents[1] / "references" / "benchmark-evidence.json"
 MODEL_ALIASES = {
@@ -487,6 +489,18 @@ def _segment_list(value, field, segment_id):
     return [item.strip() for item in value]
 
 
+def _optional_segment_list(value, field, segment_id):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise ValueError(f"segment {segment_id} has invalid {field}")
+    return [item.strip() for item in value]
+
+
 def _merge_adjacent_segments(segments):
     merged = []
     for segment in segments:
@@ -498,6 +512,12 @@ def _merge_adjacent_segments(segments):
             previous["acceptance"].extend(segment["acceptance"])
             previous["validation_budget"] += "; " + segment["validation_budget"]
             previous["source_ids"].extend(segment["source_ids"])
+            previous["decisions"] = list(dict.fromkeys(
+                previous.get("decisions", []) + segment.get("decisions", [])
+            ))
+            previous["prohibited_actions"] = list(dict.fromkeys(
+                previous.get("prohibited_actions", []) + segment.get("prohibited_actions", [])
+            ))
             previous["size"] = "large" if "large" in (previous["size"], segment["size"]) else "normal"
             previous["reason"] = "adjacent-same-route-merged"
             continue
@@ -511,7 +531,7 @@ def _merge_adjacent_segments(segments):
 def plan_hash(
     segments, route_id, original, restore_required,
     segment_budget, switch_budget, budget_source, routing_evidence=None,
-    protocol="segmented-v1", parallel=None,
+    protocol=SEGMENTED_PROTOCOL, parallel=None,
 ):
     hashable = [
         {key: value for key, value in segment.items() if key != "attempt_id"}
@@ -533,6 +553,38 @@ def plan_hash(
         payload["parallel"] = parallel
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def context_capsule(plan, segment_id):
+    """Return bounded worker context; the coordinator retains the full plan/chat."""
+    if not isinstance(plan, dict):
+        raise ValueError("context capsule requires a plan")
+    segment = next(
+        (item for item in plan.get("segments", []) if item.get("segment_id") == segment_id),
+        None,
+    )
+    if segment is None:
+        raise ValueError("context capsule segment is missing")
+    return {
+        "protocol": plan.get("protocol"),
+        "route_id": plan.get("route_id"),
+        "plan_hash": plan.get("plan_hash"),
+        "segment_id": segment_id,
+        "attempt_id": segment.get("attempt_id"),
+        "model": segment.get("model"),
+        "effort": segment.get("effort"),
+        "goal": segment.get("goal"),
+        "depends_on": segment.get("depends_on", []),
+        "acceptance": segment.get("acceptance", []),
+        "validation_budget": segment.get("validation_budget"),
+        "access_mode": segment.get("access_mode"),
+        "write_scopes": segment.get("write_scopes", []),
+        "conflict_keys": segment.get("conflict_keys", []),
+        "decisions": segment.get("decisions", []),
+        "prohibited_actions": segment.get("prohibited_actions", [
+            "do-not-replan", "do-not-delegate", "do-not-touch-out-of-scope-files",
+        ]),
+    }
 
 
 def _bounded_integer(value, field, maximum):
@@ -618,6 +670,12 @@ def _merge_short_siblings(segments):
                 target["acceptance"].extend(item["acceptance"])
                 target["validation_budget"] += "; " + item["validation_budget"]
                 target["source_ids"].extend(item["source_ids"])
+                target["decisions"] = list(dict.fromkeys(
+                    target.get("decisions", []) + item.get("decisions", [])
+                ))
+                target["prohibited_actions"] = list(dict.fromkeys(
+                    target.get("prohibited_actions", []) + item.get("prohibited_actions", [])
+                ))
                 target["write_scopes"] = sorted(set(target["write_scopes"] + item["write_scopes"]))
                 replaced[item["segment_id"]] = target["segment_id"]
             target["work_estimate"] = "normal"
@@ -745,7 +803,9 @@ def _parallel_capacity_evaluation(segments, initial_frontier):
 def plan_parallel_segments(
     raw_segments, current=None, model_override=None, effort_override=None,
     report_model=None, report_effort=None, max_segments=None, max_switches=None,
-    max_parallelism=None, runtime_max_threads=None, evidence_path=None,
+    max_parallelism=None, runtime_max_threads=None, runtime_total_slots=None,
+    runtime_running_workers=0, coordinator_slots=DEFAULT_COORDINATOR_SLOTS,
+    evidence_path=None,
 ):
     """Create a dependency-aware, wait-any Apply plan without executing it."""
     if not isinstance(raw_segments, list) or not raw_segments:
@@ -758,10 +818,31 @@ def plan_parallel_segments(
         raise ValueError(
             "a global report route applies only to one-segment Apply; use per-segment report routes"
         )
-    runtime_threads_source = "documented-default" if runtime_max_threads is None else "runtime-config"
-    runtime_max_threads = DEFAULT_CODEX_MAX_THREADS if runtime_max_threads is None else _bounded_integer(
-        runtime_max_threads, "runtime_max_threads", 64
-    )
+    if runtime_total_slots is not None and runtime_max_threads is not None:
+        raise ValueError("use runtime_total_slots or legacy runtime_max_threads, not both")
+    if not isinstance(runtime_running_workers, int) or isinstance(runtime_running_workers, bool) or runtime_running_workers < 0:
+        raise ValueError("runtime_running_workers must be a non-negative integer")
+    if runtime_running_workers and runtime_total_slots is None:
+        raise ValueError("runtime_running_workers requires observed runtime_total_slots")
+    coordinator_slots = _bounded_integer(coordinator_slots, "coordinator_slots", 8)
+    if runtime_total_slots is not None:
+        runtime_total_slots = _bounded_integer(runtime_total_slots, "runtime_total_slots", 64)
+        available_worker_slots = max(
+            0, runtime_total_slots - coordinator_slots - runtime_running_workers
+        )
+        capacity_source = "observed-total-slots"
+    elif runtime_max_threads is not None:
+        # Backward compatibility: older callers supplied observed worker capacity.
+        available_worker_slots = _bounded_integer(
+            runtime_max_threads, "runtime_max_threads", 64
+        )
+        capacity_source = "legacy-observed-worker-capacity"
+    else:
+        # Unknown capacity must not become a pre-created executor queue.
+        available_worker_slots = 1
+        capacity_source = "unverified-dispatch-probe"
+    if available_worker_slots < 1:
+        raise ValueError("parallel planning has no observed free worker slot")
     user_parallelism = None if max_parallelism is None else _bounded_integer(
         max_parallelism, "max_parallelism", HARD_MAX_PARALLELISM
     )
@@ -823,11 +904,13 @@ def plan_parallel_segments(
     model_segment_count = len(segments)
     useful_parallelism = capacity_evaluation["useful_parallelism"]
     if requested_parallelism > DEFAULT_AUTO_PARALLELISM:
-        if runtime_threads_source != "runtime-config":
+        if capacity_source not in (
+            "observed-total-slots", "legacy-observed-worker-capacity"
+        ):
             raise ValueError(
-                "max_parallelism above four requires observed runtime_max_threads"
+                "max_parallelism above four requires observed free worker capacity"
             )
-        if runtime_max_threads < requested_parallelism:
+        if available_worker_slots < requested_parallelism:
             raise ValueError(
                 "max_parallelism above four exceeds confirmed runtime capacity"
             )
@@ -836,7 +919,7 @@ def plan_parallel_segments(
                 "max_parallelism above four exceeds independent ready-task capacity"
             )
     effective_parallelism = min(
-        requested_parallelism, runtime_max_threads, useful_parallelism
+        requested_parallelism, available_worker_slots, useful_parallelism
     )
     if user_parallelism is not None:
         parallelism_source = "user-override"
@@ -845,7 +928,7 @@ def plan_parallel_segments(
     else:
         parallelism_source = "standard"
     reduction_reasons = []
-    if runtime_max_threads < requested_parallelism:
+    if available_worker_slots < requested_parallelism:
         reduction_reasons.append("runtime-capacity")
     if useful_parallelism < requested_parallelism:
         reduction_reasons.append("dependency-independent-width")
@@ -866,8 +949,15 @@ def plan_parallel_segments(
         "scheduler": "critical-path-priority-wait-any",
         "parallelism_source": parallelism_source,
         "requested_max_parallelism": requested_parallelism,
+        "runtime_total_slots": runtime_total_slots,
+        "coordinator_reserved_slots": coordinator_slots,
+        "runtime_running_workers": runtime_running_workers,
+        "available_worker_slots": available_worker_slots,
+        "capacity_source": capacity_source,
         "runtime_max_threads": runtime_max_threads,
-        "runtime_max_threads_source": runtime_threads_source,
+        "runtime_max_threads_source": (
+            "runtime-config" if runtime_max_threads is not None else None
+        ),
         "effective_max_parallelism": effective_parallelism,
         "available_task_count": model_segment_count,
         "model_segment_count": model_segment_count,
@@ -881,6 +971,7 @@ def plan_parallel_segments(
         "coordinator_owns_frontier": True,
         "workers_may_delegate": False,
         "timing_kind": "estimate-only",
+        "context_policy": "bounded-worker-capsule",
     }
     result = {
         "route_id": route_id, "mode": "apply", "protocol": PARALLEL_PROTOCOL,
@@ -973,9 +1064,14 @@ def validate_parallel_envelope(
         _bounded_integer(requested_parallelism, "requested_max_parallelism", HARD_MAX_PARALLELISM)
         capacity = parallel.get("capacity_evaluation")
         if requested_parallelism > DEFAULT_AUTO_PARALLELISM and capacity is not None:
-            if parallel.get("runtime_max_threads_source") != "runtime-config":
+            if parallel.get("capacity_source") not in (
+                "observed-total-slots", "legacy-observed-worker-capacity"
+            ) and parallel.get("runtime_max_threads_source") != "runtime-config":
                 raise ValueError("parallel override above four lacks observed runtime capacity")
-            if parallel.get("runtime_max_threads", 0) < requested_parallelism:
+            available_slots = parallel.get(
+                "available_worker_slots", parallel.get("runtime_max_threads", 0)
+            )
+            if available_slots < requested_parallelism:
                 raise ValueError("parallel override above four exceeds runtime capacity")
             if capacity.get("useful_parallelism", 0) < requested_parallelism:
                 raise ValueError("parallel override above four exceeds useful task capacity")
@@ -1018,7 +1114,7 @@ def validate_segment_cursor(
     route_id, attempt_id, original_model, original_effort,
     protocol, restore_required, segment_budget, switch_budget, budget_source,
 ):
-    if not isinstance(plan, dict) or plan.get("protocol") != "segmented-v1":
+    if not isinstance(plan, dict) or plan.get("protocol") != SEGMENTED_PROTOCOL:
         raise ValueError("invalid segmented plan protocol")
     if protocol != plan.get("protocol"):
         raise ValueError("envelope protocol mismatch")
@@ -1076,6 +1172,42 @@ def validate_segment_cursor(
     if attempt_id != expected_attempt:
         raise ValueError("envelope attempt_id mismatch")
     return segments[cursor]
+
+
+def validate_fast_envelope(plan, route_id, segment_id, attempt_id):
+    """Validate the compact continuation used by a one-Segment Apply."""
+    if not isinstance(plan, dict) or plan.get("protocol") != FAST_PROTOCOL:
+        raise ValueError("invalid fast plan protocol")
+    segments = plan.get("segments")
+    if not isinstance(segments, list) or len(segments) != 1:
+        raise ValueError("fast plan requires exactly one segment")
+    if route_id != plan.get("route_id"):
+        raise ValueError("fast envelope route_id mismatch")
+    if plan.get("restore_required") and not is_gpt56_model(
+        plan.get("original", {}).get("model")
+    ):
+        raise ValueError("Restore to a non-GPT-5.6 original is forbidden")
+    segment = segments[0]
+    if segment_id != segment.get("segment_id"):
+        raise ValueError("fast envelope segment_id mismatch")
+    expected_hash = plan_hash(
+        segments, route_id, plan.get("original"), plan.get("restore_required"),
+        plan.get("segment_budget"), plan.get("switch_budget"),
+        plan.get("budget_source"), plan.get("routing_evidence"), FAST_PROTOCOL,
+    )
+    if plan.get("plan_hash") != expected_hash:
+        raise ValueError("fast plan hash mismatch")
+    actual_switches = int(segment.get("dispatch") == "same-task-switch") + int(
+        plan.get("restore_required") is True
+    )
+    if plan.get("switch_count") != actual_switches:
+        raise ValueError("fast plan switch count mismatch")
+    expected_attempt = hashlib.sha256(
+        f"{route_id}:{expected_hash}:{segment_id}".encode("utf-8")
+    ).hexdigest()
+    if attempt_id != expected_attempt or segment.get("attempt_id") != expected_attempt:
+        raise ValueError("fast attempt_id mismatch")
+    return segment
 
 
 def _validate_user_budget(value, field, hard_max):
@@ -1245,6 +1377,12 @@ def plan_apply_segments(
             "validation_budget": _segment_text(
                 raw.get("validation_budget"), "validation_budget", segment_id
             ),
+            "decisions": _optional_segment_list(
+                raw.get("decisions"), "decisions", segment_id
+            ),
+            "prohibited_actions": _optional_segment_list(
+                raw.get("prohibited_actions"), "prohibited_actions", segment_id
+            ) or ["do-not-replan", "do-not-delegate", "do-not-touch-out-of-scope-files"],
             "model": target_model,
             "effort": target_effort,
             "reason": source,
@@ -1285,10 +1423,11 @@ def plan_apply_segments(
         "model": current.get("model") if current.get("status") in ("verified", "synthetic") else None,
         "effort": current.get("effort") if current.get("status") in ("verified", "synthetic") else None,
     }
+    protocol = FAST_PROTOCOL if len(segments) == 1 else SEGMENTED_PROTOCOL
     result = {
         "route_id": route_id,
         "mode": "apply",
-        "protocol": "segmented-v1",
+        "protocol": protocol,
         "current": current,
         "original": original,
         "routing_evidence": evidence_audit(evidence),
@@ -1311,9 +1450,18 @@ def plan_apply_segments(
             for raw in raw_segments
         )),
     }
+    if protocol == FAST_PROTOCOL:
+        dispatch = segments[0]["dispatch"]
+        result["fast_path"] = {
+            "full_plan_continuation_required": False,
+            "cursor_required": False,
+            "claim_required": dispatch != "local",
+            "continuation_required": dispatch != "local",
+            "restore_required": restore_required,
+        }
     result["plan_hash"] = plan_hash(
         segments, route_id, original, restore_required,
-        segment_budget, switch_budget, budget_source, result["routing_evidence"],
+        segment_budget, switch_budget, budget_source, result["routing_evidence"], protocol,
     )
     for segment in segments:
         segment["attempt_id"] = hashlib.sha256(
@@ -1356,7 +1504,12 @@ def parser():
         help="User concurrency cap (1-16); values above 4 require observed matching runtime capacity",
     )
     root.add_argument("--runtime-max-threads", type=int, help="Observed Codex agents.max_threads constraint")
+    root.add_argument("--runtime-total-slots", type=int, help="Observed total slots including this coordinator")
+    root.add_argument("--runtime-running-workers", type=int, default=0, help="Workers already occupying observed slots")
+    root.add_argument("--coordinator-slots", type=int, default=DEFAULT_COORDINATOR_SLOTS)
+    root.add_argument("--context-capsule-segment", help="Emit bounded worker context for this segment")
     root.add_argument("--validate-envelope-json", help="JSON object containing plan, cursor, segment_id, and completed_ids")
+    root.add_argument("--validate-fast-envelope-json", help="Compact one-Segment continuation envelope")
     root.add_argument("--validate-parallel-envelope-json", help="JSON object containing plan and frontier state")
     root.add_argument("--synthetic-current-for-test", action="store_true", help=argparse.SUPPRESS)
     return root
@@ -1389,6 +1542,17 @@ def main():
             )
         except (json.JSONDecodeError, AttributeError, ValueError) as exc:
             raise SystemExit(f"invalid segment envelope: {exc}") from exc
+        print(json.dumps({"valid": True, "segment": segment}, ensure_ascii=False, sort_keys=True))
+        return
+    if args.validate_fast_envelope_json is not None:
+        try:
+            envelope = json.loads(args.validate_fast_envelope_json)
+            segment = validate_fast_envelope(
+                envelope.get("plan"), envelope.get("route_id"),
+                envelope.get("segment_id"), envelope.get("attempt_id"),
+            )
+        except (json.JSONDecodeError, AttributeError, ValueError) as exc:
+            raise SystemExit(f"invalid fast envelope: {exc}") from exc
         print(json.dumps({"valid": True, "segment": segment}, ensure_ascii=False, sort_keys=True))
         return
     if args.validate_parallel_envelope_json is not None:
@@ -1433,6 +1597,7 @@ def main():
     if args.segments_json is None and (
         args.max_segments is not None or args.max_switches is not None
         or args.parallel or args.max_parallelism is not None or args.runtime_max_threads is not None
+        or args.runtime_total_slots is not None or args.runtime_running_workers != 0
     ):
         raise SystemExit("segment budget and parallel options require --segments-json")
     try:
@@ -1474,7 +1639,16 @@ def main():
             if planner is plan_parallel_segments:
                 planner_options["max_parallelism"] = args.max_parallelism
                 planner_options["runtime_max_threads"] = args.runtime_max_threads
+                planner_options["runtime_total_slots"] = args.runtime_total_slots
+                planner_options["runtime_running_workers"] = args.runtime_running_workers
+                planner_options["coordinator_slots"] = args.coordinator_slots
             route = planner(raw_segments, **planner_options)
+            if args.context_capsule_segment:
+                print(json.dumps(
+                    context_capsule(route, args.context_capsule_segment),
+                    ensure_ascii=False, sort_keys=True,
+                ))
+                return
             print(json.dumps(route, ensure_ascii=False, sort_keys=True))
             return
         route = select_route(

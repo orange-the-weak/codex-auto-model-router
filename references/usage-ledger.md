@@ -9,11 +9,12 @@ Store project-local history at `.codex/model-routing-history.jsonl`. Keep one co
 - `execution`: one confirmed Segment attempt. Fields: `event_id`, optional `task_id`, optional `route_id`, optional `segment_id`, `timestamp`, `model`, `effort`, `task_class`, `outcome`, optional non-negative `duration_seconds`, `source`, `verification` (`deterministic`, `manual`, `none`, or `unknown`), and fallback fields. Older records without Segment identifiers remain valid and are treated as whole-task attempts.
 - `parallel_plan`: configured intent for one `dependency-parallel-v1` route. Fields: `route_id`, `protocol`, `parallelism_source` (`standard`, `smart-reduced`, or `user-override`; legacy `adaptive-extended` remains readable), `requested_max_parallelism`, `effective_max_parallelism`, `planned_worker_count`, and `model_plan`. This is never actual use or timing.
 - `parallel_execution`: one verified parallel run. Fields: `route_id`, `wall_clock_seconds`, `cumulative_worker_seconds`, `peak_concurrency`, `worker_count`, `outcome`, and reliable `source`.
+- `routing_efficiency`: observed orchestration metrics from task metadata or user confirmation. Optional fields cover routing, queue wait, executor startup, model switch, Restore, useful execution, model/tool round trips, and state-gate stops. Never fill missing fields with estimates.
 - `allocation`: one recommended snapshot. Fields: `event_id`, `timestamp`, `basis`, and `allocation`, whose percentages total 100.
 
 Use `source=user-confirmed` when the user supplies actual usage and `source=task-metadata` only when Codex exposes reliable metadata. Never convert a recommendation into an `execution` event. Use exact model names when known; otherwise use `available-default (unverified)`. An unverified default never authorizes a GPT-5.5 fallback while any GPT-5.6 route is selectable.
 
-For segmented execution, atomically `claim` before any project work, then supply both `route_id` and `segment_id` when recording the outcome. The ledger derives stable event IDs and rejects repeated natural keys for both claims and executions. If `claim` returns false, stop without tools or edits because that Segment envelope was already consumed. Legacy whole-task events without either identifier remain readable but are reported separately and do not affect Segment proportions or automatic retuning.
+For continued or delegated execution, atomically `claim` before project work, then supply both `route_id` and `segment_id` when recording the outcome. A same-turn local `apply-fast-v1` Segment skips the claim because it cannot replay. The ledger derives stable event IDs and rejects repeated natural keys. If `claim` returns false, stop without tools or edits. Legacy whole-task events remain readable but do not affect Segment proportions or retuning.
 
 ## Query rules
 
@@ -28,7 +29,7 @@ Show counts with percentages. Report success and pressure within comparable task
 
 Show total verified parallel wall clock, cumulative worker duration, and peak concurrency only from `parallel_execution`. Coarse work estimates, plan creation time, claim time, and ledger append timestamps are not runtime evidence. Do not infer worker start or stop times.
 
-Derive `effective_parallel_factor = cumulative_worker_seconds / wall_clock_seconds` and worker-time compression from verified parallel runs. Label both as effective concurrency measurements, not controlled serial A/B speedup. Report actual speedup only when a comparable serial wall-clock baseline is independently verified.
+Derive `effective_parallel_factor = cumulative_worker_seconds / wall_clock_seconds` and `parallel_utilization = cumulative_worker_seconds / (peak_concurrency × wall_clock_seconds)` from verified runs. These describe observed overlap and slot use without needing a serial baseline. Do not call either actual speedup; reserve that label for an optional controlled A/B run.
 
 ## Retuning rules
 
@@ -47,6 +48,7 @@ Use:
 - `claim --ledger <path> --route-id <id> --segment-id <id> --attempt-id <id>` before Segment work.
 - `parallel-plan --ledger <path> --route-id <id> --parallelism-source <source> --requested-max-parallelism <n> --effective-max-parallelism <n> --planned-worker-count <n> --model-plan '<json>'` for configured intent.
 - `parallel-execution --ledger <path> --route-id <id> --wall-clock-seconds <s> --cumulative-worker-seconds <s> --peak-concurrency <n> --worker-count <n> --outcome <outcome> --source <source>` only for verified runtime evidence.
+- `efficiency --ledger <path> --route-id <id> --source task-metadata|user-confirmed ...` for observed routing overhead and blocking evidence.
 - `summary --ledger <path>` for JSON aggregation.
 - `record` or `allocation` for append-only updates.
 - `render --ledger <path> --report <path>` to replace only the block between `<!-- MODEL_USAGE_START -->` and `<!-- MODEL_USAGE_END -->`. Never let an LLM edit that block directly.

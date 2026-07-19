@@ -62,6 +62,12 @@ class RoutePolicyTests(unittest.TestCase):
             values["segment_budget"], values["switch_budget"], values["budget_source"],
         )
 
+    def linear_plan(self, current_route=None):
+        return POLICY.plan_apply_segments([
+            self.segment("analyze", task_kind="complex"),
+            self.segment("implement"),
+        ], current=current_route or current())
+
     def adaptive_parallel_segments(self, count=6):
         return [
             self.segment(
@@ -138,22 +144,20 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertEqual(plan["switch_count"], 2)
 
     def test_envelope_rejects_restore_to_original_gpt55(self):
-        plan = POLICY.plan_apply_segments(
-            [self.segment("implement")], current=current("gpt-5.5", "medium")
-        )
+        plan = self.linear_plan(current("gpt-5.5", "medium"))
         plan["restore_required"] = True
         plan["switch_count"] += 1
         plan["plan_hash"] = POLICY.plan_hash(
             plan["segments"], plan["route_id"], plan["original"], True,
             plan["segment_budget"], plan["switch_budget"], plan["budget_source"],
-            plan["routing_evidence"],
+            plan["routing_evidence"], POLICY.SEGMENTED_PROTOCOL,
         )
         for segment in plan["segments"]:
             segment["attempt_id"] = POLICY.hashlib.sha256(
                 f"{plan['route_id']}:{plan['plan_hash']}:{segment['segment_id']}".encode()
             ).hexdigest()
         with self.assertRaisesRegex(ValueError, "non-GPT-5.6 original"):
-            self.validate_cursor(plan, 0, "implement", [])
+            self.validate_cursor(plan, 1, "implement", ["analyze"])
 
     def test_detects_latest_current_route_for_exact_thread(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -406,19 +410,19 @@ class RoutePolicyTests(unittest.TestCase):
             self.validate_cursor(plan, 1, "analyze", ["analyze"])
 
     def test_cursor_validation_rejects_mutated_plan(self):
-        plan = POLICY.plan_apply_segments([self.segment("implement")], current=current())
-        plan["segments"][0]["goal"] = "mutated"
+        plan = self.linear_plan()
+        plan["segments"][1]["goal"] = "mutated"
         with self.assertRaisesRegex(ValueError, "hash mismatch"):
-            self.validate_cursor(plan, 0, "implement", [])
+            self.validate_cursor(plan, 1, "implement", ["analyze"])
 
     def test_cursor_validation_rejects_evidence_snapshot_mutation(self):
-        plan = POLICY.plan_apply_segments([self.segment("implement")], current=current())
+        plan = self.linear_plan()
         plan["routing_evidence"]["snapshot_id"] = "forged"
         with self.assertRaisesRegex(ValueError, "hash mismatch"):
-            self.validate_cursor(plan, 0, "implement", [])
+            self.validate_cursor(plan, 1, "implement", ["analyze"])
 
     def test_legacy_plan_without_evidence_still_validates(self):
-        plan = POLICY.plan_apply_segments([self.segment("implement")], current=current())
+        plan = self.linear_plan()
         plan.pop("routing_evidence")
         plan["plan_hash"] = POLICY.plan_hash(
             plan["segments"], plan["route_id"], plan["original"],
@@ -429,19 +433,19 @@ class RoutePolicyTests(unittest.TestCase):
             segment["attempt_id"] = POLICY.hashlib.sha256(
                 f"{plan['route_id']}:{plan['plan_hash']}:{segment['segment_id']}".encode()
             ).hexdigest()
-        selected = self.validate_cursor(plan, 0, "implement", [])
+        selected = self.validate_cursor(plan, 1, "implement", ["analyze"])
         self.assertEqual(selected["segment_id"], "implement")
 
     def test_cursor_validation_rejects_budget_mutation(self):
-        plan = POLICY.plan_apply_segments([self.segment("implement")], current=current())
+        plan = self.linear_plan()
         plan["segment_budget"] = 5
         with self.assertRaisesRegex(ValueError, "hash mismatch"):
-            self.validate_cursor(plan, 0, "implement", [])
+            self.validate_cursor(plan, 1, "implement", ["analyze"])
 
     def test_cursor_validation_rejects_outer_budget_mismatch(self):
-        plan = POLICY.plan_apply_segments([self.segment("implement")], current=current())
+        plan = self.linear_plan()
         with self.assertRaisesRegex(ValueError, "budget mismatch"):
-            self.validate_cursor(plan, 0, "implement", [], segment_budget=5)
+            self.validate_cursor(plan, 1, "implement", ["analyze"], segment_budget=5)
 
     def test_segment_attempt_ids_are_unique_per_invocation(self):
         first = POLICY.plan_apply_segments([self.segment("implement")], current=current())
@@ -450,17 +454,37 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertNotEqual(first["segments"][0]["attempt_id"], second["segments"][0]["attempt_id"])
 
     def test_cursor_validation_rejects_forged_envelope_identity(self):
-        plan = POLICY.plan_apply_segments([self.segment("implement")], current=current())
+        plan = self.linear_plan()
         with self.assertRaisesRegex(ValueError, "route_id mismatch"):
-            self.validate_cursor(plan, 0, "implement", [], route_id="forged")
+            self.validate_cursor(plan, 1, "implement", ["analyze"], route_id="forged")
         with self.assertRaisesRegex(ValueError, "attempt_id mismatch"):
-            self.validate_cursor(plan, 0, "implement", [], attempt_id="forged")
+            self.validate_cursor(plan, 1, "implement", ["analyze"], attempt_id="forged")
         with self.assertRaisesRegex(ValueError, "original route mismatch"):
-            self.validate_cursor(plan, 0, "implement", [], original_model="gpt-5.6-luna")
+            self.validate_cursor(plan, 1, "implement", ["analyze"], original_model="gpt-5.6-luna")
         with self.assertRaisesRegex(ValueError, "protocol mismatch"):
-            self.validate_cursor(plan, 0, "implement", [], protocol="forged")
+            self.validate_cursor(plan, 1, "implement", ["analyze"], protocol="forged")
         with self.assertRaisesRegex(ValueError, "Restore decision mismatch"):
-            self.validate_cursor(plan, 0, "implement", [], restore_required=not plan["restore_required"])
+            self.validate_cursor(plan, 1, "implement", ["analyze"], restore_required=not plan["restore_required"])
+
+    def test_single_segment_uses_compact_fast_protocol(self):
+        plan = POLICY.plan_apply_segments([
+            self.segment("docs", task_kind="mechanical", risk="low", size="tiny")
+        ], current=current("gpt-5.6-luna", "low"))
+        self.assertEqual(plan["protocol"], POLICY.FAST_PROTOCOL)
+        self.assertFalse(plan["fast_path"]["claim_required"])
+        self.assertFalse(plan["fast_path"]["continuation_required"])
+        selected = POLICY.validate_fast_envelope(
+            plan, plan["route_id"], "docs", plan["segments"][0]["attempt_id"]
+        )
+        self.assertEqual(selected["dispatch"], "local")
+
+    def test_fast_switch_requires_claim_and_compact_continuation(self):
+        plan = POLICY.plan_apply_segments([
+            self.segment("docs", task_kind="mechanical", risk="low", size="tiny")
+        ], current=current("gpt-5.6-sol", "high"))
+        self.assertTrue(plan["fast_path"]["claim_required"])
+        self.assertTrue(plan["fast_path"]["continuation_required"])
+        self.assertFalse(plan["fast_path"]["full_plan_continuation_required"])
 
     def test_report_route_is_supported_for_one_segment(self):
         plan = POLICY.plan_apply_segments(
@@ -642,7 +666,7 @@ class RoutePolicyTests(unittest.TestCase):
 
     def test_parallel_override_above_four_requires_confirmed_capacity(self):
         segments = self.adaptive_parallel_segments()
-        with self.assertRaisesRegex(ValueError, "observed runtime_max_threads"):
+        with self.assertRaisesRegex(ValueError, "observed free worker capacity"):
             POLICY.plan_parallel_segments(
                 segments, current=current(), max_parallelism=6
             )
@@ -663,6 +687,38 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertEqual(plan["parallel"]["parallelism_source"], "smart-reduced")
         self.assertEqual(plan["parallel"]["requested_max_parallelism"], 4)
         self.assertEqual(plan["parallel"]["effective_max_parallelism"], 3)
+
+    def test_observed_total_slots_reserve_coordinator_and_running_workers(self):
+        plan = POLICY.plan_parallel_segments(
+            self.adaptive_parallel_segments(), current=current(),
+            runtime_total_slots=4, runtime_running_workers=1,
+        )
+        parallel = plan["parallel"]
+        self.assertEqual(parallel["coordinator_reserved_slots"], 1)
+        self.assertEqual(parallel["available_worker_slots"], 2)
+        self.assertEqual(parallel["effective_max_parallelism"], 2)
+        self.assertEqual(parallel["capacity_source"], "observed-total-slots")
+
+    def test_unverified_capacity_does_not_create_a_worker_queue(self):
+        plan = POLICY.plan_parallel_segments(
+            self.adaptive_parallel_segments(4), current=current()
+        )
+        self.assertEqual(plan["parallel"]["effective_max_parallelism"], 1)
+        self.assertEqual(plan["parallel"]["capacity_source"], "unverified-dispatch-probe")
+
+    def test_context_capsule_excludes_full_plan_and_future_segments(self):
+        segments = self.adaptive_parallel_segments(4)
+        segments[0]["decisions"] = ["Preserve the accepted baseline"]
+        segments[0]["prohibited_actions"] = ["Do not run a full build"]
+        plan = POLICY.plan_parallel_segments(
+            segments, current=current(), runtime_total_slots=4
+        )
+        capsule = POLICY.context_capsule(plan, "task-0")
+        self.assertNotIn("segments", capsule)
+        self.assertNotIn("current", capsule)
+        self.assertEqual(capsule["segment_id"], "task-0")
+        self.assertEqual(capsule["decisions"], ["Preserve the accepted baseline"])
+        self.assertEqual(capsule["prohibited_actions"], ["Do not run a full build"])
 
     def test_parallel_rejects_unknown_duplicate_and_cyclic_dependencies(self):
         invalid_plans = [
@@ -736,7 +792,7 @@ class RoutePolicyTests(unittest.TestCase):
             self.segment("one", access_mode="read"),
             self.segment("two", access_mode="read"),
             self.segment("join", depends_on=["one", "two"], access_mode="read"),
-        ], current=current(), max_parallelism=2)
+        ], current=current(), max_parallelism=2, runtime_total_slots=3)
         one = next(item for item in plan["segments"] if item["segment_id"] == "one")
         selected = POLICY.validate_parallel_envelope(
             plan, "one", [], [], plan["route_id"], one["attempt_id"]
@@ -775,7 +831,7 @@ class RoutePolicyTests(unittest.TestCase):
             self.segment("long", work_estimate="long", access_mode="read"),
             self.segment("short", work_estimate="short", access_mode="read"),
             self.segment("after-short", depends_on=["short"], access_mode="read"),
-        ], current=current(), max_parallelism=2)
+        ], current=current(), max_parallelism=2, runtime_total_slots=3)
         after_short = next(
             item for item in plan["segments"] if item["segment_id"] == "after-short"
         )

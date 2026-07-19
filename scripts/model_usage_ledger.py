@@ -27,6 +27,11 @@ MODES = ("assess", "apply", "query", "record", "retune")
 OUTCOMES = ("completed", "failed", "escalated", "reworked", "cancelled")
 SOURCES = ("user-confirmed", "task-metadata")
 VERIFICATIONS = ("deterministic", "manual", "none", "unknown")
+EFFICIENCY_DURATIONS = (
+    "routing_seconds", "queue_wait_seconds", "executor_start_seconds",
+    "model_switch_seconds", "restore_seconds", "useful_execution_seconds",
+)
+EFFICIENCY_COUNTS = ("model_round_trips", "tool_round_trips")
 USAGE_START = "<!-- MODEL_USAGE_START -->"
 USAGE_END = "<!-- MODEL_USAGE_END -->"
 
@@ -145,8 +150,40 @@ def validate_event(event):
                 raise ValueError(f"invalid parallel execution {field}")
         if event["peak_concurrency"] > event["worker_count"] or event["peak_concurrency"] > 16:
             raise ValueError("invalid parallel execution concurrency")
+        wall = event["wall_clock_seconds"]
+        worker = event["cumulative_worker_seconds"]
+        capacity_seconds = event["peak_concurrency"] * wall
+        if (wall == 0 and worker > 0) or worker > capacity_seconds + 1e-9:
+            raise ValueError("parallel worker time exceeds observed concurrency capacity")
         if event.get("outcome") not in OUTCOMES or event.get("source") not in SOURCES:
             raise ValueError("parallel execution requires verified outcome and source")
+    elif event_type == "routing_efficiency":
+        if event.get("source") not in SOURCES:
+            raise ValueError("routing efficiency requires task metadata or user confirmation")
+        supplied = False
+        for field in EFFICIENCY_DURATIONS:
+            value = event.get(field)
+            if value is not None:
+                supplied = True
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                    raise ValueError(f"invalid routing efficiency {field}")
+        for field in EFFICIENCY_COUNTS:
+            value = event.get(field)
+            if value is not None:
+                supplied = True
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    raise ValueError(f"invalid routing efficiency {field}")
+        gate = event.get("state_gate")
+        if gate is not None:
+            supplied = True
+            if gate not in ("passed", "stopped"):
+                raise ValueError("invalid routing efficiency state_gate")
+        if not supplied:
+            raise ValueError("routing efficiency requires at least one observed metric")
+        if event.get("state_gate_reason") is not None and (
+            not isinstance(event["state_gate_reason"], str) or not event["state_gate_reason"]
+        ):
+            raise ValueError("invalid routing efficiency state_gate_reason")
     else:
         raise ValueError("unknown event type")
 
@@ -165,7 +202,7 @@ def validate_event(event):
             raise ValueError(f"{identifier} must be a non-empty string")
     if event_type == "execution" and (("route_id" in event) != ("segment_id" in event)):
         raise ValueError("segmented execution requires both route_id and segment_id")
-    if event_type in ("parallel_plan", "parallel_execution") and not event.get("route_id"):
+    if event_type in ("parallel_plan", "parallel_execution", "routing_efficiency") and not event.get("route_id"):
         raise ValueError(f"{event_type} requires route_id")
     concurrency = event.get("concurrency")
     if concurrency is not None and (
@@ -209,6 +246,17 @@ def append_event(path, event):
         event.setdefault("event_id", str(uuid.uuid5(
             uuid.NAMESPACE_URL,
             f"codex-auto-model-router:{event['event']}:{event['route_id']}",
+        )))
+    elif event.get("event") == "routing_efficiency" and event.get("route_id"):
+        efficiency_kind = (
+            "gate-stop" if event.get("state_gate") == "stopped"
+            and not any(field in event for field in EFFICIENCY_DURATIONS + EFFICIENCY_COUNTS)
+            else "execution"
+        )
+        event.setdefault("event_id", str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "codex-auto-model-router:routing-efficiency:"
+            f"{event['route_id']}:{event.get('segment_id', 'route')}:{efficiency_kind}",
         )))
     else:
         event.setdefault("event_id", str(uuid.uuid4()))
@@ -317,8 +365,12 @@ def build_summary(events, warnings):
     latest = next((item for item in reversed(events) if item.get("event") == "allocation"), None)
     parallel_plans = [item for item in events if item.get("event") == "parallel_plan"]
     parallel_runs = [item for item in events if item.get("event") == "parallel_execution"]
+    efficiency_events = [item for item in events if item.get("event") == "routing_efficiency"]
     parallel_wall = sum(item["wall_clock_seconds"] for item in parallel_runs)
     parallel_worker = sum(item["cumulative_worker_seconds"] for item in parallel_runs)
+    parallel_capacity = sum(
+        item["peak_concurrency"] * item["wall_clock_seconds"] for item in parallel_runs
+    )
     latest_parallel = parallel_runs[-1] if parallel_runs else None
     latest_parallel_brief = None
     if latest_parallel:
@@ -330,6 +382,10 @@ def build_summary(events, warnings):
             "cumulative_worker_seconds": worker,
             "peak_concurrency": latest_parallel["peak_concurrency"],
             "effective_parallel_factor": round(worker / wall, 2) if wall > 0 else None,
+            "parallel_utilization_percent": (
+                round(worker * 100 / (latest_parallel["peak_concurrency"] * wall), 1)
+                if wall > 0 else None
+            ),
             "worker_time_compression_percent": (
                 round((1 - wall / worker) * 100, 1) if worker > 0 else None
             ),
@@ -351,11 +407,35 @@ def build_summary(events, warnings):
             "cumulative_worker_seconds": round(parallel_worker, 3),
             "peak_concurrency": max((item["peak_concurrency"] for item in parallel_runs), default=None),
             "effective_parallel_factor": round(parallel_worker / parallel_wall, 2) if parallel_wall > 0 else None,
+            "parallel_utilization_percent": (
+                round(parallel_worker * 100 / parallel_capacity, 1)
+                if parallel_capacity > 0 else None
+            ),
             "worker_time_compression_percent": (
                 round((1 - parallel_wall / parallel_worker) * 100, 1)
                 if parallel_worker > 0 else None
             ),
             "latest": latest_parallel_brief,
+        },
+        "routing_efficiency": {
+            "count": len(efficiency_events),
+            "durations": {
+                field: (
+                    round(sum(item[field] for item in efficiency_events if field in item), 3)
+                    if any(field in item for item in efficiency_events) else None
+                )
+                for field in EFFICIENCY_DURATIONS
+            },
+            "round_trips": {
+                field: (
+                    sum(item[field] for item in efficiency_events if field in item)
+                    if any(field in item for item in efficiency_events) else None
+                )
+                for field in EFFICIENCY_COUNTS
+            },
+            "state_gates": dict(Counter(
+                item.get("state_gate") for item in efficiency_events if item.get("state_gate")
+            )),
         },
         "route_performance": route_performance(segment_attempts),
         "actual_sample": "insufficient" if not segment_attempts else ("early" if len(segment_attempts) < 5 else "established"),
@@ -375,6 +455,20 @@ def markdown_table(view, first_header):
 
 def render_markdown(summary):
     sample = summary["actual_sample"]
+    efficiency = summary["routing_efficiency"]
+
+    def observed(value, suffix=""):
+        return "—" if value is None else f"{value:g}{suffix}"
+
+    switch_restore = None
+    if (
+        efficiency["durations"]["model_switch_seconds"] is not None
+        or efficiency["durations"]["restore_seconds"] is not None
+    ):
+        switch_restore = (
+            (efficiency["durations"]["model_switch_seconds"] or 0)
+            + (efficiency["durations"]["restore_seconds"] or 0)
+        )
     lines = [
         USAGE_START,
         f"_Observed sample: **{sample}**. Actual use counts non-cancelled Segment attempts backed by task metadata or user confirmation._",
@@ -398,10 +492,25 @@ def render_markdown(summary):
             f"{summary['parallel_execution']['wall_clock_seconds']:g}s; cumulative worker time: "
             f"{summary['parallel_execution']['cumulative_worker_seconds']:g}s; peak concurrency: "
             f"{summary['parallel_execution']['peak_concurrency'] or '—'}; effective parallel factor: "
-            f"{summary['parallel_execution']['effective_parallel_factor'] or '—'}x "
-            "(cumulative worker time / wall clock; not a controlled serial A/B)."
+            f"{summary['parallel_execution']['effective_parallel_factor'] or '—'}x; parallel utilization: "
+            f"{summary['parallel_execution']['parallel_utilization_percent'] or '—'}%. "
+            "The factor measures observed work overlap, not serial/parallel speedup."
             if summary["parallel_execution"]["count"] else
             "Insufficient verified parallel timing data."
+        ),
+        "",
+        "### Verified routing overhead",
+        "",
+        (
+            f"Samples: {efficiency['count']}; routing: "
+            f"{observed(efficiency['durations']['routing_seconds'], 's')}; queue wait: "
+            f"{observed(efficiency['durations']['queue_wait_seconds'], 's')}; executor startup: "
+            f"{observed(efficiency['durations']['executor_start_seconds'], 's')}; model switch + Restore: "
+            f"{observed(switch_restore, 's')}; model/tool round trips: "
+            f"{observed(efficiency['round_trips']['model_round_trips'])}/"
+            f"{observed(efficiency['round_trips']['tool_round_trips'])}."
+            if efficiency["count"] else
+            "Insufficient verified routing-overhead data."
         ),
         "",
         "### Legacy whole-task execution records",
@@ -520,6 +629,25 @@ def parallel_execution(args):
     print(json.dumps({"appended": append_event(args.ledger, event), "event_id": event.get("event_id")}, ensure_ascii=False))
 
 
+def routing_efficiency(args):
+    event = {
+        "event": "routing_efficiency", "route_id": args.route_id,
+        "source": args.source,
+    }
+    if args.segment_id:
+        event["segment_id"] = args.segment_id
+    for field in EFFICIENCY_DURATIONS + EFFICIENCY_COUNTS + (
+        "state_gate", "state_gate_reason",
+    ):
+        value = getattr(args, field, None)
+        if value is not None:
+            event[field] = value
+    print(json.dumps({
+        "appended": append_event(args.ledger, event),
+        "event_id": event.get("event_id"),
+    }, ensure_ascii=False))
+
+
 def allocation(args):
     try:
         values = json.loads(args.values)
@@ -611,6 +739,18 @@ def parser():
     measured.add_argument("--outcome", choices=OUTCOMES, required=True)
     measured.add_argument("--source", choices=SOURCES, required=True)
     measured.set_defaults(func=parallel_execution)
+    efficiency = commands.add_parser("efficiency")
+    efficiency.add_argument("--ledger", type=Path, required=True)
+    efficiency.add_argument("--route-id", required=True)
+    efficiency.add_argument("--segment-id")
+    efficiency.add_argument("--source", choices=SOURCES, required=True)
+    for field in EFFICIENCY_DURATIONS:
+        efficiency.add_argument("--" + field.replace("_", "-"), type=float)
+    for field in EFFICIENCY_COUNTS:
+        efficiency.add_argument("--" + field.replace("_", "-"), type=int)
+    efficiency.add_argument("--state-gate", choices=("passed", "stopped"))
+    efficiency.add_argument("--state-gate-reason")
+    efficiency.set_defaults(func=routing_efficiency)
     alloc = commands.add_parser("allocation")
     alloc.add_argument("--ledger", type=Path, required=True)
     alloc.add_argument("--values", required=True, help='JSON object such as {"Sol":30,"Terra":50,"Luna":20}')

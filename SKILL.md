@@ -5,7 +5,7 @@ description: Deterministically analyze, apply, query, record, and retune project
 
 # Codex Auto Model Router
 
-Route simple requests as one segment. Re-evaluate every applicable Apply request from its own task evidence; never inherit either a stronger or weaker route merely because the previous request used it. Move down for simple work and up for complex work whenever the selected route differs. Use linear `segmented-v1` by default and `dependency-parallel-v1` only for genuinely independent work whose dependencies and mutation ownership are explicit. Query and Record stay local and fast. Never add API integration, estimate API spend, create a top-level Codex task, or commit/push unless the user separately requests it.
+Route simple requests through `apply-fast-v1`: re-evaluate the request, select one route, and avoid a full DAG/cursor continuation when no switch is needed. Use linear `segmented-v1` only for real sequential boundaries and `dependency-parallel-v1` only for genuinely independent work. Never inherit the previous request's strength, add API integration, create a top-level Codex task, or commit/push unless the user separately requests it.
 
 Run `scripts/route_policy.py` before Assess, Retune, or Apply. For Apply, pass a JSON segment plan with `--segments-json`. Read [execution-state-machine.md](references/execution-state-machine.md) for segment envelopes and transitions, [preset-mapping.md](references/preset-mapping.md) before custom-agent fallback, [usage-ledger.md](references/usage-ledger.md) before writing history, [routing-criteria.md](references/routing-criteria.md) for model selection, and [benchmark-evidence.md](references/benchmark-evidence.md) before changing evidence-derived lanes.
 
@@ -35,7 +35,8 @@ Unknown modes, missing `route_id`, invalid `segment_id`, or a cursor outside the
 2. Query, Record, and Help never switch models or spawn agents. Use the local ledger script for Query and Record.
 3. Parse optional user overrides. Accept Sol, GPT-5.6, GPT-5.6 Sol, Terra, or Luna; accept low, medium, high, xhigh, and map `very high` or `extra high` to xhigh. A whole-request override applies to every segment. A segment-specific override applies only there. Ask only when overrides conflict or are unsupported.
 4. For Assess or Retune, classify and route the single analysis task with the policy script, then use Capability check and Dispatch.
-5. For Apply, create the smallest necessary plan. Use a linear plan unless at least two tasks can make useful independent progress. Validate the immutable plan with the policy script, then execute it without changing routes, dependencies, ownership, or concurrency.
+5. For Apply, create the smallest necessary plan. One normalized Segment uses `apply-fast-v1`; multiple sequential Segments use `segmented-v1`; independent tasks may use `dependency-parallel-v1`.
+6. Use `scripts/router_runtime.py begin` and `finish` as the normal state gates. They combine envelope validation, replay claim when needed, runtime inspection, verified recording, and next-state resolution. Do not split those deterministic operations into extra model turns.
 
 ## Apply segment planning
 
@@ -72,20 +73,20 @@ Adaptive budgets:
 
 ## Dependency-aware parallel planning
 
-Enable `--parallel` or supply a non-linear dependency graph only when useful independent work exists. Pass observed Codex `agents.max_threads` as `--runtime-max-threads` when available. Automatic planning requests at most 4 and only reduces it from the dependency-independent model width, model task count, and runtime capacity. Never auto-expand above 4. A user may request more than 4 only when observed runtime capacity and the normalized independent width both meet the request; otherwise reject it instead of creating an ineffective queue. If runtime configuration is unavailable, values above 4 are illegal and the documented default is only a ceiling for reduction. Codex's documented default `agents.max_depth=1` reinforces that executor workers are leaves and may not delegate.
+Enable `--parallel` only when useful independent work exists. Automatic planning requests at most 4, then reduces it by dependency-independent width and **observed free worker slots**. When metadata exposes total slots, pass `--runtime-total-slots <n>`; the planner reserves one coordinator slot and subtracts already-running workers from `--runtime-running-workers`. Do not treat a documented/default thread limit as live free capacity. With no observed capacity, dispatch one worker, confirm the next free slot, then refill; never pre-create a queue. A user request above 4 is legal only when observed free slots and useful independent width both meet it.
 
 - Keep a single task intact when its state or file boundaries are coupled. Split one long task only across real independent boundaries with separate acceptance checks and ownership.
 - Estimate work coarsely as short, normal, or long. Compute critical-path weight from this estimate and dispatch ready tasks in descending critical-path order, breaking ties by normalized plan order. Use wait-any list scheduling: when any worker completes, update the frontier and fill the next free slot; do not impose wave barriers.
 - Merge at most three short siblings only when they have identical dependencies and successors, the same selected model/effort and task class, and compatible mutation ownership.
 - Prefer read-only workers for broad discovery. Every write worker must own concrete repository-relative `write_scopes`; concurrently running write scopes must not overlap. Use `conflict_keys` to serialize Git index, lockfiles, project files, migrations, deployment targets, shared simulators, and other shared mutable resources. Any conflict adds a deterministic dependency and degrades to serial.
-- The coordinator exclusively owns the ready/running/completed frontier, executor dispatch, wait-any loop, failure transition, and final summary. Workers receive one bounded Segment with `ROUTE_PROJECT_MODELS_EXECUTOR=1`; they must not plan, route, advance, or delegate.
+- The coordinator exclusively owns the full plan, conversation context, ready/running/completed frontier, wait-any loop, and final summary. Workers receive only a bounded context capsule: goal, necessary decisions, paths/ownership, dependencies, acceptance, validation budget, prohibited actions, and immutable IDs/hashes. Never copy the full chat or future plan into every worker.
 - Failure policy is `stop-dispatch-drain-running`: after the first failed worker, start nothing else, wait for already running workers, preserve their bounded results, mark undispatched work skipped, and summarize deterministically in normalized Segment order. Never retry a failed Segment by cycling models.
 - Hash the full DAG, routes, coarse work estimates, write scopes, conflict keys, `parallelism_source=standard|smart-reduced|user-override`, requested/effective concurrency, scheduler, aggregation order, and failure policy. Echo the source and both caps in every worker envelope; validate them against the immutable plan, completed/running sets, dependencies, confirmed free capacity, and attempt ID. Legacy `adaptive-extended` plans and plans without `parallelism_source` remain readable.
 - Create an executor only after confirming a free slot. Keep later nodes in the immutable plan but do not pre-create, queue, or block agents beyond effective capacity; refill exactly one free slot after a worker returns.
 
 Immediately before parallel dispatch show:
 
-`Codex 自动路由｜并行计划：<tasks> 个任务｜并发：<effective>/<requested>｜来源：<standard|smart-reduced|user-override>｜约束：max_threads=<runtime>｜调度：关键路径优先`
+`Codex 自动路由｜并行计划：<tasks> 个任务｜并发：<effective>/<requested>｜可用 worker：<observed>｜来源：<standard|smart-reduced|user-override>｜调度：关键路径优先`
 
 Then show the normal per-Segment model line once for each dispatched worker. This makes both automatic model and concurrency selection visible.
 
@@ -103,18 +104,18 @@ Use this order once for the complete plan:
 
 Never make a persistent same-task switch when the original model or effort is unknown. The policy returns `selectable-subagent-or-local` in that case.
 
-## Segment envelope
+## Context and envelope
 
-Every same-task Apply continuation carries:
+The coordinator retains the full immutable plan. A worker or one-Segment continuation carries only:
 
 - `ROUTE_PROJECT_MODELS_ROUTED_TURN=1` and `ROUTED_MODE=APPLY_SEGMENT`
-- one immutable `route_id`, protocol version, complete normalized plan, selected Segment/switch budgets and source, `plan_hash`, zero-based current cursor, and per-segment `attempt_id`
+- one immutable `route_id`, protocol version, `plan_hash`, `segment_id`, and `attempt_id`
 - current `segment_id`, index, selected model/effort, goal, dependencies, acceptance, and validation budget
 - verified `original_model` and `original_effort`
 - repository, report, and ledger paths
-- accumulated completed-segment results and changed-file summary
+- only the necessary prior decisions and bounded changed-file/result summary
 
-Do not include unrelated future implementation details beyond the normalized plan. End the current turn after the next same-task continuation is accepted.
+Do not include full chat history or unrelated future implementation details. `segmented-v1` coordinator state still validates the complete plan; leaf workers never receive it.
 
 ## Visible routing protocol
 
@@ -125,6 +126,7 @@ Immediately before every Assess, Retune, Apply segment, Query, or Record, show o
 - This means Codex automatically selected the route; never use an ambiguous bare `路由提示` label.
 - Show the line once per executed segment, not once per command or file.
 - For a one-segment request, use `Segment 1/1`.
+- Do not narrate fast-path internals; one compact route line is enough.
 - If the selected route already matches the current task settings, show the actual model and effort with `当前路由已匹配`; never show `current-route` or `keep` placeholders.
 - Label a configured route as configured, not observed, when reliable metadata is unavailable.
 - A normal successful completion needs no separate model-identity or runtime-verification warning.
@@ -135,10 +137,10 @@ Immediately before every Assess, Retune, Apply segment, Query, or Record, show o
 
 When `ROUTED_MODE=APPLY_SEGMENT`:
 
-1. Run `scripts/route_policy.py --validate-envelope-json '<json>'` to validate `route_id`, protocol, selected budgets and source, `plan_hash`, zero-based cursor, `segment_id`, `attempt_id`, original route, and the exact ordered list of completed Segment IDs. Never classify, plan, split, delegate, or change a later route.
-2. Before any project tool or edit, run `scripts/model_usage_ledger.py claim` with the ledger path, `route_id`, `segment_id`, and `attempt_id`. If `claimed=false`, treat the envelope as a replay and stop without executing or advancing. If the ledger is unavailable, do not persistently chain this Segment; use an isolated executor or local fallback so replay cannot duplicate parent-task side effects.
+1. Run `scripts/router_runtime.py begin --ledger <path> --envelope-json '<json>'`. It validates protocol/identity/frontier, performs an atomic claim only when continuation can replay, inspects runtime metadata, and returns the bounded context capsule. If its state gate stops, do no project work.
+2. A local `apply-fast-v1` Segment whose selected route already matches skips claim, cursor, full-plan continuation, and Restore. A switched fast Segment retains one compact claim and one final Restore decision.
 3. Show the segment's visible routing line, then execute only its goal. Read applicable repository instructions, preserve unrelated changes, and stay within its validation budget.
-4. Run `scripts/route_policy.py --inspect-current`. Record one `execution` event for this segment only when metadata matches the selected model/effort or the user confirms it. Include `route_id` and `segment_id`; the ledger derives a stable event ID so a replay cannot double-count the Segment. Never record a configured target as actual use.
+4. Run `scripts/router_runtime.py finish` once with the bounded result. It inspects current metadata, records actual execution only from task metadata or user confirmation, accepts optional observed overhead metrics, and resolves `advance|refill-frontier|restore|return|stop`.
 5. On failure, record the verified outcome when possible, stop all remaining segments, and enter Restore with a concise partial result. Do not silently retry with another route.
 6. On success, append the bounded result and changed-file summary to the accumulator. If another segment exists, send exactly one same-task continuation with the next model/effort and cursor, then end the turn.
 7. After the final segment, run proportionate final checks only if they were assigned to that segment, then enter Restore.
@@ -160,7 +162,8 @@ Before Query or Record, use the visible line with `local-script` and `none`.
 - Record appends only user-confirmed or reliable task-metadata execution, then summarizes and renders.
 - Report actual execution proportions as verified Segment attempts, separate from analysis calls and latest recommended allocation.
 - For parallel work, also report model × verified concurrency. Record `parallel_plan` as configured intent. Record `parallel_execution` only when wall clock, cumulative worker duration, peak concurrency, worker count, source, and outcome are genuinely available from task metadata or user confirmation. Never use the ledger event timestamp as a worker start time or turn estimates into observed timing.
-- End every Apply chat summary with one concise concurrency line. For serial work say `并发：未启用｜提速：不适用（任务未形成有价值的独立并行边界）`. For a parallel plan without verified timing say `并发：<effective>/<requested>｜提速：待实测`. With verified timing say `并发：峰值 <n>｜墙钟：<time>｜有效并发倍率：<cumulative worker time / wall clock>x｜时间压缩：<percent>%`, and label it as worker-time compression rather than controlled serial A/B speedup. Only call `serial wall / parallel wall` an actual speedup when a comparable serial run is independently verified.
+- Record `routing_efficiency` only from task metadata or user confirmation: routing/orchestration, queue wait, executor startup, switch, Restore, useful execution, model/tool round trips, and state-gate stops. Missing fields stay missing; never guess them.
+- End every Apply chat summary with one concise concurrency line. For serial work say `并发：未启用｜原因：任务未形成有价值的独立并行边界`. Without verified timing say `并发：<effective>/<requested>｜测量：待记录`. With verified timing say `并发：峰值 <n>｜墙钟：<wall>｜累计 worker：<worker>｜有效并发倍率：<worker / wall>x｜并发利用率：<worker / (peak × wall)>%`. The multiplier is an observed work-overlap metric and needs no serial baseline; do not call it actual speedup. Report actual speedup only for an optional controlled A/B run.
 - Never infer actual use from a recommendation or configured-but-unverified route.
 
 ## Routed Assess and Retune
@@ -190,4 +193,4 @@ Under `## Usage proportions`, include exactly one empty marker pair:
 
 `<!-- MODEL_USAGE_END -->`
 
-The ledger script owns the marker contents. Retune raises only after at least 5 comparable attempts with at least 40% failure/escalation/rework pressure, and lowers only after at least 10 attempts with at least 90% completion, deterministic verification, and no pressure events. The chat result stays brief: completion, key optimizations, checks, remaining risk, concurrency/speedup line, and report link when applicable.
+The ledger script owns the marker contents. Retune raises only after at least 5 comparable attempts with at least 40% failure/escalation/rework pressure, and lowers only after at least 10 attempts with at least 90% completion, deterministic verification, and no pressure events. Keep chat results brief: completion, key optimizations, checks, remaining risk, concurrency-effectiveness line, and report link when applicable.
