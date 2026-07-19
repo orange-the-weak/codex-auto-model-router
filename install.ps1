@@ -41,6 +41,13 @@ function Invoke-InjectedFailure([string]$Point) {
     }
 }
 
+function Test-FileContentEqual([string]$Left, [string]$Right) {
+    $leftBytes = [IO.File]::ReadAllBytes($Left)
+    $rightBytes = [IO.File]::ReadAllBytes($Right)
+    if ($leftBytes.Length -ne $rightBytes.Length) { return $false }
+    return [Convert]::ToBase64String($leftBytes) -ceq [Convert]::ToBase64String($rightBytes)
+}
+
 try {
     New-Item -ItemType Directory -Force -Path $skillsRoot, $agentTarget | Out-Null
     foreach ($existingTarget in @($skillTarget, $legacySkillTarget)) {
@@ -69,10 +76,10 @@ try {
         (Join-Path $root 'SKILL.md'), (Join-Path $root 'agents/openai.yaml')
     ) + (Get-ChildItem -LiteralPath (Join-Path $root 'references') -File -Filter '*.md' | ForEach-Object { $_.FullName }) + @((Join-Path $root 'references/benchmark-evidence.json')) + (Get-ChildItem -LiteralPath (Join-Path $root 'scripts') -File -Filter '*.py' | ForEach-Object { $_.FullName })) {
         $relative = $source.Substring($root.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
-        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stagedSkill $relative)).Hash) { throw "Staged payload verification failed: $relative" }
+        if (-not (Test-FileContentEqual $source (Join-Path $stagedSkill $relative))) { throw "Staged payload verification failed: $relative" }
     }
     Get-ChildItem -LiteralPath (Join-Path $root 'codex-agents') -File -Filter '*.toml' | ForEach-Object {
-        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stagedAgents $_.Name)).Hash) { throw "Staged preset verification failed: $($_.Name)" }
+        if (-not (Test-FileContentEqual $_.FullName (Join-Path $stagedAgents $_.Name))) { throw "Staged preset verification failed: $($_.Name)" }
     }
 
     if (Test-Path -LiteralPath $legacySkillTarget) {

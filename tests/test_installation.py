@@ -263,9 +263,12 @@ class InstallationTests(unittest.TestCase):
             "CODEX_AUTO_MODEL_ROUTER_INSTALL_FAIL_AT",
             "during-agent-backup",
             "$legacySkillBackup",
+            "Test-FileContentEqual",
+            "[IO.File]::ReadAllBytes",
         ):
             self.assertIn(required, installer)
         self.assertNotIn("project-model-*.toml", installer)
+        self.assertNotIn("Get-FileHash", installer)
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if powershell:
             escaped_installer = str(ROOT / "install.ps1").replace("'", "''")
