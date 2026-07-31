@@ -63,6 +63,7 @@ Windows PowerShell：
 - 默认预算 4 个 Segment/4 次切换；复杂或大型计划可自动扩到 6/6；用户可显式设置，但 8/8 是硬上限。最终恢复计入切换次数。
 - 回退保持在 GPT-5.6 家族内：Sol 依次尝试 Terra、Luna；Terra 依次尝试 Sol、Luna；Luna 依次尝试 Terra、Sol。只有整个 5.6 家族不可用时才允许 GPT-5.5。
 - 每段只显示一次模型和推理强度；失败立即停止；最后只恢复一次可验证的原路由。
+- 模型切换消息先显示任务、模型和下一步；内部 ID 与状态只放在续接消息末尾，不再占据首屏。
 - 本地 JSONL 账本只记录可验证执行，推荐路由不会被算成真实使用。
 - 每个并行任务派发确认和结果收到时，都由协调线程用同一 monotonic clock 自动打点；实际用时、并行任务累计用时、峰值并发和槽位利用都由区间推导，模型不能填写时间数字。
 - 旧的聚合计时记录继续可读，但退出 verified 历史，不再影响并发统计。
@@ -81,7 +82,7 @@ $codex-auto-model-router 查询使用比例并根据真实结果微调
 对话框提示示例：
 
 ```text
-Codex 自动路由｜Segment 1/3：分析改动｜模型：GPT-5.6 Sol｜推理：high｜任务歧义较高
+Codex 自动路由｜任务段：分析改动｜模型：GPT-5.6 Sol｜推理：high｜任务歧义较高
 Codex 自动路由｜并发计划：4 个任务（含主任务）｜来源：smart-reduced｜调度：关键路径优先
 并发：峰值 4（含主任务）｜实际用时：2分0秒｜并行任务累计用时：4分48秒｜并行省时估算：58%｜槽位利用：85%
 ```
@@ -91,6 +92,10 @@ Codex 自动路由｜并发计划：4 个任务（含主任务）｜来源：sma
 ## 关于这个项目
 
 这是我的第一个开源项目。它来自一个很实际的困扰：我在不同 Codex 项目里反复做同样的模型选择。欢迎真实使用反馈、问题报告和小改进。
+
+## 反馈
+
+如果路由过强、过弱、过度拆分或不必要地阻塞，请在不包含私人提示词和源码的前提下[提交一次路由结果](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=routing-feedback.yml)。其他问题和建议请使用 [GitHub Issues](https://github.com/orange-the-weak/codex-auto-model-router/issues)。
 
 ## 兼容性与开发
 

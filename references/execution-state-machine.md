@@ -21,6 +21,7 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 - The bundled benchmark snapshot is an offline, stale-aware prior. Its audit metadata is immutable in new plans and covered by `plan_hash`; legacy envelopes without that field remain valid. Missing, invalid, or expired evidence falls back without a network request.
 - The standard budget is 4/4, eligible complex or large plans may expand to 6/6, and explicit user budgets may reach the absolute 8/8 hard limit. Switch counts include final Restore.
 - Dispatch performs at most one same-task continuation per segment boundary and at most one explicitly model-selectable subagent fallback per segment.
+- Every same-task continuation is readable-first because Codex may expose the prompt as a normal chat message. A short task/route/next-action block precedes the machine envelope; the bounded envelope follows inside `<!-- CODEX_ROUTER_INTERNAL ... -->`, or in a final `内部路由上下文` fence only when the surface strips comments before model input.
 - Availability fallback stays inside GPT-5.6 while Sol, Terra, or Luna is selectable. Every non-target route uses a verified capability decision bound to the complete attempt identity. GPT-5.5 is legal only after the capability check proves the complete GPT-5.6 family unavailable; a reason string alone never authorizes it.
 - Only reliable task metadata or explicit user confirmation establishes actual model identity.
 - Never make a persistent same-task switch when the original model or effort is unknown.
@@ -40,7 +41,7 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 
 The policy script validates a JSON array and returns `apply-fast-v1` for one normalized Segment or `segmented-v1` for multiple sequential Segments, plus a unique `route_id`, routes, budgets, and Restore decision.
 
-`apply-fast-v1` avoids a full DAG/cursor envelope. If the selected route already matches, execute locally and return. If it differs, send one compact continuation with immutable identity, claim once, execute, and Restore once when required.
+`apply-fast-v1` avoids a full DAG/cursor envelope. If the selected route already matches, execute locally and return. If it differs, send one compact readable-first continuation with immutable identity, claim once, execute, and Restore once when required.
 
 Normalize in this order:
 
@@ -88,6 +89,15 @@ Every Apply continuation carries:
 - verified `original_model` and `original_effort`
 - repository, report, and ledger paths
 - accumulated completed-segment results and changed-file summary
+
+The prompt order is part of the user-visible contract:
+
+1. `继续当前任务：<task segment>`
+2. the compact `Codex 自动路由` line
+3. one concise next-action sentence
+4. only then `<!-- CODEX_ROUTER_INTERNAL ... -->` containing the bounded machine envelope
+
+Never put mode flags, IDs, hashes, paths, JSON, or the full plan before the readable block. Restore uses `任务已完成，正在恢复原模型并返回结果。` before its hidden internal block.
 
 The coordinator retains the complete immutable plan and conversation context. Each parallel task receives only its context capsule: goal, necessary prior decisions, dependencies, selected route, access/write scopes, conflict keys, acceptance, validation budget, prohibited actions, and immutable IDs/hashes. `agent_task_name` is the content-based semantic `segment_id` normalized to Codex's `[a-z0-9_]+` task-name grammar (for example, `runtime-ledger-audit` becomes `runtime_ledger_audit`). The Router never invents a random or ordinal name. The receiver validates the capsule against coordinator state and atomically claims `route_id + plan_hash + segment_id + attempt_id` only when the execution can replay. Any mismatch, repeated claim, or latched route failure is terminal.
 

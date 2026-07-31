@@ -123,15 +123,39 @@ The coordinator retains the full immutable plan. A worker or one-Segment continu
 
 Do not include full chat history or unrelated future implementation details. `segmented-v1` coordinator state still validates the complete plan; leaf workers never receive it.
 
+## Readable continuation prompt
+
+Treat every `send_message_to_thread` prompt as user-visible. Never begin it with `ROUTE_PROJECT_MODELS_*`, `ROUTED_MODE`, JSON, IDs, hashes, paths, or other machine fields.
+
+Start every model-switch or Segment continuation with this readable block:
+
+```text
+继续当前任务：<task segment>
+Codex 自动路由｜任务段：<task segment>｜模型：<model>｜推理：<effort>｜<reason>
+<one concise sentence describing what happens next>
+```
+
+After the readable block, place the bounded machine envelope in a Markdown HTML comment so the receiving model retains it without making it the first visible content:
+
+```text
+<!-- CODEX_ROUTER_INTERNAL
+ROUTE_PROJECT_MODELS_ROUTED_TURN=1
+ROUTED_MODE=APPLY_SEGMENT
+<bounded immutable envelope>
+-->
+```
+
+Keep the actionable goal and acceptance criteria concise and readable before the internal comment when the receiver needs them. If the continuation surface strips HTML comments before model input, put the same internal block in a fenced section titled `内部路由上下文` at the end; the readable block must still come first. Restore prompts start with `任务已完成，正在恢复原模型并返回结果。` before their internal `ROUTED_MODE=RETURN` block.
+
 ## Visible routing protocol
 
 Immediately before every Assess, Retune, Apply segment, Query, or Record, show one compact commentary line:
 
-`Codex 自动路由｜Segment <index>/<total>：<task segment>｜模型：<model>｜推理：<low|medium|high|xhigh|none>｜<reason>`
+`Codex 自动路由｜任务段：<task segment>｜模型：<model>｜推理：<low|medium|high|xhigh|none>｜<reason>`
 
 - This means Codex automatically selected the route; never use an ambiguous bare `路由提示` label.
 - Show the line once per executed segment, not once per command or file.
-- For a one-segment request, use `Segment 1/1`.
+- Keep Segment index and total in the immutable plan and ledger only; do not expose `<index>/<total>` in the commentary line.
 - Do not narrate fast-path internals; one compact route line is enough.
 - If the selected route already matches the current task settings, show the actual model and effort with `当前路由已匹配`; never show `current-route` or `keep` placeholders.
 - Label a configured route as configured, not observed, when reliable metadata is unavailable.
@@ -148,7 +172,7 @@ When `ROUTED_MODE=APPLY_SEGMENT`:
 3. Show the segment's visible routing line, then execute only its goal. Read applicable repository instructions, preserve unrelated changes, and stay within its validation budget.
 4. Run `scripts/router_runtime.py finish` once with the bounded result. It inspects current metadata, records actual execution only from task metadata or user confirmation, accepts optional observed overhead metrics, and resolves `advance|refill-frontier|restore|return|stop`.
 5. On failure, record the verified outcome when possible, stop all remaining segments, and enter Restore with a concise partial result. Do not silently retry with another route.
-6. On success, append the bounded result and changed-file summary to the accumulator. If another segment exists, send exactly one same-task continuation with the next model/effort and cursor, then end the turn.
+6. On success, append the bounded result and changed-file summary to the accumulator. If another segment exists, send exactly one readable-first same-task continuation with the next model/effort and cursor, then end the turn.
 7. After the final segment, run proportionate final checks only if they were assigned to that segment, then enter Restore.
 
 `ROUTED_MODE=APPLY_ONESHOT` follows the same rules as a plan containing exactly one segment and cannot create another implementation segment.

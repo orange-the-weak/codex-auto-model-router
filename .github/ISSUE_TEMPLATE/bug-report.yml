@@ -1,0 +1,52 @@
+name: Bug report
+description: Report an installer, runtime, ledger, or documentation defect
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please provide a minimal, sanitized reproduction. For security issues, use GitHub private vulnerability reporting instead.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include only sanitized commands, notices, and errors.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Codex version, installation method, and Router commit or release.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Installation
+        - Model or effort selection
+        - Segment or parallel planning
+        - Switching, fallback, or Restore
+        - Usage ledger or timing
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed prompts, source code, credentials, personal paths, and private project data.
+          required: true

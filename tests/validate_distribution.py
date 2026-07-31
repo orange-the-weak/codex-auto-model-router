@@ -22,6 +22,33 @@ for ignored_private_output in (
     if ignored_private_output not in gitignore_text:
         fail(f"private or duplicate output is not excluded: {ignored_private_output}")
 
+community_files = {
+    ".github/ISSUE_TEMPLATE/routing-feedback.yml": (
+        "Routing feedback",
+        "I removed prompts, source code, credentials, personal paths, and private project data.",
+    ),
+    ".github/ISSUE_TEMPLATE/bug-report.yml": (
+        "Bug report",
+        "For security issues, use GitHub private vulnerability reporting instead.",
+    ),
+    ".github/pull_request_template.md": (
+        "## Evidence and compatibility",
+        "No prompts, source code, credentials, paths, or private project data were added",
+    ),
+    "docs/community-launch-kit.md": (
+        "## GitHub settings",
+        "This is my first open-source project.",
+    ),
+}
+for relative_path, required_phrases in community_files.items():
+    path = ROOT / relative_path
+    if not path.is_file():
+        fail(f"missing community release file: {relative_path}")
+    text = path.read_text(encoding="utf-8")
+    for phrase in required_phrases:
+        if phrase not in text:
+            fail(f"community release contract is missing from {relative_path}: {phrase}")
+
 
 skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
 if not skill_text.startswith("---\n"):
@@ -41,8 +68,16 @@ if not 25 <= len(values.get("short_description", "")) <= 64:
     fail("openai.yaml short_description length is invalid")
 if "$codex-auto-model-router" not in values.get("default_prompt", ""):
     fail("openai.yaml default prompt does not invoke the skill")
-if "## Visible routing protocol" not in skill_text or "Codex 自动路由｜Segment <index>/<total>：<task segment>" not in skill_text:
+if "## Visible routing protocol" not in skill_text or "Codex 自动路由｜任务段：<task segment>" not in skill_text:
     fail("visible routing protocol is missing")
+for obsolete_segment_counter in (
+    "Segment <index>/<total>",
+    "Segment 1/1",
+    "Segment 1/3",
+):
+    for path in (ROOT / "SKILL.md", ROOT / "README.md", ROOT / "README.zh-CN.md"):
+        if obsolete_segment_counter in path.read_text(encoding="utf-8"):
+            fail(f"visible Segment counter remains in {path.name}: {obsolete_segment_counter}")
 if "含主任务，先派发" in skill_text:
     fail("unknown-capacity prompt does not use the unified concurrency plan shape")
 if "## Path dispatch" not in skill_text or "ROUTE_PROJECT_MODELS_EXECUTOR=1`" not in skill_text:
@@ -70,6 +105,26 @@ for stable_phrase in (
         fail(f"stable distribution contract is missing: {stable_phrase}")
 if "A normal successful completion needs no separate model-identity or runtime-verification warning" not in skill_text:
     fail("normal completion suppression rule is missing")
+readable_section = skill_text.split("## Readable continuation prompt", 1)
+if len(readable_section) != 2:
+    fail("readable continuation prompt contract is missing")
+readable_section = readable_section[1].split("\n## ", 1)[0]
+for phrase in (
+    "继续当前任务：<task segment>",
+    "Codex 自动路由｜任务段：<task segment>",
+    "<!-- CODEX_ROUTER_INTERNAL",
+    "任务已完成，正在恢复原模型并返回结果。",
+):
+    if phrase not in readable_section:
+        fail(f"readable continuation prompt phrase is missing: {phrase}")
+if not (
+    readable_section.index("继续当前任务：<task segment>")
+    < readable_section.index("<!-- CODEX_ROUTER_INTERNAL")
+    < readable_section.index("ROUTE_PROJECT_MODELS_ROUTED_TURN=1")
+):
+    fail("continuation prompt must place readable content before machine fields")
+if "Never begin it with `ROUTE_PROJECT_MODELS_*`" not in readable_section:
+    fail("machine-first continuation guard is missing")
 if "Use this order once for the complete plan" not in skill_text or "explicitly model-selectable executor presets" not in skill_text:
     fail("switch-to-subagent fallback order is missing")
 for family_guard in (

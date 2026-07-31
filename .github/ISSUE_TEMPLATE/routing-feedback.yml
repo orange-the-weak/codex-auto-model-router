@@ -1,0 +1,76 @@
+name: Routing feedback
+description: Report a route that was too strong, too weak, fragmented, or blocked
+title: "[Routing] "
+labels:
+  - routing-feedback
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Codex Auto Model Router. Share only routing metadata—do not include private prompts, source code, credentials, personal paths, or conversation text.
+  - type: dropdown
+    id: result
+    attributes:
+      label: What happened?
+      options:
+        - Route was too weak
+        - Route was stronger than needed
+        - Task was split too much
+        - Useful parallel work was missed
+        - Parallel work caused blocking or conflicts
+        - Model switch or Restore failed
+        - GPT-5.5 fallback happened while GPT-5.6 was available
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: notice
+    attributes:
+      label: Visible routing notice
+      description: Paste only the one-line Codex routing notice.
+      placeholder: "Codex automatic routing | Task segment: ... | Model: ... | Reasoning: ..."
+    validations:
+      required: true
+  - type: input
+    id: expected
+    attributes:
+      label: Expected route
+      placeholder: "Example: Terra/low, one segment, serial"
+    validations:
+      required: true
+  - type: dropdown
+    id: task_shape
+    attributes:
+      label: Task shape
+      options:
+        - Mechanical edit or deterministic check
+        - Bounded ordinary implementation
+        - Multi-file or multi-constraint implementation
+        - Complex diagnosis or architecture work
+        - Review or read-only research
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Describe quality, delay, rework, or blocking without sharing private project content.
+      placeholder: "What succeeded, failed, or felt inefficient?"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Codex environment
+      description: App or CLI, operating system, Codex version, and installed Router commit or release.
+      placeholder: "Codex App, macOS, version ..., Router ..."
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed prompts, source code, credentials, personal paths, and private project data.
+          required: true

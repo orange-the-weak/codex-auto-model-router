@@ -2,6 +2,7 @@
 
 [![Codex Skill](https://img.shields.io/badge/OpenAI%20Codex-Skill-111827)](https://github.com/openai/skills)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Validate](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml/badge.svg)](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml)
 
 **Automatic, dynamic per-segment model, reasoning, and concurrency routing for GPT-5.6 in OpenAI Codex.** Evidence-calibrated routing sends each bounded task to Sol, Terra, or Luna at the lowest sufficient effort—with no external API or API key.
 
@@ -66,6 +67,7 @@ For an illustrative mixed workload, the current policy estimates **15–30% fast
 - Uses a standard 4-segment/4-switch budget, adaptive 6/6 for genuinely complex or large plans, and an explicit hard limit of 8/8. Restore counts as a switch.
 - Keeps fallback inside GPT-5.6: Sol tries Terra then Luna; Terra tries Sol then Luna; Luna tries Terra then Sol. GPT-5.5 is allowed only when the complete 5.6 family is unavailable.
 - Announces the selected model and reasoning once per segment, stops on failure, and restores a verified original GPT-5.6 route once.
+- Keeps model-switch messages readable: task and route information appear first, while bounded internal IDs and state stay at the end of the continuation prompt.
 - Records only verified execution in a local JSONL ledger; recommendations never count as observed use.
 - Captures each parallel task's dispatch-confirmed and result-received boundaries on one coordinator monotonic clock, then derives actual elapsed time, cumulative parallel-task time, peak concurrency, and slot utilization. Models never supply timing numbers.
 - Keeps older aggregate-only records readable but excludes them from verified history.
@@ -84,7 +86,7 @@ $codex-auto-model-router Query usage ratios and retune from observed outcomes.
 Example notice:
 
 ```text
-Codex automatic routing | Segment 1/3: Analyze the change | Model: GPT-5.6 Sol | Reasoning: high | High ambiguity
+Codex automatic routing | Task segment: Analyze the change | Model: GPT-5.6 Sol | Reasoning: high | High ambiguity
 Codex automatic routing | Concurrency plan: 4 tasks (including main) | Source: smart-reduced | Critical-path priority
 并发：峰值 4（含主任务）｜实际用时：2分0秒｜并行任务累计用时：4分48秒｜并行省时估算：58%｜槽位利用：85%
 ```
@@ -94,6 +96,10 @@ Reports are written to `docs/codex-model-routing-report.md`; verified usage is s
 ## A personal note
 
 This is my first open-source project. I built it after spending too much time making the same model-choice decision across Codex projects. Practical feedback, issue reports, and small improvements are very welcome.
+
+## Feedback
+
+Found a route that was too weak, too expensive, or unnecessarily fragmented? [Share a routing result](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=routing-feedback.yml) without private prompts or source code. For bugs and proposals, use [GitHub Issues](https://github.com/orange-the-weak/codex-auto-model-router/issues).
 
 ## Compatibility and development
 
