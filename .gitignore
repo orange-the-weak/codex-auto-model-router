@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 .codex/model-routing-history.jsonl
+.codex/model-routing-runtime/
 docs/codex-model-routing-report.md
 benchmarks/gpt56-matrix/
 docs/xiaohongshu-launch-post/

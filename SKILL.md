@@ -1,6 +1,6 @@
 ---
 name: codex-auto-model-router
-description: Deterministically analyze, apply, query, record, and retune project model routing inside Codex. For Apply, create the smallest useful bounded task graph, run independent work with dependency-aware concurrency when worthwhile, and select GPT-5.6 Sol, Terra, or Luna plus low, medium, high, or xhigh reasoning per segment. Keep availability fallback inside the GPT-5.6 family whenever any 5.6 model is available, restore only a verified original GPT-5.6 route, and use GPT-5.5 only when the complete GPT-5.6 family is unavailable. Maintain a Markdown report and validated per-segment and parallel usage history. Use when the user invokes $codex-auto-model-router, asks which model should handle project work, requests dynamically routed implementation, queries usage ratios, records outcomes, or retunes assignments. Never create a new top-level Codex task.
+description: Analyze, apply, query, record, and retune Codex project routing. For Apply, build the smallest useful bounded task graph, parallelize only independent work, and select GPT-5.6 Sol, Terra, or Luna with low through max reasoning per Segment. Never select Ultra automatically; accept it only as an explicit one-Segment opt-in and then disable Router-managed parallelism. Keep fallback inside GPT-5.6 whenever any 5.6 model is available, restore only a verified original GPT-5.6 route, and use GPT-5.5 only when the complete 5.6 family is unavailable. Maintain a Markdown report and validated per-Segment and concurrency history. Use when the user invokes $codex-auto-model-router, asks which model should handle project work, requests routed implementation, queries usage ratios, records outcomes, or retunes assignments. Never create a new top-level Codex task.
 ---
 
 # Codex Auto Model Router
@@ -16,7 +16,7 @@ Choose one path before other work:
 - `ROUTE_PROJECT_MODELS_ROUTED_TURN=1` with `ROUTED_MODE=APPLY_SEGMENT`: run only the named segment, then advance, stop, or Restore.
 - `ROUTE_PROJECT_MODELS_ROUTED_TURN=1` with `ROUTED_MODE=APPLY_ONESHOT`: backward-compatible one-segment Apply; run it once, then Restore.
 - `ROUTE_PROJECT_MODELS_ROUTED_TURN=1` with `ROUTED_MODE=ASSESS` or `RETUNE`: perform only that analysis, save artifacts, then Restore.
-- `ROUTE_PROJECT_MODELS_ROUTED_TURN=1` with `ROUTED_MODE=RETURN`: do no project work; present the accumulated result concisely.
+- `ROUTE_PROJECT_MODELS_ROUTED_TURN=1` with `ROUTED_MODE=RETURN`: run only the pending ID-based Restore verification when needed, then present the accumulated result concisely.
 - `ROUTE_PROJECT_MODELS_EXECUTOR=1`: execute only the supplied bounded segment; never plan, route, or delegate.
 - `ROUTE_PROJECT_MODELS_SUBAGENT=1`: perform only the supplied Assess or Retune analysis.
 - Otherwise use the Coordinator path.
@@ -33,10 +33,10 @@ Unknown modes, missing `route_id`, invalid `segment_id`, or a cursor outside the
    - **Retune:** adjust assignments using the report and observed history.
    - **Help:** a bare invocation. Show modes and examples in at most six lines; do not scan the repository.
 2. Query, Record, and Help never switch models or spawn agents. Use the local ledger script for Query and Record.
-3. Parse optional user overrides. Accept Sol, GPT-5.6, GPT-5.6 Sol, Terra, or Luna; accept low, medium, high, xhigh, and map `very high` or `extra high` to xhigh. A whole-request override applies to every segment. A segment-specific override applies only there. Ask only when overrides conflict or are unsupported.
+3. Parse optional user overrides. Accept Sol, GPT-5.6, GPT-5.6 Sol, Terra, or Luna; accept low, medium, high, xhigh, or max, and map `very high` or `extra high` to xhigh. Never select `ultra` automatically. Accept it only when the user explicitly enables it for one bounded Apply Segment; default the model to Sol when none is named, reject Luna/ultra, and disable `dependency-parallel-v1` because native Ultra may delegate proactively. A whole-request override applies to every ordinary routed segment. A segment-specific override applies only there. Ask only when overrides conflict or are unsupported.
 4. For Assess or Retune, classify and route the single analysis task with the policy script, then use Capability check and Dispatch.
 5. For Apply, create the smallest necessary plan. One normalized Segment uses `apply-fast-v1`; multiple sequential Segments use `segmented-v1`; independent tasks may use `dependency-parallel-v1`.
-6. Use `scripts/router_runtime.py begin` and `finish` as the normal state gates. They combine envelope validation, replay claim when needed, runtime inspection, verified recording, and next-state resolution. Do not split those deterministic operations into extra model turns.
+6. Use `scripts/router_runtime.py begin`, `finish`, and `restore` as the normal state gates. `begin` persists the canonical plan and immutable identity; `finish` and `restore` resolve by IDs without reconstructing it. Do not split those deterministic operations into extra model turns.
 
 ## Apply segment planning
 
@@ -50,7 +50,7 @@ Each candidate segment must contain:
 - `task_kind`: `mechanical`, `ordinary`, or `complex`
 - `risk`: `low`, `normal`, or `high`
 - `size`: `tiny`, `normal`, or `large`
-- optional task evidence: `ambiguity` and `coupling` (`low|medium|high`), `verification` (`deterministic|mixed|judgment`), `consequence` (`low|normal|high`), and `prior_failure` (boolean)
+- optional task evidence: `ambiguity` and `coupling` (`low|medium|high`), `verification` (`deterministic|mixed|judgment`), `consequence` (`low|normal|high`), `latency_priority` (`low|normal|high`), and `prior_failure` (boolean)
 - `acceptance`: one or more concrete completion checks
 - `validation_budget`: the maximum proportionate verification work
 - parallel-only `work_estimate=short|normal|long`, `access_mode=read|write`, concrete repository-relative `write_scopes` for every write task, and `conflict_keys`
@@ -67,7 +67,7 @@ Adaptive budgets:
 - Merge adjacent segments with the same model and effort.
 - Route every Segment from its own task kind, risk, size, ambiguity, coupling, verification, consequence, prior failure, report match, and user override. Use the current route only to choose `local` versus `same-task-switch` after selection.
 - Use the bundled, versioned `references/benchmark-evidence.json` only as an offline prior. Task evidence and user overrides outrank it. If the snapshot is missing, invalid, or expired, use the deterministic fallback; never fetch benchmarks during Apply.
-- `segmented-v1` rejects branches, cycles, and non-linear dependencies. `dependency-parallel-v1` accepts only an acyclic graph whose dependencies reference earlier IDs. Both reject duplicate IDs and conflicting overrides.
+- `segmented-v1` rejects branches, cycles, and non-linear dependencies. `dependency-parallel-v1` accepts only an acyclic graph whose dependencies reference earlier IDs. Both reject duplicate IDs and conflicting overrides. Explicit native Ultra requires exactly one `apply-fast-v1` Segment and cannot be combined with Router-managed parallelism.
 - Never re-plan after execution begins. A failed segment stops the chain; do not retry it by cycling through models.
 - Do not add a review segment unless risk, ambiguity, or the user requires an independent review.
 
@@ -151,7 +151,7 @@ Keep the actionable goal and acceptance criteria concise and readable before the
 
 Immediately before every Assess, Retune, Apply segment, Query, or Record, show one compact commentary line:
 
-`Codex 自动路由｜任务段：<task segment>｜模型：<model>｜推理：<low|medium|high|xhigh|none>｜<reason>`
+`Codex 自动路由｜任务段：<task segment>｜模型：<model>｜推理：<low|medium|high|xhigh|max|ultra|none>｜<reason>`
 
 - This means Codex automatically selected the route; never use an ambiguous bare `路由提示` label.
 - Show the line once per executed segment, not once per command or file.
@@ -167,10 +167,10 @@ Immediately before every Assess, Retune, Apply segment, Query, or Record, show o
 
 When `ROUTED_MODE=APPLY_SEGMENT`:
 
-1. Run `scripts/router_runtime.py begin --ledger <path> --envelope-json '<json>'`. It validates protocol/identity/frontier and immediate dispatch capacity, verifies that the actual runtime model/effort equals the selected or capability-approved route, then prepares an atomic claim and returns the bounded context capsule. Unknown or mismatched runtime identity stops before project tools or edits.
+1. Run `scripts/router_runtime.py begin --ledger <path> --envelope-json '<json>'`. It validates protocol/identity/frontier and immediate dispatch capacity, verifies the actual runtime route, persists the canonical normalized plan, identity, and original route, then prepares an atomic claim. Unknown or mismatched runtime identity stops before project tools or edits.
 2. A local `apply-fast-v1` Segment whose selected route already matches skips claim, cursor, full-plan continuation, and Restore. A switched fast Segment retains one compact claim and one final Restore decision.
 3. Show the segment's visible routing line, then execute only its goal. Read applicable repository instructions, preserve unrelated changes, and stay within its validation budget.
-4. Run `scripts/router_runtime.py finish` once with the bounded result. It inspects current metadata, records actual execution only from task metadata or user confirmation, accepts optional observed overhead metrics, and resolves `advance|refill-frontier|restore|return|stop`.
+4. Run `scripts/router_runtime.py finish` once with `route_id`, `segment_id`, `attempt_id`, outcome, and bounded result metadata. Do not resend or reconstruct the plan. It loads the persisted begin state, records only verified execution, and resolves `advance|refill-frontier|restore|return|stop`.
 5. On failure, record the verified outcome when possible, stop all remaining segments, and enter Restore with a concise partial result. Do not silently retry with another route.
 6. On success, append the bounded result and changed-file summary to the accumulator. If another segment exists, send exactly one readable-first same-task continuation with the next model/effort and cursor, then end the turn.
 7. After the final segment, run proportionate final checks only if they were assigned to that segment, then enter Restore.
@@ -210,13 +210,15 @@ Perform only the requested read-only analysis. Save the report to `<repository>/
 - Preserve an original GPT-5.6 model and effort from the Coordinator envelope; never replace them with an intermediate segment route. Keep a non-5.6 original only for audit and do not use it as a Restore target after verified GPT-5.6 execution.
 - If the final/failed segment is already on the verified original route, return the accumulated result directly; it is already restored.
 - Otherwise, after success or failure, if a persistent switch occurred and the verified original is GPT-5.6 with both values known, make exactly one Restore continuation with the original `model` and `thinking`, `ROUTED_MODE=RETURN`, the same `route_id`, and the accumulated result.
+- In that restored turn, call `scripts/router_runtime.py restore --ledger <path> --route-id <id> --segment-id <id> --attempt-id <id>`. It reads the original route and terminal result from persisted begin/finish state. Never resend, rebuild, or guess `plan_hash`.
+- `finish` and `restore` are idempotent. If project ledger or runtime-state writes fail after project work completes, return the project result with one non-blocking warning; identity mismatches still stop.
 - If the original model was GPT-5.5 or another non-5.6 model and a GPT-5.6 Segment ran, skip Restore and return on the verified GPT-5.6 route. This prevents completion from silently switching the task back to GPT-5.5.
 - If restoration is rejected, do not loop. Mention it only for high-risk work or when the user asks for an audit.
-- `RETURN` is terminal: perform no tools, edits, tests, assessment, delegation, ledger writes, segment advancement, or additional routing.
+- `RETURN` is terminal after the one deterministic Restore verification: perform no project tools, edits, tests, assessment, delegation, segment advancement, or additional routing.
 
 ## Assessment and routing principles
 
-Assess and Retune use GPT-5.6 Sol/high by default so policy changes receive consistent analysis; an explicit user model or effort override still wins. Inventory representative project evidence without builds or tests. Route each follow-on task by ambiguity, scope, coupling, verification difficulty, consequence of error, and whether a well-scoped attempt already failed. Luna/low fits clear mechanical work; Terra/low or medium fits bounded ordinary engineering; Sol/medium fits bounded complex work; Sol/high fits high ambiguity, coupling, judgment, or consequence. Reserve Sol/xhigh for failed complex attempts or explicit user choice. Prefer a bounded segment over higher effort.
+Assess and Retune use GPT-5.6 Sol/high by default so policy changes receive consistent analysis; an explicit user model or effort override still wins. Inventory representative project evidence without builds or tests. Route each follow-on task by ambiguity, scope, coupling, verification difficulty, consequence of error, latency priority, and prior failure. Seven automatic lanes are active: Luna/medium, Luna/high, Luna/max, Terra/high, Sol/medium, Sol/high, and Sol/xhigh. Use Luna/medium as the automatic floor for mechanical work. Use Luna/high as the default for ordinary bounded work; raise to Luna/max only when the work is unusually deep or large and extra latency is acceptable. Use Terra/high only when fast return is explicitly prioritized. Sol/medium fits bounded complex work; Sol/high fits high ambiguity, coupling, judgment, or consequence. Reserve Sol/xhigh for failed complex attempts or explicit user choice. The full model-effort matrix remains available by explicit user override. `max` is the highest automatic single-route effort. Never select `ultra` automatically; explicit native Ultra owns its own proactive delegation, so the Router must not add parallel executors. Prefer a bounded segment over higher effort.
 
 ## Report and ledger output
 

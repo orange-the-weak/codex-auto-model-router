@@ -8,24 +8,25 @@ These criteria primarily route follow-on execution tasks. Assess and Retune defa
 
 | Tier | Best fit | Common examples | Avoid when |
 |---|---|---|---|
-| Luna | Mechanical, repetitive, narrow, high-volume, easy to verify | formatting, copy edits, renames with clear scope, fixture generation, file inventory, simple test updates, applying an established pattern | requirements are ambiguous, behavior spans modules, or failure is costly |
-| Terra | Normal engineering default balancing capability and speed | bounded features, localized bug fixes, ordinary refactors, UI iteration, test authoring, log analysis, dependency updates with clear migration notes | architecture is unsettled, root cause is unclear across systems, or risk is high |
+| Luna | Cheap mechanical work plus bounded reasoning with deterministic verification | literal edits, established patterns, coherent low-consequence refactors, test-backed multi-file implementation | requirements are ambiguous, coupling is high, verification is judgment-based, or failure is costly |
+| Terra | Low-latency ordinary engineering when fast return is explicitly valuable | localized bug fixes, UI iteration, interactive diagnosis, log analysis | latency is not important, architecture is unsettled, root cause is unclear across systems, or risk is high |
 | Sol | Complex professional work with ambiguity, coupling, novelty, or high consequence | architecture, cross-layer migrations, concurrency and state bugs, security/privacy review, data-loss risks, unfamiliar large-codebase synthesis, hard root-cause analysis | the task can first be reduced to bounded and independently verifiable units |
 
-OpenAI's coding-agent results and the independent Coding Agent Index support Sol as the strongest tier, Terra as the balance tier, and Luna as the fast mechanical tier. The gaps are meaningful but not large enough to justify Sol/high for every complex task. API per-effort results are only relative priors for latency and output growth; never treat API price as Codex subscription cost.
+OpenAI's coding-agent results and the independent Coding Agent Index support Sol as the strongest tier. Current Codex token credits make Luna 25× cheaper than Sol per input, cached-input, and output token. CursorBench 3.2 shows Luna/high as the useful middle step and places Luna/max near Sol/medium and Sol/high on ambiguous multi-file tasks, but max uses far more tokens and steps. ChatBench category scores are weighted proxies derived from Artificial Analysis API metrics rather than an independent Agent harness; use them only for relative speed and cost context. API and benchmark costs are never substituted for the user's actual Codex plan cost.
 
 ## Reasoning effort
 
 | Effort | Use when | Typical pairing |
 |---|---|---|
-| low | Task is bounded, familiar, and locally verifiable | Luna or Terra; default for routine work |
-| medium | Several constraints interact or a multi-file plan must remain coherent | Terra for ordinary work; Sol for bounded complex work |
-| high | Ambiguity, deep coupling, or high consequence requires careful alternatives and validation | Sol |
+| low | Explicit user override or compatibility testing; never an automatic lane | Any supported model by explicit request |
+| medium | Mechanical execution or bounded complex work | Luna for mechanical work; Sol for bounded complex work |
+| high | Ordinary bounded reasoning, explicit latency priority, or difficult consequential work | Luna by default, Terra for latency, Sol for difficulty or consequence |
 | xhigh | A demonstrably difficult problem resisted a well-scoped attempt or needs exhaustive analysis | Sol, exceptional |
+| max | Demanding bounded work benefits from more exploration and verification, and extra latency/tokens are acceptable | Luna for low-consequence deterministic deep work; other models by explicit override |
 
-Never choose an effort merely because the model supports it. Prefer `low` over `medium`, and `medium` over `high`, unless a named risk or dependency requires more.
+Never choose an effort merely because the model supports it. Luna/max is justified by boundedness, deterministic verification, and low consequence—not by Luna's low token rate alone. Ultra is disabled by default and never appears in automatic lanes. If the user explicitly enables native Ultra, use one bounded Sol or Terra Apply Segment and disable Router-managed parallelism; Luna/ultra is unsupported.
 
-## Five routing signals
+## Six routing signals
 
 Score each task qualitatively; do not invent false numeric precision.
 
@@ -34,8 +35,9 @@ Score each task qualitatively; do not invent false numeric precision.
 3. **Coupling:** How many state, data, service, platform, or lifecycle boundaries interact?
 4. **Verification:** Is there a fast deterministic check, or does correctness require broad integration and judgment?
 5. **Consequence:** Would failure be cosmetic, reversible, user-visible, production-impacting, or security/data-loss sensitive?
+6. **Latency priority:** Does the user explicitly need a fast return, or can deeper reasoning trade latency for fewer revisions?
 
-Route to Luna when the work is mechanical and locally verifiable. Route to Terra when the work is ordinary and bounded. Route to Sol/medium for bounded complex work; raise to Sol/high when consequence, ambiguity, coupling, or judgment-heavy verification is high. Use Sol/xhigh only after a well-scoped complex attempt fails or by explicit user request.
+Automatic routing uses exactly seven lanes. Use Luna/medium as the floor for mechanical work. Use Luna/high for ordinary bounded work, including clear low-consequence implementation with deterministic checks. Raise to Luna/max only when that work is genuinely deep or large enough to justify substantially more tokens, steps, and startup latency. Use Terra/high only when `latency_priority=high` and the task does not cross a Sol boundary. Route bounded complex work to Sol/medium; raise to Sol/high when consequence, ambiguity, coupling, or judgment-heavy verification is high. Use Sol/xhigh only after a well-scoped complex attempt fails or by explicit user request. Luna/low, Terra/low, Terra/medium, Sol/low, and all other supported combinations remain available only by explicit override.
 
 ## Escalation ladder
 
@@ -43,8 +45,8 @@ Escalate one dimension at a time:
 
 1. Clarify acceptance criteria and shrink scope.
 2. Increase reasoning effort within the same model.
-3. Move Luna to Terra or Terra to Sol.
-4. Use `xhigh` only after recording why the prior scoped attempt was insufficient.
+3. Move Luna to Terra/high only for explicit latency priority; move either family to Sol when task evidence crosses a complexity or consequence boundary.
+4. Use Sol/xhigh only after recording why the prior scoped attempt was insufficient. Use max only for its bounded-deep lane or explicit override.
 
 Do not escalate because a command failed for an environmental reason such as missing dependencies, permissions, simulator state, network access, or credentials. Fix or report the environment first.
 
@@ -52,11 +54,13 @@ Do not escalate because a command failed for an environmental reason such as mis
 
 | Work pattern | Starting recommendation |
 |---|---|
-| Documentation, localization, metadata, deterministic config edits | Luna low |
-| Repeated changes following an accepted example | Luna low |
-| Small UI behavior or styling change with a clear preview path | Terra low |
-| Bounded feature inside one subsystem with deterministic checks | Terra low |
-| Multi-file refactor with stable tests and unchanged architecture | Terra medium |
+| One literal replacement, tiny metadata edit, or formatting-only change | Luna medium |
+| Documentation, localization, config edits, or repeated changes following an accepted example | Luna medium |
+| Clear bounded implementation/refactor with low consequence and deterministic tests | Luna high |
+| Large or genuinely deep deterministic implementation where latency is acceptable | Luna max |
+| UI iteration or interactive diagnosis where fast return is explicit | Terra high |
+| Bounded feature inside one subsystem with deterministic checks | Luna high |
+| Multi-file refactor with stable tests and unchanged architecture | Luna high or Luna max by depth |
 | Bounded cross-file diagnosis with stable verification | Sol medium |
 | Unclear bug spanning async state, persistence, networking, or lifecycle | Sol high |
 | Schema, authentication, authorization, privacy, payments, destructive data migration | Sol high |
@@ -84,12 +88,14 @@ When verified token telemetry is compared, preserve input-cache categories: cach
 
 Prefer measured repository-specific timing or evaluation evidence when it exists. Otherwise produce a clearly labeled heuristic range:
 
-1. Estimate the share of likely recurring work in three groups whose percentages total 100%:
-   - **Fast lane:** Luna or Terra at low, with deterministic or quick local verification.
-   - **Optimized normal lane:** Terra medium or Sol low, where bounded scope reduces unnecessary reasoning.
+1. Estimate the share of likely recurring work in four groups whose percentages total 100%:
+   - **Fast lane:** Luna medium for mechanical work, or Terra high for explicit latency priority.
+   - **Bounded reasoning lane:** Luna high; Luna max only when unusual depth may reduce rework and is not assumed faster.
+   - **Optimized normal lane:** Sol medium where bounded scope avoids unnecessary escalation.
    - **Escalation lane:** Sol high/xhigh, where extra analysis may be slower but prevents costly rework.
 2. Apply conservative improvement bands relative to the baseline:
    - Fast lane: 25–50% faster or more productive.
+   - Bounded reasoning lane: -10–10% direct speed; count rework reduction only when measured.
    - Optimized normal lane: 10–25%.
    - Escalation lane: -10–0% direct speed improvement.
 3. Weight the lower and upper bounds by the task mix. Clamp the overall range to 0–60% and round each bound to the nearest 5 percentage points.

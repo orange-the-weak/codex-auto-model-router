@@ -42,13 +42,15 @@ class RouterRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.ledger = Path(self.temp.name) / "ledger.jsonl"
+        self.state_root = Path(self.temp.name) / "runtime-state"
 
     def tearDown(self):
         self.temp.cleanup()
 
     def args(self, **values):
         return SimpleNamespace(
-            ledger=self.ledger, sessions_root=None, no_runtime_detection=True, **values
+            ledger=self.ledger, state_root=self.state_root,
+            sessions_root=None, no_runtime_detection=True, **values
         )
 
     def envelope(self, plan):
@@ -158,6 +160,22 @@ class RouterRuntimeTests(unittest.TestCase):
             RUNTIME.finish(self.args(result_json=json.dumps(result)))
         return json.loads(output.getvalue())
 
+    def restore_result(self, plan, identifier="docs", runtime_current=None):
+        selected = next(
+            item for item in plan["segments"] if item["segment_id"] == identifier
+        )
+        output = io.StringIO()
+        route = runtime_current or current(
+            plan["original"]["model"], plan["original"]["effort"]
+        )
+        with patch.object(RUNTIME, "_current", return_value=route):
+            with redirect_stdout(output):
+                RUNTIME.restore(self.args(
+                    route_id=plan["route_id"], segment_id=identifier,
+                    attempt_id=selected["attempt_id"],
+                ))
+        return json.loads(output.getvalue())
+
     def capture_trace(self, plan, spans):
         for identifier, start, end, outcome in spans:
             for event_type, monotonic_ns, timestamp in (
@@ -184,10 +202,10 @@ class RouterRuntimeTests(unittest.TestCase):
 
     def test_fast_local_begin_skips_claim_and_returns_capsule(self):
         plan = RUNTIME.policy.plan_apply_segments(
-            [segment()], current=current("gpt-5.6-luna", "low")
+            [segment()], current=current("gpt-5.6-luna", "medium")
         )
         result = self.begin_result(
-            self.envelope(plan), current("gpt-5.6-luna", "low")
+            self.envelope(plan), current("gpt-5.6-luna", "medium")
         )
         self.assertFalse(result["claim_required"])
         self.assertIsNone(result["claimed"])
@@ -200,13 +218,13 @@ class RouterRuntimeTests(unittest.TestCase):
         )
         encoded = json.dumps(self.envelope(plan))
         with patch.object(
-            RUNTIME, "_current", return_value=current("gpt-5.6-luna", "low")
+            RUNTIME, "_current", return_value=current("gpt-5.6-luna", "medium")
         ):
             with redirect_stdout(io.StringIO()):
                 RUNTIME.begin(self.args(envelope_json=encoded))
         with self.assertRaisesRegex(SystemExit, "already claimed"):
             with patch.object(
-                RUNTIME, "_current", return_value=current("gpt-5.6-luna", "low")
+                RUNTIME, "_current", return_value=current("gpt-5.6-luna", "medium")
             ):
                 RUNTIME.begin(self.args(envelope_json=encoded))
         events, warnings = RUNTIME.ledger.read_events(self.ledger)
@@ -215,6 +233,223 @@ class RouterRuntimeTests(unittest.TestCase):
             "segment_claim", "routing_efficiency",
         ])
         self.assertEqual(events[-1]["state_gate"], "stopped")
+
+    def test_begin_finish_restore_persists_canonical_state(self):
+        plan = RUNTIME.policy.plan_apply_segments(
+            [segment()], current=current("gpt-5.6-sol", "medium")
+        )
+        selected = plan["segments"][0]
+        started = self.begin_result(
+            self.envelope(plan),
+            current(selected["model"], selected["effort"]),
+        )
+        self.assertTrue(started["runtime_state_persisted"])
+        state, _ = RUNTIME._locate_state(self.args(), plan["route_id"])
+        self.assertEqual(state["canonical_plan"], plan)
+        self.assertEqual(state["plan_hash"], plan["plan_hash"])
+        self.assertEqual(state["original"], plan["original"])
+
+        finished = self.finish_result({
+            "plan": plan, "route_id": plan["route_id"],
+            "segment_id": "docs", "attempt_id": selected["attempt_id"],
+            "outcome": "completed", "source": "user-confirmed",
+            "actual_model": selected["model"],
+            "actual_effort": selected["effort"],
+        })
+        self.assertEqual(finished["next"]["action"], "restore")
+        restored = self.restore_result(plan)
+        self.assertTrue(restored["restored"])
+        self.assertFalse(restored["restore_recovered"])
+        repeated = self.restore_result(plan)
+        self.assertTrue(repeated["restored"])
+        self.assertTrue(repeated["restore_recovered"])
+
+    def test_compacted_finish_requires_only_persisted_identity(self):
+        plan = RUNTIME.policy.plan_apply_segments(
+            [segment()], current=current("gpt-5.6-sol", "medium")
+        )
+        selected = plan["segments"][0]
+        self.begin_result(
+            self.envelope(plan),
+            current(selected["model"], selected["effort"]),
+        )
+        minimal = {
+            "route_id": plan["route_id"], "segment_id": "docs",
+            "attempt_id": selected["attempt_id"], "outcome": "completed",
+            "source": "user-confirmed", "actual_model": selected["model"],
+            "actual_effort": selected["effort"],
+        }
+        finished = self.finish_result(minimal)
+        self.assertTrue(finished["ok"])
+        self.assertFalse(finished["runtime_state_recovered_from_legacy_plan"])
+        repeated = self.finish_result(minimal)
+        self.assertTrue(repeated["finish_recovered"])
+        self.assertFalse(repeated["execution_recorded"])
+
+    def test_compacted_next_begin_hydrates_plan_and_cursor_from_state(self):
+        first = named_segment("inspect")
+        first.update({"model": "Luna", "effort": "low"})
+        second = named_segment("implement")
+        second.update({
+            "task_kind": "complex", "risk": "high", "size": "normal",
+            "model": "Sol", "effort": "high", "depends_on": ["inspect"],
+        })
+        plan = RUNTIME.policy.plan_apply_segments(
+            [first, second], current=current("gpt-5.6-sol", "medium")
+        )
+        first_segment, second_segment = plan["segments"]
+        self.begin_result(
+            {
+                "plan": plan, "route_id": plan["route_id"],
+                "segment_id": first_segment["segment_id"],
+                "attempt_id": first_segment["attempt_id"],
+                "cursor": 0, "completed_ids": [],
+                "original_model": plan["original"]["model"],
+                "original_effort": plan["original"]["effort"],
+                "protocol": plan["protocol"],
+                "restore_required": plan["restore_required"],
+                "segment_budget": plan["segment_budget"],
+                "switch_budget": plan["switch_budget"],
+                "budget_source": plan["budget_source"],
+            },
+            current(first_segment["model"], first_segment["effort"]),
+        )
+        first_finish = self.finish_result({
+            "route_id": plan["route_id"],
+            "segment_id": first_segment["segment_id"],
+            "attempt_id": first_segment["attempt_id"],
+            "outcome": "completed",
+            "source": "user-confirmed",
+            "actual_model": first_segment["model"],
+            "actual_effort": first_segment["effort"],
+        })
+        self.assertEqual(first_finish["next"], {"action": "advance", "cursor": 1})
+        compacted = self.begin_result(
+            {
+                "route_id": plan["route_id"],
+                "segment_id": second_segment["segment_id"],
+                "attempt_id": second_segment["attempt_id"],
+            },
+            current(second_segment["model"], second_segment["effort"]),
+        )
+        self.assertTrue(compacted["runtime_state_persisted"])
+        self.assertEqual(
+            compacted["context_capsule"]["segment_id"],
+            second_segment["segment_id"],
+        )
+
+    def test_project_ledger_permission_error_uses_isolated_ledger(self):
+        plan = RUNTIME.policy.plan_apply_segments(
+            [segment()], current=current("gpt-5.6-sol", "medium")
+        )
+        selected = plan["segments"][0]
+        original_prepare = RUNTIME.ledger.prepare_segment_claim
+
+        def permission_once(path, *args, **kwargs):
+            if Path(path).resolve() == self.ledger.resolve():
+                raise PermissionError("read-only project ledger")
+            return original_prepare(path, *args, **kwargs)
+
+        with patch.object(
+            RUNTIME.ledger, "prepare_segment_claim", side_effect=permission_once
+        ):
+            started = self.begin_result(
+                self.envelope(plan),
+                current(selected["model"], selected["effort"]),
+            )
+        self.assertTrue(started["ledger_fallback"])
+        state, _ = RUNTIME._locate_state(self.args(), plan["route_id"])
+        self.assertNotEqual(
+            Path(state["effective_ledger"]), self.ledger.resolve()
+        )
+        self.assertIn("isolated temporary ledger", " ".join(started["warnings"]))
+        finished = self.finish_result({
+            "route_id": plan["route_id"], "segment_id": "docs",
+            "attempt_id": selected["attempt_id"], "outcome": "completed",
+            "source": "user-confirmed", "actual_model": selected["model"],
+            "actual_effort": selected["effort"],
+        })
+        self.assertTrue(finished["ok"])
+
+    def test_parallel_worker_events_follow_persisted_fallback_ledger(self):
+        plan = self.parallel_plan()
+        envelope = self.parallel_envelope(plan)
+        selected = plan["segments"][0]
+        original_prepare = RUNTIME.ledger.prepare_segment_claim
+
+        def permission_once(path, *args, **kwargs):
+            if Path(path).resolve() == self.ledger.resolve():
+                raise PermissionError("read-only project ledger")
+            return original_prepare(path, *args, **kwargs)
+
+        with patch.object(
+            RUNTIME.ledger, "prepare_segment_claim", side_effect=permission_once
+        ):
+            self.begin_result(
+                envelope, current(selected["model"], selected["effort"])
+            )
+        with redirect_stdout(io.StringIO()):
+            RUNTIME.worker_start(self.identity_args(plan, "one"))
+        state, _ = RUNTIME._locate_state(self.args(), plan["route_id"])
+        events, warnings = RUNTIME.ledger.read_events(
+            Path(state["effective_ledger"])
+        )
+        self.assertEqual(warnings, [])
+        self.assertIn(
+            "parallel_worker_start", [item["event"] for item in events]
+        )
+
+    def test_persisted_identity_rejects_wrong_attempt_without_consuming_claim(self):
+        plan = RUNTIME.policy.plan_apply_segments(
+            [segment()], current=current("gpt-5.6-sol", "medium")
+        )
+        selected = plan["segments"][0]
+        self.begin_result(
+            self.envelope(plan),
+            current(selected["model"], selected["effort"]),
+        )
+        invalid = {
+            "route_id": plan["route_id"], "segment_id": "docs",
+            "attempt_id": "wrong-attempt", "outcome": "completed",
+        }
+        with self.assertRaisesRegex(SystemExit, "attempt_id mismatch"):
+            RUNTIME.finish(self.args(result_json=json.dumps(invalid)))
+        with self.assertRaisesRegex(SystemExit, "attempt_id mismatch"):
+            RUNTIME.restore(self.args(
+                route_id=plan["route_id"], segment_id="docs",
+                attempt_id="wrong-attempt",
+            ))
+        events, _ = RUNTIME.ledger.read_events(self.ledger)
+        self.assertEqual(
+            [item["event"] for item in events], ["segment_claim"]
+        )
+
+    def test_restore_warning_is_idempotent_and_never_retries(self):
+        plan = RUNTIME.policy.plan_apply_segments(
+            [segment()], current=current("gpt-5.6-sol", "medium")
+        )
+        selected = plan["segments"][0]
+        self.begin_result(
+            self.envelope(plan),
+            current(selected["model"], selected["effort"]),
+        )
+        self.finish_result({
+            "route_id": plan["route_id"], "segment_id": "docs",
+            "attempt_id": selected["attempt_id"], "outcome": "completed",
+            "source": "user-confirmed", "actual_model": selected["model"],
+            "actual_effort": selected["effort"],
+        })
+        failed = self.restore_result(
+            plan, runtime_current=current("gpt-5.6-luna", "low")
+        )
+        self.assertEqual(failed["state_gate"], "degraded")
+        self.assertFalse(failed["restore_recovered"])
+        repeated = self.restore_result(
+            plan, runtime_current=current("gpt-5.6-sol", "medium")
+        )
+        self.assertEqual(repeated["state_gate"], "degraded")
+        self.assertTrue(repeated["restore_recovered"])
+        self.assertFalse(repeated["restored"])
 
     def test_begin_rejects_unknown_or_mismatched_runtime_before_claim(self):
         plan = RUNTIME.policy.plan_apply_segments(
@@ -242,7 +477,7 @@ class RouterRuntimeTests(unittest.TestCase):
         )
         decision = self.capability_decision(plan, "docs")
         envelope = {**self.envelope(plan), "capability_decision": decision}
-        started = self.begin_result(envelope, current("gpt-5.5", "low"))
+        started = self.begin_result(envelope, current("gpt-5.5", "medium"))
         self.assertTrue(started["claim_required"])
         self.assertEqual(started["claim_state"], "prepared")
         events, warnings = RUNTIME.ledger.read_events(self.ledger)
@@ -292,6 +527,25 @@ class RouterRuntimeTests(unittest.TestCase):
             "segment_claim", "segment_result", "execution", "routing_efficiency",
         ])
 
+    def test_finish_records_verified_effort_mismatch_without_model_fallback(self):
+        plan = RUNTIME.policy.plan_apply_segments(
+            [segment()], current=current("gpt-5.6-sol", "medium")
+        )
+        selected = plan["segments"][0]
+        self.claim(plan, "docs")
+        finished = self.finish_result({
+            "plan": plan, "route_id": plan["route_id"],
+            "segment_id": "docs", "attempt_id": selected["attempt_id"],
+            "outcome": "completed", "source": "user-confirmed",
+            "actual_model": selected["model"], "actual_effort": "max",
+        })
+        self.assertTrue(finished["execution_recorded"])
+        events, _ = RUNTIME.ledger.read_events(self.ledger)
+        execution = next(item for item in events if item["event"] == "execution")
+        self.assertEqual(execution["model"], selected["model"])
+        self.assertEqual(execution["effort"], "max")
+        self.assertNotIn("fallback_from", execution)
+
     def test_finish_requires_matching_unconsumed_claim_except_fast_local(self):
         switched = RUNTIME.policy.plan_apply_segments(
             [segment()], current=current("gpt-5.6-sol", "medium")
@@ -312,12 +566,12 @@ class RouterRuntimeTests(unittest.TestCase):
 
         local_ledger = Path(self.temp.name) / "local.jsonl"
         local = RUNTIME.policy.plan_apply_segments(
-            [segment()], current=current("gpt-5.6-luna", "low")
+            [segment()], current=current("gpt-5.6-luna", "medium")
         )
         local_result = {
             "plan": local, "segment_id": "docs", "outcome": "completed",
             "source": "user-confirmed", "actual_model": "gpt-5.6-luna",
-            "actual_effort": "low",
+            "actual_effort": "medium",
         }
         output = io.StringIO()
         with redirect_stdout(output):
@@ -533,7 +787,7 @@ class RouterRuntimeTests(unittest.TestCase):
         self.assertEqual(failed["next"]["action"], "drain-running")
         self.assertEqual(failed["parallel_execution_state"], "pending")
         before, _ = RUNTIME.ledger.read_events(self.ledger)
-        with self.assertRaisesRegex(SystemExit, "matching prepared claim"):
+        with self.assertRaisesRegex(SystemExit, "segment_id mismatch"):
             RUNTIME.worker_start(self.args(
                 route_id=plan["route_id"], plan_hash=plan["plan_hash"],
                 segment_id="typo", attempt_id="typo-attempt",

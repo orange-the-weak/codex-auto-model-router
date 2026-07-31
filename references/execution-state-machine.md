@@ -18,6 +18,7 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 - `apply-fast-v1` has no cursor. A local matched Segment skips the replay claim; a switched/continued Segment keeps an atomic claim. Multi-Segment cursors advance only after success.
 - Adjacent segments with the same model and effort are merged before execution.
 - Every new Apply request and every candidate Segment is routed from its own evidence. A previous request or Segment route never biases selection in either direction: simple work can move down, and complex work can move up.
+- Automatic routed efforts are `low|medium|high|xhigh|max`. `ultra` is disabled by default. It is legal only as an explicit user opt-in for one bounded `apply-fast-v1` Segment; that native Codex mode combines maximum reasoning with proactive delegation, so `dependency-parallel-v1` must be disabled for the request.
 - The bundled benchmark snapshot is an offline, stale-aware prior. Its audit metadata is immutable in new plans and covered by `plan_hash`; legacy envelopes without that field remain valid. Missing, invalid, or expired evidence falls back without a network request.
 - The standard budget is 4/4, eligible complex or large plans may expand to 6/6, and explicit user budgets may reach the absolute 8/8 hard limit. Switch counts include final Restore.
 - Dispatch performs at most one same-task continuation per segment boundary and at most one explicitly model-selectable subagent fallback per segment.
@@ -27,15 +28,15 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 - Never make a persistent same-task switch when the original model or effort is unknown.
 - A failed segment stops the plan. Never retry by cycling through routes or re-planning.
 - A verified GPT-5.6 original remains immutable across intermediate switches. Make one Restore attempt only when that original is Sol, Terra, or Luna and the final/failed Segment is not already on it. A non-5.6 original is audit-only after verified GPT-5.6 execution.
-- `RETURN` is terminal and cannot execute or advance a segment.
-- Report or ledger persistence failure does not invalidate otherwise completed work.
+- `RETURN` is terminal after at most one ID-based Restore verification; it cannot execute or advance a segment.
+- Report, ledger, or runtime-state persistence failure after project completion does not invalidate completed work. Use isolated temporary state when possible, otherwise return one non-blocking warning.
 - Parallel execution has an automatic ceiling of 4 leaf tasks. The capacity rule is `observed total slots - coordinator - running tasks`, applied globally; effective concurrency is the minimum of requested concurrency, useful independent width, and that free capacity. Four total slots normally mean one coordinator plus a peak of three leaf tasks; the visible chat combines these as `并发计划：4 个任务（含主任务）`. A documented/default thread limit is not live capacity. Store only the dispatch-capacity policy in `plan_hash`; immediately before every dispatch, the runtime boundary supplies a trusted capacity observation independently of the caller envelope. A JSON field that labels itself `task-metadata` is not proof. Without observed capacity, dispatch one task as a probe, then require a runtime observation before refill. A user request above 4 requires matching observed free slots and useful width.
 - The Coordinator calls `router_runtime.py worker-start` after each dispatch confirmation and `worker-finish` after each result receipt, always with matching route/plan/segment/attempt identity. The runtime captures a shared monotonic clock; callers never supply time values. A prepared parallel claim may be recovered only until dispatch confirmation.
 - A terminal `finish` consumes the matching claim through one atomic `segment_result`, derives frontier/cursor state from ledger results, and derives every parallel aggregate from complete per-task intervals. Caller-supplied completion state is never authoritative; incomplete evidence remains `pending`, and legacy aggregate-only records stay outside verified history.
 - The coordinator prints the returned `parallel_execution_brief` verbatim and never recomputes its values.
 - The parallel Coordinator exclusively owns the frontier, dispatch, wait-any loop, failure state, and deterministic aggregation. The first failure atomically writes a route-level stop latch; `stop-dispatch-drain-running` then rejects new claims while allowing already active tasks to finish.
 - Parallel write tasks declare concrete `write_scopes`; resolve every scope to its real repository-relative path before hashing and comparison, so a symlink alias and its target conflict. Escapes are rejected. Overlapping write scopes and shared `conflict_keys` add dependencies and degrade to serial. Contract-v2 plans retain pre-conflict `declared_dependencies`; the receiver rebuilds conflict dependencies and `serialized_conflicts`, validates fixed scheduler/failure/delegation/ownership/security semantics, and accepts only GPT-5.6 Sol/Terra/Luna with a routed effort. The complete DAG and protocol metadata remain covered by `plan_hash`.
-- On first accepted `begin`, the runtime atomically binds `route_id` to the issued `plan_hash`, protocol, and contract version. Every later begin, finish, worker event, and dispatch reservation checks that trusted anchor. Recomputing a valid hash after changing a route is insufficient, and an issued v2 route cannot strip its contract marker to enter the legacy path. Only a route genuinely first seen without a contract version may use legacy validation.
+- On first accepted `begin`, the runtime atomically persists the canonical normalized plan, `plan_hash`, route/segment/attempt identities, original route, protocol, and contract version. Later `finish` and `restore` resolve that state with `route_id + segment_id + attempt_id`; callers never reconstruct the plan after compaction. Every worker event and dispatch reservation still checks the trusted anchor. Recomputing a valid hash after changing a route is insufficient, and an issued v2 route cannot strip its contract marker to enter the legacy path.
 
 ## Plan normalization
 
@@ -45,7 +46,7 @@ The policy script validates a JSON array and returns `apply-fast-v1` for one nor
 
 Normalize in this order:
 
-1. Validate IDs, required fields, linear dependencies, enums, and overrides.
+1. Validate IDs, required fields, linear dependencies, task-evidence enums (including optional `latency_priority=low|normal|high`), and overrides. Reject automatic Ultra, Luna/ultra, multi-Segment Ultra, and every Ultra plus Router-parallel combination.
 2. Choose the lowest sufficient GPT-5.6 model and effort for every candidate.
 3. Compare each independently selected route with the current execution route only to choose local execution or a switch.
 4. Merge adjacent segments with the same route.
@@ -58,7 +59,7 @@ For `dependency-parallel-v1`, require an explicit content-based `segment_id` for
 
 ## Transitions
 
-Use `scripts/router_runtime.py begin` before project work and `finish` after it. `begin` binds or checks the trusted route contract, validates the immutable envelope, receives immediate capacity from the runtime metadata boundary, validates the semantic agent name and actual runtime model/effort, then prepares a claim. The standalone policy CLI can inspect legacy/static structure but cannot self-authorize a v2 dispatch by echoing plan or capacity fields. `finish` consumes the bound claim/result identity and derives next state from the ledger. These commands reduce tool/model round trips without weakening state gates.
+Use `scripts/router_runtime.py begin` before project work, `finish` after it, and `restore` only in the restored terminal turn. `begin` validates the immutable envelope and actual route, persists canonical state, and then prepares a claim. `finish` accepts the three IDs plus bounded result metadata, loads the persisted plan, and derives the next state. `restore` reads the persisted original route and result; it never receives or recomputes `plan_hash`. All three are idempotent at their legal boundary.
 
 | State | Success | Failure |
 |---|---|---|
@@ -73,12 +74,12 @@ Use `scripts/router_runtime.py begin` before project work and `finish` after it.
 | RECORD | ADVANCE or RESTORE | note ledger failure internally and continue |
 | ADVANCE | SEGMENT_READY for exactly the next cursor | STOP on missing or repeated cursor |
 | STOP | RESTORE when needed | RETURN partial result directly if no switch occurred |
-| RESTORE | RETURN | stop after one failed Restore attempt |
+| RESTORE | verify persisted original route by IDs, then RETURN | return a non-blocking warning after one failed verification |
 | RETURN | terminal result | terminal result |
 
 ## Coordinator state and worker capsule
 
-Every Apply continuation carries:
+The first Apply continuation carries:
 
 - `ROUTE_PROJECT_MODELS_ROUTED_TURN=1`
 - `ROUTED_MODE=APPLY_SEGMENT`
@@ -89,6 +90,8 @@ Every Apply continuation carries:
 - verified `original_model` and `original_effort`
 - repository, report, and ledger paths
 - accumulated completed-segment results and changed-file summary
+
+After the first successful `begin`, compacted continuations may carry only the current IDs and bounded Segment capsule; the runtime restores canonical plan fields from persisted state. `finish` and `restore` require only `route_id + segment_id + attempt_id` plus result metadata. Never put the full normalized plan back together from remembered chat text.
 
 The prompt order is part of the user-visible contract:
 

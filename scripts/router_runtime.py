@@ -5,9 +5,12 @@ import argparse
 import hashlib
 import inspect
 import json
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -15,6 +18,10 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import model_usage_ledger as ledger  # noqa: E402
 import route_policy as policy  # noqa: E402
+
+
+RUNTIME_STATE_SCHEMA_VERSION = 1
+RUNTIME_STATE_DIR = "codex-auto-model-router-runtime-v1"
 
 
 def _load(value, label):
@@ -25,6 +32,262 @@ def _load(value, label):
     if not isinstance(result, dict):
         raise ValueError(f"{label} must be an object")
     return result
+
+
+def _canonical_json(value):
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _state_key(route_id):
+    if not isinstance(route_id, str) or not route_id:
+        raise ValueError("runtime state requires route_id")
+    return hashlib.sha256(route_id.encode("utf-8")).hexdigest()
+
+
+def _state_roots(args):
+    override = getattr(args, "state_root", None)
+    if override is not None:
+        root = Path(override)
+        return [root]
+    primary = Path(args.ledger).parent / "model-routing-runtime"
+    fallback = Path(tempfile.gettempdir()) / RUNTIME_STATE_DIR
+    return [primary] if primary == fallback else [primary, fallback]
+
+
+def _state_path(root, route_id):
+    return root / f"{_state_key(route_id)}.json"
+
+
+def _state_lock_path(root, route_id):
+    return root / f"{_state_key(route_id)}.lock"
+
+
+def _secure_directory(path):
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+
+
+def _atomic_write_json(path, value):
+    _secure_directory(path.parent)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent
+    )
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(_canonical_json(value) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            temporary_path.chmod(0o600)
+        except OSError:
+            pass
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def _read_state_file(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"runtime state is unreadable: {type(exc).__name__}") from exc
+    if not isinstance(value, dict) or value.get("schema_version") != RUNTIME_STATE_SCHEMA_VERSION:
+        raise ValueError("runtime state has an unsupported schema")
+    return value
+
+
+def _locate_state(args, route_id):
+    candidates = []
+    failures = []
+    for index, root in enumerate(_state_roots(args)):
+        path = _state_path(root, route_id)
+        if path.exists():
+            try:
+                state = _read_state_file(path)
+            except ValueError as exc:
+                failures.append(str(exc))
+                continue
+            if state.get("route_id") != route_id:
+                raise ValueError("runtime state route_id mismatch")
+            candidates.append((int(state.get("revision", 0)), -index, state, path))
+    if candidates:
+        _, _, state, path = max(candidates, key=lambda item: item[:2])
+        return state, path
+    if failures:
+        raise ValueError(failures[0])
+    return None, None
+
+
+def _write_state_at(path, state):
+    root = path.parent
+    _secure_directory(root)
+    lock_path = _state_lock_path(root, state["route_id"])
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        with ledger.locked_file(handle, exclusive=True):
+            existing = _read_state_file(path)
+            if existing is not None and existing.get("route_id") != state.get("route_id"):
+                raise ValueError("runtime state route_id mismatch")
+            state["revision"] = max(
+                int(state.get("revision", 0)),
+                int((existing or {}).get("revision", 0)),
+            ) + 1
+            _atomic_write_json(path, state)
+
+
+def _persist_new_state(args, state):
+    failures = []
+    for root in _state_roots(args):
+        path = _state_path(root, state["route_id"])
+        try:
+            _write_state_at(path, state)
+            return path, failures
+        except OSError as exc:
+            failures.append(f"{path}:{type(exc).__name__}")
+    raise ValueError(
+        "runtime state cannot be persisted"
+        + (f" ({'; '.join(failures)})" if failures else "")
+    )
+
+
+def _fallback_ledger(args, route_id):
+    root = _state_roots(args)[-1] / "ledgers"
+    _secure_directory(root)
+    return root / f"{_state_key(route_id)}.jsonl"
+
+
+def _new_runtime_state(plan, segment, primary_ledger):
+    canonical_plan = json.loads(_canonical_json(plan))
+    return {
+        "schema_version": RUNTIME_STATE_SCHEMA_VERSION,
+        "revision": 0,
+        "route_id": plan["route_id"],
+        "plan_hash": plan["plan_hash"],
+        "protocol": plan["protocol"],
+        "attempts": {
+            item["segment_id"]: item["attempt_id"]
+            for item in canonical_plan.get("segments", [])
+        },
+        "last_segment_id": segment["segment_id"],
+        "last_attempt_id": segment["attempt_id"],
+        "original": canonical_plan.get("original", {}),
+        "restore_required": bool(canonical_plan.get("restore_required")),
+        "canonical_plan": canonical_plan,
+        "primary_ledger": str(Path(primary_ledger).resolve()),
+        "effective_ledger": str(Path(primary_ledger).resolve()),
+        "ledger_fallback": False,
+        "claim": None,
+        "segment_results": {},
+        "finishes": {},
+        "restore": None,
+        "warnings": [],
+    }
+
+
+def _validate_state_identity(state, route_id, segment_id, attempt_id):
+    for field, value in {"route_id": route_id}.items():
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"runtime identity requires {field}")
+        if state.get(field) != value:
+            raise ValueError(f"runtime state {field} mismatch")
+    if not isinstance(segment_id, str) or not segment_id:
+        raise ValueError("runtime identity requires segment_id")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        raise ValueError("runtime identity requires attempt_id")
+    attempts = state.get("attempts")
+    if not isinstance(attempts, dict) or segment_id not in attempts:
+        raise ValueError("runtime state segment_id mismatch")
+    if attempts.get(segment_id) != attempt_id:
+        raise ValueError("runtime state attempt_id mismatch")
+    plan = state.get("canonical_plan")
+    if not isinstance(plan, dict) or plan.get("plan_hash") != state.get("plan_hash"):
+        raise ValueError("runtime state canonical plan mismatch")
+    return plan
+
+
+def _bind_or_verify_state(args, plan, segment):
+    state, path = _locate_state(args, plan["route_id"])
+    candidate = _new_runtime_state(plan, segment, args.ledger)
+    if state is None:
+        path, failures = _persist_new_state(args, candidate)
+        if failures:
+            candidate["warnings"].append(
+                "project runtime state unavailable; using isolated temporary state"
+            )
+            _write_state_at(path, candidate)
+        return candidate, path
+    _validate_state_identity(
+        state, plan["route_id"], segment["segment_id"], segment["attempt_id"]
+    )
+    if _canonical_json(state["canonical_plan"]) != _canonical_json(candidate["canonical_plan"]):
+        raise ValueError("runtime state canonical plan conflicts with begin plan")
+    state["last_segment_id"] = segment["segment_id"]
+    state["last_attempt_id"] = segment["attempt_id"]
+    _write_state_at(path, state)
+    return state, path
+
+
+def _effective_ledger(state):
+    return Path(state["effective_ledger"])
+
+
+def _switch_to_fallback_ledger(args, state, state_path, reason):
+    fallback = _fallback_ledger(args, state["route_id"])
+    state["effective_ledger"] = str(fallback.resolve())
+    state["ledger_fallback"] = True
+    warning = f"project ledger unavailable; using isolated temporary ledger ({reason})"
+    if warning not in state["warnings"]:
+        state["warnings"].append(warning)
+    _write_state_at(state_path, state)
+    return fallback
+
+
+def _write_state_after_completion(args, state_path, state):
+    """Persist coordinator state without blocking an already completed project result."""
+    try:
+        if state_path is None:
+            state_path, failures = _persist_new_state(args, state)
+            if failures:
+                state["warnings"].append(
+                    "project runtime state unavailable; using isolated temporary state"
+                )
+                _write_state_at(state_path, state)
+        else:
+            _write_state_at(state_path, state)
+        return state_path, []
+    except (OSError, ValueError) as exc:
+        fallback_path = _state_path(_state_roots(args)[-1], state["route_id"])
+        if state_path != fallback_path:
+            try:
+                warning = (
+                    "runtime state became unavailable after project completion; "
+                    "continuing with isolated temporary state"
+                )
+                if warning not in state["warnings"]:
+                    state["warnings"].append(warning)
+                _write_state_at(fallback_path, state)
+                return fallback_path, [warning]
+            except (OSError, ValueError):
+                pass
+        return state_path, [
+            "runtime state could not be updated after project completion: "
+            f"{type(exc).__name__}"
+        ]
+
+
+def _route_events_safe(path, route_id):
+    try:
+        return _route_events(path, route_id)
+    except OSError:
+        return [], ["ledger-unreadable"]
 
 
 def _validate(
@@ -78,7 +341,7 @@ def _current(args):
     )
 
 
-def _record_gate_stop(args, envelope, reason):
+def _record_gate_stop(args, envelope, reason, ledger_path=None):
     plan = envelope.get("plan") if isinstance(envelope, dict) else None
     route_id = plan.get("route_id") if isinstance(plan, dict) else None
     if not route_id:
@@ -91,12 +354,25 @@ def _record_gate_stop(args, envelope, reason):
     segment_id = envelope.get("segment_id")
     if segment_id:
         event["segment_id"] = segment_id
-    return ledger.append_event(args.ledger, event)
+    try:
+        return ledger.append_event(ledger_path or args.ledger, event)
+    except OSError:
+        return False
 
 
 def _route_events(path, route_id):
     events, warnings = ledger.read_events(path)
     return [item for item in events if item.get("route_id") == route_id], warnings
+
+
+def _state_result_events(state):
+    if not isinstance(state, dict):
+        return []
+    return [
+        item["event"]
+        for item in state.get("segment_results", {}).values()
+        if isinstance(item, dict) and isinstance(item.get("event"), dict)
+    ]
 
 
 def _terminal_results(plan, events):
@@ -150,6 +426,28 @@ def _authoritative_envelope(envelope, events):
             identifier for identifier in segment_order
             if identifier in starts and identifier not in finishes
         ]
+    return envelope
+
+
+def _hydrate_envelope_from_state(envelope, state):
+    """Restore deterministic envelope fields lost to context compaction."""
+    if not isinstance(state, dict):
+        return envelope
+    plan = state["canonical_plan"]
+    original = plan.get("original", {})
+    defaults = {
+        "route_id": plan.get("route_id"),
+        "protocol": plan.get("protocol"),
+        "restore_required": plan.get("restore_required"),
+        "segment_budget": plan.get("segment_budget"),
+        "switch_budget": plan.get("switch_budget"),
+        "budget_source": plan.get("budget_source"),
+        "original_model": original.get("model"),
+        "original_effort": original.get("effort"),
+    }
+    for field, value in defaults.items():
+        if envelope.get(field) is None and value is not None:
+            envelope[field] = value
     return envelope
 
 
@@ -240,13 +538,47 @@ def _begin_runtime_route(envelope, plan, segment, current):
 
 def begin(args):
     envelope = None
+    state = None
+    state_path = None
+    effective_ledger = Path(args.ledger)
+    warnings = []
     try:
         envelope = _load(args.envelope_json, "envelope")
         plan = envelope.get("plan")
-        route_id = plan.get("route_id") if isinstance(plan, dict) else None
-        events, _ = _route_events(args.ledger, route_id) if route_id else ([], [])
+        route_id = (
+            plan.get("route_id") if isinstance(plan, dict)
+            else envelope.get("route_id")
+        )
+        if route_id:
+            state, state_path = _locate_state(args, route_id)
+        if not isinstance(plan, dict) and state is not None:
+            plan = state["canonical_plan"]
+            envelope["plan"] = plan
+        if not isinstance(plan, dict):
+            raise ValueError(
+                "first begin requires a canonical plan; compact retries require persisted state"
+            )
+        route_id = plan.get("route_id")
+        if state is not None:
+            envelope = _hydrate_envelope_from_state(envelope, state)
+            effective_ledger = _effective_ledger(state)
+        events, warnings = (
+            _route_events_safe(effective_ledger, route_id) if route_id else ([], [])
+        )
+        if state is not None:
+            stored_events = _state_result_events(state)
+            existing_ids = {item.get("event_id") for item in events}
+            events.extend(
+                item for item in stored_events
+                if item.get("event_id") not in existing_ids
+            )
         envelope = _authoritative_envelope(envelope, events)
-        anchor = ledger.route_contract(args.ledger, route_id) if route_id else None
+        try:
+            anchor = (
+                ledger.route_contract(effective_ledger, route_id) if route_id else None
+            )
+        except OSError:
+            anchor = None
         contract_version = (
             plan.get("parallel", {}).get("contract_version")
             if isinstance(plan, dict) and isinstance(plan.get("parallel"), dict)
@@ -265,13 +597,6 @@ def begin(args):
             ),
             dispatch_capacity_trusted=bool(trusted_capacity),
         )
-        if contract_version is not None:
-            ledger.bind_route_contract(args.ledger, {
-                "event": "route_contract", "route_id": plan["route_id"],
-                "plan_hash": plan["plan_hash"], "protocol": plan["protocol"],
-                "contract_version": contract_version,
-                "source": ledger.ROUTE_CONTRACT_SOURCE,
-            })
     except ValueError as exc:
         raise SystemExit(f"state gate stopped: {exc}") from exc
     plan = envelope["plan"]
@@ -286,8 +611,32 @@ def begin(args):
     try:
         decision = _begin_runtime_route(envelope, plan, segment, current)
     except ValueError as exc:
-        _record_gate_stop(args, envelope, exc)
+        _record_gate_stop(args, envelope, exc, effective_ledger)
         raise SystemExit(f"state gate stopped: {exc}") from exc
+    try:
+        state, state_path = _bind_or_verify_state(args, plan, segment)
+        effective_ledger = _effective_ledger(state)
+    except ValueError as exc:
+        raise SystemExit(f"state gate stopped: {exc}") from exc
+    if contract_version is not None:
+        contract_event = {
+            "event": "route_contract", "route_id": plan["route_id"],
+            "plan_hash": plan["plan_hash"], "protocol": plan["protocol"],
+            "contract_version": contract_version,
+            "source": ledger.ROUTE_CONTRACT_SOURCE,
+        }
+        try:
+            ledger.bind_route_contract(effective_ledger, contract_event)
+        except OSError as exc:
+            try:
+                effective_ledger = _switch_to_fallback_ledger(
+                    args, state, state_path, type(exc).__name__
+                )
+                ledger.bind_route_contract(effective_ledger, contract_event)
+            except OSError as fallback_exc:
+                raise SystemExit(
+                    "state gate stopped: runtime ledger and isolated fallback are unavailable"
+                ) from fallback_exc
     claim_required = not (
         plan["protocol"] == policy.FAST_PROTOCOL
         and segment.get("dispatch") == "local"
@@ -321,21 +670,45 @@ def begin(args):
             claim_event["capability_decision_hash"] = ledger.capability_decision_hash(decision)
         try:
             claim_state = ledger.prepare_segment_claim(
-                args.ledger, claim_event,
+                effective_ledger, claim_event,
                 allow_prepared_recovery=plan["protocol"] == policy.PARALLEL_PROTOCOL,
                 reservation_event=reservation_event,
             )
+        except OSError as exc:
+            try:
+                effective_ledger = _switch_to_fallback_ledger(
+                    args, state, state_path, type(exc).__name__
+                )
+                claim_state = ledger.prepare_segment_claim(
+                    effective_ledger, claim_event,
+                    allow_prepared_recovery=plan["protocol"] == policy.PARALLEL_PROTOCOL,
+                    reservation_event=reservation_event,
+                )
+            except OSError as fallback_exc:
+                raise SystemExit(
+                    "state gate stopped: runtime ledger and isolated fallback are unavailable"
+                ) from fallback_exc
         except ValueError as exc:
-            _record_gate_stop(args, envelope, exc)
+            _record_gate_stop(args, envelope, exc, effective_ledger)
             raise SystemExit(f"state gate stopped: {exc}") from exc
         claimed = claim_state == "prepared"
         if claim_state not in ("prepared", "recovered"):
-            _record_gate_stop(args, envelope, f"segment-claim-{claim_state}")
+            _record_gate_stop(
+                args, envelope, f"segment-claim-{claim_state}", effective_ledger
+            )
             message = (
                 "segment already claimed" if claim_state == "already-claimed"
                 else f"segment claim is {claim_state}"
             )
             raise SystemExit(f"state gate stopped: {message}")
+    state.setdefault("claims", {})[segment["segment_id"]] = {
+        "attempt_id": segment["attempt_id"],
+        "plan_hash": plan["plan_hash"],
+        "required": claim_required,
+        "state": claim_state,
+    }
+    state["effective_ledger"] = str(effective_ledger.resolve())
+    _write_state_at(state_path, state)
     print(json.dumps({
         "ok": True,
         "state_gate": "passed",
@@ -346,12 +719,35 @@ def begin(args):
         "dispatch_reserved": reservation_event is not None,
         "dispatch": segment.get("dispatch"),
         "current": current,
+        "runtime_state_persisted": True,
+        "ledger_fallback": state.get("ledger_fallback", False),
+        "warnings": state.get("warnings", []) + warnings,
         "context_capsule": policy.context_capsule(plan, segment["segment_id"]),
     }, ensure_ascii=False, sort_keys=True))
 
 
 def _capture_worker_event(args, event_type, outcome=None):
-    anchor = ledger.route_contract(args.ledger, args.route_id)
+    try:
+        state, state_path = _locate_state(args, args.route_id)
+    except ValueError as exc:
+        raise SystemExit(f"worker state gate stopped: {exc}") from exc
+    event_ledger = Path(args.ledger)
+    if state is not None:
+        try:
+            _validate_state_identity(
+                state, args.route_id, args.segment_id, args.attempt_id
+            )
+        except ValueError as exc:
+            raise SystemExit(f"worker state gate stopped: {exc}") from exc
+        if state.get("plan_hash") != args.plan_hash:
+            raise SystemExit(
+                "worker state gate stopped: runtime state plan hash mismatch"
+            )
+        event_ledger = _effective_ledger(state)
+    try:
+        anchor = ledger.route_contract(event_ledger, args.route_id)
+    except OSError:
+        anchor = None
     if anchor is not None and anchor.get("plan_hash") != args.plan_hash:
         raise SystemExit("worker state gate stopped: route contract plan hash mismatch")
     event = {
@@ -367,10 +763,25 @@ def _capture_worker_event(args, event_type, outcome=None):
     if outcome is not None:
         event["outcome"] = outcome
     try:
-        appended = ledger.append_event(args.ledger, event)
+        appended = ledger.append_event(event_ledger, event)
+    except OSError as exc:
+        if state is None:
+            raise SystemExit(
+                f"worker state gate stopped: ledger unavailable ({type(exc).__name__})"
+            ) from exc
+        try:
+            event_ledger = _switch_to_fallback_ledger(
+                args, state, state_path, type(exc).__name__
+            )
+            appended = ledger.append_event(event_ledger, event)
+        except OSError as fallback_exc:
+            raise SystemExit(
+                "worker state gate stopped: runtime ledger and isolated fallback "
+                "are unavailable"
+            ) from fallback_exc
     except ValueError as exc:
         raise SystemExit(f"worker state gate stopped: {exc}") from exc
-    events, _ = _route_events(args.ledger, args.route_id)
+    events, _ = _route_events(event_ledger, args.route_id)
     stop_latched = any(
         item.get("event") == "parallel_stop_latch" for item in events
     )
@@ -763,7 +1174,8 @@ def _execution_event(plan, segment, result, current, identity, events, outcome):
         policy.normalize_effort(segment.get("effort")),
     )
     decision = result.get("capability_decision")
-    if actual_route != target_route:
+    model_fallback = actual_route[0] != target_route[0]
+    if model_fallback:
         _validated_capability_decision(decision, plan, segment, actual_route)
     elif decision is not None:
         _validated_capability_decision(decision, plan, segment, actual_route)
@@ -773,8 +1185,8 @@ def _execution_event(plan, segment, result, current, identity, events, outcome):
         "task_class": result.get("task_class", segment.get("task_kind", "unknown")),
         "outcome": outcome, "source": source,
         "verification": result.get("verification", "unknown"),
-        "fallback_from": target_route[0] if actual_route != target_route else None,
-        "fallback_to": actual_route[0] if actual_route != target_route else None,
+        "fallback_from": target_route[0] if model_fallback else None,
+        "fallback_to": actual_route[0] if model_fallback else None,
         "fallback_reason": decision.get("reason") if decision is not None else None,
         "capability_decision": decision,
     }
@@ -787,36 +1199,157 @@ def _execution_event(plan, segment, result, current, identity, events, outcome):
     return event, runtime_metadata
 
 
-def finish(args):
-    result = _load(args.result_json, "result")
-    plan = result.get("plan")
-    if not isinstance(plan, dict):
-        raise SystemExit("finish requires plan")
-    segment = next(
-        (item for item in plan.get("segments", []) if item.get("segment_id") == result.get("segment_id")),
+def _segment_for_identity(plan, segment_id):
+    return next(
+        (
+            item for item in plan.get("segments", [])
+            if item.get("segment_id") == segment_id
+        ),
         None,
     )
-    if segment is None:
-        raise SystemExit("finish segment is missing from plan")
-    try:
-        _validate_finish_plan(plan, segment)
-        contract_version = (
-            plan.get("parallel", {}).get("contract_version")
-            if isinstance(plan.get("parallel"), dict) else None
+
+
+def _finish_identity(result, supplied_plan):
+    route_id = result.get("route_id")
+    segment_id = result.get("segment_id")
+    attempt_id = result.get("attempt_id")
+    if isinstance(supplied_plan, dict):
+        route_id = route_id or supplied_plan.get("route_id")
+        segment = _segment_for_identity(supplied_plan, segment_id)
+        if segment is not None:
+            attempt_id = attempt_id or segment.get("attempt_id")
+    return route_id, segment_id, attempt_id
+
+
+def _degraded_finish(result, reason):
+    outcome = result.get("outcome")
+    if outcome not in ledger.OUTCOMES:
+        raise SystemExit("finish requires a valid outcome")
+    response = {
+        "ok": outcome == "completed",
+        "state_gate": "degraded",
+        "execution_recorded": False,
+        "metrics_recorded": False,
+        "claim_consumed": False,
+        "finish_recovered": False,
+        "ledger_warning_count": 1,
+        "warnings": [reason],
+        "next": {"action": "return", "reason": "runtime-state-unavailable"},
+    }
+    print(json.dumps(response, ensure_ascii=False, sort_keys=True))
+
+
+def finish(args):
+    result = _load(args.result_json, "result")
+    supplied_plan = result.get("plan")
+    route_id, segment_id, attempt_id = _finish_identity(result, supplied_plan)
+    if not route_id or not segment_id or not attempt_id:
+        _degraded_finish(
+            result,
+            "finish identity is incomplete; project result returned without ledger or Restore",
         )
-        if contract_version is not None:
-            ledger.bind_route_contract(args.ledger, {
-                "event": "route_contract", "route_id": plan["route_id"],
-                "plan_hash": plan["plan_hash"], "protocol": plan["protocol"],
-                "contract_version": contract_version,
-                "source": ledger.ROUTE_CONTRACT_SOURCE,
-            })
+        return
+    try:
+        state, state_path = _locate_state(args, route_id)
+    except ValueError as exc:
+        raise SystemExit(f"finish state gate stopped: {exc}") from exc
+    legacy_recovered = False
+    if state is None:
+        if not isinstance(supplied_plan, dict):
+            _degraded_finish(
+                result,
+                "persisted runtime state is missing; project result returned without ledger or Restore",
+            )
+            return
+        segment = _segment_for_identity(supplied_plan, segment_id)
+        if segment is None:
+            raise SystemExit("finish segment is missing from legacy plan")
+        attempt_id = attempt_id or segment.get("attempt_id")
+        try:
+            _validate_finish_plan(supplied_plan, segment)
+            state, state_path = _bind_or_verify_state(args, supplied_plan, segment)
+        except ValueError as exc:
+            if "runtime state cannot be persisted" not in str(exc):
+                raise SystemExit(f"finish state gate stopped: {exc}") from exc
+            state = _new_runtime_state(supplied_plan, segment, args.ledger)
+            state["warnings"].append(
+                "runtime state unavailable after project completion; using in-memory finish"
+            )
+            state_path = None
+        state["warnings"].append(
+            "runtime state was recovered from a legacy full-plan finish payload"
+        )
+        state_path, state_warnings = _write_state_after_completion(
+            args, state_path, state
+        )
+        state["warnings"].extend(
+            warning for warning in state_warnings
+            if warning not in state["warnings"]
+        )
+        legacy_recovered = True
+    try:
+        plan = _validate_state_identity(state, route_id, segment_id, attempt_id)
+    except ValueError as exc:
+        raise SystemExit(f"finish state gate stopped: {exc}") from exc
+    segment = _segment_for_identity(plan, segment_id)
+    if segment is None:
+        raise SystemExit("finish state gate stopped: persisted Segment is missing")
+    if isinstance(supplied_plan, dict) and (
+        supplied_plan.get("route_id") != plan.get("route_id")
+        or supplied_plan.get("plan_hash") != plan.get("plan_hash")
+    ):
+        raise SystemExit("finish state gate stopped: supplied legacy plan identity mismatch")
+    result = dict(result)
+    result["route_id"] = route_id
+    result["segment_id"] = segment_id
+    result["attempt_id"] = attempt_id
+    result["plan_hash"] = plan["plan_hash"]
+    finishes = state.setdefault("finishes", {})
+    recorded_finish = finishes.get(segment_id)
+    if recorded_finish is not None:
+        if recorded_finish.get("outcome") != result.get("outcome"):
+            raise SystemExit("finish state gate stopped: finish outcome conflicts with persisted result")
+        response = dict(recorded_finish["response"])
+        response.update({
+            "execution_recorded": False,
+            "metrics_recorded": False,
+            "finish_recovered": True,
+            "claim_consumed": True,
+        })
+        print(json.dumps(response, ensure_ascii=False, sort_keys=True))
+        return
+    try:
         identity = _identity(plan, segment)
         _validate_result_identity(result, identity)
     except ValueError as exc:
         raise SystemExit(f"finish state gate stopped: {exc}") from exc
     current = _current(args)
-    events, warnings = _route_events(args.ledger, plan["route_id"])
+    effective_ledger = _effective_ledger(state)
+    pre_ledger_warnings = []
+    parallel_contract = plan.get("parallel", {}).get("contract_version")
+    if legacy_recovered and parallel_contract is not None:
+        try:
+            ledger.bind_route_contract(effective_ledger, {
+                "event": "route_contract",
+                "route_id": plan["route_id"],
+                "plan_hash": plan["plan_hash"],
+                "protocol": plan["protocol"],
+                "contract_version": parallel_contract,
+                "source": ledger.ROUTE_CONTRACT_SOURCE,
+            })
+        except OSError as exc:
+            pre_ledger_warnings.append(
+                "route contract ledger write failed after project completion: "
+                f"{type(exc).__name__}"
+            )
+        except ValueError as exc:
+            raise SystemExit(f"finish state gate stopped: {exc}") from exc
+    events, warnings = _route_events_safe(effective_ledger, plan["route_id"])
+    stored_events = _state_result_events(state)
+    existing_ids = {item.get("event_id") for item in events}
+    events.extend(
+        item for item in stored_events if item.get("event_id") not in existing_ids
+    )
     try:
         outcome = _canonical_finish_outcome(plan, segment, result, events)
         execution_event, runtime_metadata = _execution_event(
@@ -852,16 +1385,50 @@ def finish(args):
     decision = result.get("capability_decision")
     if decision is not None:
         result_event["capability_decision_hash"] = ledger.capability_decision_hash(decision)
+    ledger_warnings = pre_ledger_warnings + list(warnings)
     try:
         transaction = ledger.commit_segment_finish(
-            args.ledger, result_event, [execution_event, metrics_event],
+            effective_ledger, result_event, [execution_event, metrics_event],
             claim_required=claim_required,
         )
+    except OSError as exc:
+        transaction = {
+            "result_recorded": False, "execution_recorded": False,
+            "metrics_recorded": False, "recovered": False,
+        }
+        ledger_warnings.append(
+            f"ledger write failed after project completion: {type(exc).__name__}"
+        )
     except ValueError as exc:
-        raise SystemExit(f"finish state gate stopped: {exc}") from exc
+        persisted_claim = state.get("claims", {}).get(segment_id)
+        if (
+            "matching segment claim" in str(exc)
+            and isinstance(persisted_claim, dict)
+            and persisted_claim.get("attempt_id") == attempt_id
+            and persisted_claim.get("state") in ("prepared", "recovered")
+        ):
+            transaction = {
+                "result_recorded": False, "execution_recorded": False,
+                "metrics_recorded": False, "recovered": False,
+            }
+            ledger_warnings.append(
+                "ledger claim disappeared after begin; persisted runtime identity preserved completion"
+            )
+        else:
+            raise SystemExit(f"finish state gate stopped: {exc}") from exc
     execution_recorded = transaction["execution_recorded"]
     metrics_recorded = transaction["metrics_recorded"]
-    events, post_warnings = _route_events(args.ledger, plan["route_id"])
+    stored_result_event = dict(result_event)
+    ledger._prepare_event(stored_result_event)
+    state.setdefault("segment_results", {})[segment_id] = {
+        "outcome": outcome,
+        "event": stored_result_event,
+    }
+    events, post_warnings = _route_events_safe(effective_ledger, plan["route_id"])
+    events.extend(
+        item for item in _state_result_events(state)
+        if item.get("event_id") not in {event.get("event_id") for event in events}
+    )
     next_state = _next_action(plan, current, events)
     response = {
         "ok": outcome == "completed",
@@ -871,21 +1438,206 @@ def finish(args):
         "finish_recovered": transaction["recovered"],
         "current": current,
         "execution_runtime_metadata": runtime_metadata,
-        "ledger_warning_count": len(post_warnings),
+        "ledger_warning_count": len(post_warnings) + len(ledger_warnings),
+        "runtime_state_recovered_from_legacy_plan": legacy_recovered,
+        "warnings": state.get("warnings", []) + ledger_warnings + post_warnings,
         "next": next_state,
     }
-    parallel_finalization = _finalize_parallel_execution(
-        args, plan, result, next_state
-    )
+    try:
+        runtime_args = SimpleNamespace(**vars(args))
+        runtime_args.ledger = effective_ledger
+        parallel_finalization = _finalize_parallel_execution(
+            runtime_args, plan, result, next_state
+        )
+    except OSError:
+        parallel_finalization = (
+            _parallel_finalization(
+                "pending", "ledger-unavailable-after-completion"
+            )
+            if plan.get("protocol") == policy.PARALLEL_PROTOCOL else None
+        )
     if parallel_finalization is not None:
         response.update(parallel_finalization)
+    finishes[segment_id] = {
+        "outcome": outcome,
+        "response": response,
+    }
+    if next_state.get("action") == "restore":
+        state["restore"] = {
+            "status": "pending",
+            "model": next_state.get("model"),
+            "effort": next_state.get("effort"),
+            "after_segment_id": segment_id,
+            "attempt_id": attempt_id,
+        }
+    state_path, state_warnings = _write_state_after_completion(
+        args, state_path, state
+    )
+    if state_warnings:
+        response["warnings"].extend(
+            warning for warning in state_warnings
+            if warning not in response["warnings"]
+        )
+        response["ledger_warning_count"] += len(state_warnings)
+        finishes[segment_id]["response"] = response
     print(json.dumps(response, ensure_ascii=False, sort_keys=True))
+
+
+def _degraded_restore(reason):
+    print(json.dumps({
+        "ok": True,
+        "state_gate": "degraded",
+        "restored": False,
+        "restore_recovered": False,
+        "warnings": [reason],
+        "next": {"action": "return", "reason": "restore-state-unavailable"},
+    }, ensure_ascii=False, sort_keys=True))
+
+
+def restore(args):
+    """Verify Restore from persisted begin/finish state using identity only."""
+    try:
+        state, state_path = _locate_state(args, args.route_id)
+    except ValueError as exc:
+        raise SystemExit(f"restore state gate stopped: {exc}") from exc
+    if state is None:
+        _degraded_restore(
+            "persisted runtime state is missing; project result returned without "
+            "blocking on Restore"
+        )
+        return
+    try:
+        _validate_state_identity(
+            state, args.route_id, args.segment_id, args.attempt_id
+        )
+    except ValueError as exc:
+        raise SystemExit(f"restore state gate stopped: {exc}") from exc
+    finished = state.get("finishes", {}).get(args.segment_id)
+    if not isinstance(finished, dict):
+        _degraded_restore(
+            "persisted finish result is missing; Restore was not recorded"
+        )
+        return
+    original = state.get("original", {})
+    target = {
+        "model": original.get("model"),
+        "effort": original.get("effort"),
+    }
+    recorded = state.get("restore")
+    if isinstance(recorded, dict) and recorded.get("status") == "completed":
+        restored = recorded.get("reason") != "not-required"
+        print(json.dumps({
+            "ok": True,
+            "state_gate": "passed",
+            "restored": restored,
+            "restore_recovered": True,
+            "original": target,
+            "warnings": state.get("warnings", []),
+            "next": {"action": "return"},
+        }, ensure_ascii=False, sort_keys=True))
+        return
+    if isinstance(recorded, dict) and recorded.get("status") == "warning":
+        print(json.dumps({
+            "ok": True,
+            "state_gate": "degraded",
+            "restored": False,
+            "restore_recovered": True,
+            "original": target,
+            "current": recorded.get("current"),
+            "warnings": state.get("warnings", []) + [recorded.get("warning")],
+            "next": {"action": "return", "reason": "restore-unverified"},
+        }, ensure_ascii=False, sort_keys=True))
+        return
+    if not state.get("restore_required"):
+        state["restore"] = {
+            "status": "completed",
+            "reason": "not-required",
+            "after_segment_id": args.segment_id,
+            "attempt_id": args.attempt_id,
+        }
+        state_path, write_warnings = _write_state_after_completion(
+            args, state_path, state
+        )
+        print(json.dumps({
+            "ok": True,
+            "state_gate": "passed",
+            "restored": False,
+            "restore_recovered": False,
+            "original": target,
+            "warnings": state.get("warnings", []) + write_warnings,
+            "next": {"action": "return"},
+        }, ensure_ascii=False, sort_keys=True))
+        return
+    if not isinstance(recorded, dict) or recorded.get("status") != "pending":
+        _degraded_restore(
+            "Restore is not pending for this completed Segment; project result "
+            "returned without changing the route"
+        )
+        return
+    if (
+        recorded.get("after_segment_id") != args.segment_id
+        or recorded.get("attempt_id") != args.attempt_id
+    ):
+        raise SystemExit("restore state gate stopped: pending Restore identity mismatch")
+    current = _current(args)
+    actual = (
+        _normalized_runtime_route(current.get("model"), current.get("effort"))
+        if current.get("status") == "verified" else None
+    )
+    expected = _normalized_runtime_route(target["model"], target["effort"])
+    if actual is None or expected is None or actual != expected:
+        warning = (
+            "Restore could not be verified; completed project result is returned "
+            "without retrying or reconstructing the plan"
+        )
+        state["restore"] = {
+            "status": "warning",
+            "after_segment_id": args.segment_id,
+            "attempt_id": args.attempt_id,
+            "current": current,
+            "warning": warning,
+        }
+        state_path, write_warnings = _write_state_after_completion(
+            args, state_path, state
+        )
+        print(json.dumps({
+            "ok": True,
+            "state_gate": "degraded",
+            "restored": False,
+            "restore_recovered": False,
+            "original": target,
+            "current": current,
+            "warnings": state.get("warnings", []) + [warning] + write_warnings,
+            "next": {"action": "return", "reason": "restore-unverified"},
+        }, ensure_ascii=False, sort_keys=True))
+        return
+    state["restore"] = {
+        "status": "completed",
+        "after_segment_id": args.segment_id,
+        "attempt_id": args.attempt_id,
+        "model": expected[0],
+        "effort": expected[1],
+    }
+    state_path, write_warnings = _write_state_after_completion(
+        args, state_path, state
+    )
+    print(json.dumps({
+        "ok": True,
+        "state_gate": "passed",
+        "restored": True,
+        "restore_recovered": False,
+        "original": target,
+        "current": current,
+        "warnings": state.get("warnings", []) + write_warnings,
+        "next": {"action": "return"},
+    }, ensure_ascii=False, sort_keys=True))
 
 
 def parser():
     root = argparse.ArgumentParser()
     root.add_argument("--sessions-root", type=Path)
     root.add_argument("--no-runtime-detection", action="store_true")
+    root.add_argument("--state-root", type=Path)
     commands = root.add_subparsers(dest="command", required=True)
     starter = commands.add_parser("begin")
     starter.add_argument("--ledger", type=Path, required=True)
@@ -911,6 +1663,12 @@ def parser():
     finisher.add_argument("--ledger", type=Path, required=True)
     finisher.add_argument("--result-json", required=True)
     finisher.set_defaults(func=finish)
+    restorer = commands.add_parser("restore")
+    restorer.add_argument("--ledger", type=Path, required=True)
+    restorer.add_argument("--route-id", required=True)
+    restorer.add_argument("--segment-id", required=True)
+    restorer.add_argument("--attempt-id", required=True)
+    restorer.set_defaults(func=restore)
     return root
 
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "snapshot_id": "gpt56-routing-evidence-2026-07-15",
-  "observed_at": "2026-07-15",
+  "snapshot_id": "gpt56-routing-evidence-2026-07-31-r3",
+  "observed_at": "2026-07-31",
   "expires_after_days": 90,
   "runtime_network_required": false,
   "policy": {
@@ -9,7 +9,17 @@
     "gpt55_fallback_requires_gpt56_family_unavailable": true,
     "api_price_is_codex_subscription_cost": false,
     "community_results_affect_hard_rules": false,
-    "xhigh_requires_escalation_evidence": true
+    "xhigh_requires_escalation_evidence": true,
+    "max_is_single_route_effort": true,
+    "ultra_is_separate_orchestration_mode": true,
+    "ultra_requires_explicit_user_enable": true,
+    "ultra_disables_router_parallelism": true,
+    "automatic_lane_count": 7,
+    "full_matrix_remains_explicit_override_only": true,
+    "luna_medium_is_mechanical_floor": true,
+    "luna_high_precedes_max_for_moderate_depth": true,
+    "terra_high_is_latency_specialist": true,
+    "chatbench_category_scores_are_proxy_only": true
   },
   "sources": [
     {
@@ -37,6 +47,46 @@
       "routing_weight": "medium"
     },
     {
+      "id": "openai-codex-rate-card",
+      "publisher": "OpenAI",
+      "url": "https://help.openai.com/en/articles/20001106-codex-rate-card",
+      "surface": "codex-credit-rate",
+      "quality": "primary",
+      "routing_weight": "high"
+    },
+    {
+      "id": "cursorbench-3.2",
+      "publisher": "Cursor",
+      "url": "https://cursor.com/cn/cursorbench",
+      "surface": "coding-agent",
+      "quality": "benchmark-maintainer",
+      "routing_weight": "high"
+    },
+    {
+      "id": "chatbench-v0.2.0",
+      "publisher": "ChatBench",
+      "url": "https://benchmarks.chatbench.org/",
+      "surface": "weighted proxy index",
+      "quality": "third-party-metric-aggregation",
+      "routing_weight": "low"
+    },
+    {
+      "id": "aa-gpt56-max",
+      "publisher": "Artificial Analysis",
+      "url": "https://artificialanalysis.ai/articles/gpt-5-6-has-landed/",
+      "surface": "api-max",
+      "quality": "independent-analysis",
+      "routing_weight": "medium"
+    },
+    {
+      "id": "aa-luna-max",
+      "publisher": "Artificial Analysis",
+      "url": "https://artificialanalysis.ai/models/gpt-5-6-luna",
+      "surface": "api-max",
+      "quality": "independent-measurement",
+      "routing_weight": "medium"
+    },
+    {
       "id": "deepswe-paper",
       "publisher": "DeepSWE authors",
       "url": "https://arxiv.org/abs/2607.07946",
@@ -61,6 +111,65 @@
       "routing_weight": "supporting"
     }
   ],
+  "codex_credit_rates": {
+    "observed_at": "2026-07-31",
+    "unit": "credits per 1M tokens",
+    "cache_writes_charged": false,
+    "models": {
+      "gpt-5.6-sol": {"input": 125, "cached_input": 12.5, "output": 750},
+      "gpt-5.6-terra": {"input": 50, "cached_input": 5, "output": 300},
+      "gpt-5.6-luna": {"input": 5, "cached_input": 0.5, "output": 30}
+    },
+    "interpretation": "Luna token credits are 4% of Sol at each token type. Actual task credits still depend on token mix and agent activity."
+  },
+  "cursorbench_3_2": {
+    "surface": "ambiguous multi-file tasks from real Cursor sessions",
+    "task_count": null,
+    "caveat": "The public page does not disclose the task count or category-level scores. Small score differences may not be statistically meaningful; cost is Cursor's benchmark cost, not Codex subscription cost.",
+    "results": [
+      {"model": "gpt-5.6-sol", "effort": "max", "score_percent": 67.2, "cost_usd": 5.69, "tokens": 28320, "steps": 48},
+      {"model": "gpt-5.6-terra", "effort": "max", "score_percent": 64.9, "cost_usd": 2.31, "tokens": 32969, "steps": 47},
+      {"model": "gpt-5.6-sol", "effort": "xhigh", "score_percent": 64.5, "cost_usd": 3.88, "tokens": 19699, "steps": 38},
+      {"model": "gpt-5.6-sol", "effort": "high", "score_percent": 63.5, "cost_usd": 2.79, "tokens": 13867, "steps": 32},
+      {"model": "gpt-5.6-luna", "effort": "max", "score_percent": 61.1, "cost_usd": 0.39, "tokens": 87973, "steps": 61},
+      {"model": "gpt-5.6-sol", "effort": "medium", "score_percent": 60.0, "cost_usd": 1.95, "tokens": 9747, "steps": 27},
+      {"model": "gpt-5.6-terra", "effort": "xhigh", "score_percent": 59.2, "cost_usd": 1.15, "tokens": 16089, "steps": 29},
+      {"model": "gpt-5.6-luna", "effort": "xhigh", "score_percent": 57.7, "cost_usd": 0.23, "tokens": 22480, "steps": 48},
+      {"model": "gpt-5.6-luna", "effort": "high", "score_percent": 56.8, "cost_usd": 0.16, "tokens": 15141, "steps": 40},
+      {"model": "gpt-5.6-terra", "effort": "high", "score_percent": 54.2, "cost_usd": 0.71, "tokens": 9468, "steps": 23},
+      {"model": "gpt-5.6-sol", "effort": "low", "score_percent": 52.6, "cost_usd": 1.01, "tokens": 5104, "steps": 19},
+      {"model": "gpt-5.6-terra", "effort": "medium", "score_percent": 50.3, "cost_usd": 0.49, "tokens": 6222, "steps": 20},
+      {"model": "gpt-5.6-luna", "effort": "medium", "score_percent": 47.7, "cost_usd": 0.08, "tokens": 7095, "steps": 28},
+      {"model": "gpt-5.6-terra", "effort": "low", "score_percent": 46.9, "cost_usd": 0.42, "tokens": 5312, "steps": 19},
+      {"model": "gpt-5.6-luna", "effort": "low", "score_percent": 37.6, "cost_usd": 0.03, "tokens": 3209, "steps": 17}
+    ]
+  },
+  "chatbench_v0_2_0": {
+    "surface": "Weighted proxy indices derived from Artificial Analysis public API metrics; not an independent coding-agent harness.",
+    "generated_at": "2026-07-30T08:17:46.089Z",
+    "model_count": 80,
+    "task_count": null,
+    "caveat": "Category scores reweight intelligence, context, tool support, speed, and price. Several local evals are still marked pending. Use only for relative speed and cost priors.",
+    "missing_observations": [
+      {"model": "gpt-5.6-luna", "effort": "low", "reason": "No public ChatBench model snapshot was available; no value is inferred."}
+    ],
+    "coding_proxy_results": [
+      {"model": "gpt-5.6-luna", "effort": "max", "score": 79.4, "speed_index": 40.2, "cost_index": 44.6, "api_total_response_seconds": 119.4},
+      {"model": "gpt-5.6-luna", "effort": "xhigh", "score": 78.6, "speed_index": 41.2, "cost_index": 44.6, "api_total_response_seconds": 45.6},
+      {"model": "gpt-5.6-luna", "effort": "high", "score": 78.1, "speed_index": 47.7, "cost_index": 44.6, "api_total_response_seconds": 11.2},
+      {"model": "gpt-5.6-terra", "effort": "max", "score": 78.0, "speed_index": 34.6, "cost_index": 25.9, "api_total_response_seconds": 156.5},
+      {"model": "gpt-5.6-sol", "effort": "max", "score": 77.4, "speed_index": 23.9, "cost_index": 11.7, "api_total_response_seconds": 153.2},
+      {"model": "gpt-5.6-terra", "effort": "high", "score": 77.3, "speed_index": 50.2, "cost_index": 25.9, "api_total_response_seconds": 6.3},
+      {"model": "gpt-5.6-terra", "effort": "xhigh", "score": 77.0, "speed_index": 37.2, "cost_index": 25.9, "api_total_response_seconds": 16.0},
+      {"model": "gpt-5.6-sol", "effort": "xhigh", "score": 76.8, "speed_index": 25.0, "cost_index": 11.7, "api_total_response_seconds": 50.0},
+      {"model": "gpt-5.6-terra", "effort": "medium", "score": 76.3, "speed_index": 55.2, "cost_index": 25.9, "api_total_response_seconds": 5.6},
+      {"model": "gpt-5.6-sol", "effort": "high", "score": 76.1, "speed_index": 27.6, "cost_index": 11.7, "api_total_response_seconds": 21.0},
+      {"model": "gpt-5.6-sol", "effort": "medium", "score": 75.4, "speed_index": 31.7, "cost_index": 11.7, "api_total_response_seconds": 12.6},
+      {"model": "gpt-5.6-sol", "effort": "low", "score": 73.9, "speed_index": 34.2, "cost_index": 11.7, "api_total_response_seconds": 11.1},
+      {"model": "gpt-5.6-terra", "effort": "low", "score": 72.7, "speed_index": 57.3, "cost_index": 25.9, "api_total_response_seconds": 5.4},
+      {"model": "gpt-5.6-luna", "effort": "medium", "score": 69.2, "speed_index": 61.7, "cost_index": 44.6, "api_total_response_seconds": 4.7}
+    ]
+  },
   "coding_agent_results": {
     "surface": "OpenAI Codex harness / coding agents",
     "reasoning_setting": "publisher default unless separately labeled",
@@ -75,11 +184,11 @@
     {
       "name": "GPT-5.6 Sol Ultra",
       "observed_terminal_bench_2_1": 91.9,
-      "reason": "Multi-agent variant; not comparable with the router's single-task Sol/Terra/Luna lanes."
+      "reason": "Multi-agent variant; excluded from automatic routing and available only through explicit user opt-in."
     },
     {
-      "name": "max/ultra effort",
-      "reason": "Outside the router's low/medium/high/xhigh main matrix and not used for automatic selection."
+      "name": "ultra effort",
+      "reason": "Maximum reasoning plus proactive subagent delegation; never selected automatically and disables Router-managed parallel splitting when explicitly enabled."
     }
   ],
   "effort_profiles": {
@@ -93,34 +202,39 @@
       {"model": "gpt-5.6-sol", "effort": "medium", "intelligence": 54, "output_tokens_per_second": 54.7, "ttft_seconds": 4.65, "total_index_output_tokens_millions": 12.0},
       {"model": "gpt-5.6-sol", "effort": "high", "intelligence": 56, "output_tokens_per_second": 55.8, "ttft_seconds": 9.17, "total_index_output_tokens_millions": 21.0},
       {"model": "gpt-5.6-sol", "effort": "xhigh", "intelligence": 58, "output_tokens_per_second": 62.6, "ttft_seconds": 35.82, "total_index_output_tokens_millions": 35.0},
+      {"model": "gpt-5.6-sol", "effort": "max", "intelligence": 59, "output_tokens_per_second": null, "ttft_seconds": null, "total_index_output_tokens_millions": null, "cursorbench_score_percent": 67.2, "cursorbench_tokens": 28320, "cursorbench_steps": 48},
       {"model": "gpt-5.6-terra", "effort": "low", "intelligence": 40, "output_tokens_per_second": 117.3, "ttft_seconds": 1.36, "total_index_output_tokens_millions": 5.9},
       {"model": "gpt-5.6-terra", "effort": "medium", "intelligence": 46, "output_tokens_per_second": 107.0, "ttft_seconds": 1.63, "total_index_output_tokens_millions": 10.0},
       {"model": "gpt-5.6-terra", "effort": "high", "intelligence": 49, "output_tokens_per_second": 113.1, "ttft_seconds": 2.16, "total_index_output_tokens_millions": 24.0},
       {"model": "gpt-5.6-terra", "effort": "xhigh", "intelligence": 52, "output_tokens_per_second": 125.0, "ttft_seconds": 16.24, "total_index_output_tokens_millions": 36.0},
+      {"model": "gpt-5.6-terra", "effort": "max", "intelligence": 55, "output_tokens_per_second": null, "ttft_seconds": null, "total_index_output_tokens_millions": null, "cursorbench_score_percent": 64.9, "cursorbench_tokens": 32969, "cursorbench_steps": 47},
       {"model": "gpt-5.6-luna", "effort": "low", "intelligence": 33, "output_tokens_per_second": 182.7, "ttft_seconds": 1.48, "total_index_output_tokens_millions": 7.0},
       {"model": "gpt-5.6-luna", "effort": "medium", "intelligence": 38, "output_tokens_per_second": 177.3, "ttft_seconds": 1.94, "total_index_output_tokens_millions": 12.0},
       {"model": "gpt-5.6-luna", "effort": "high", "intelligence": 46, "output_tokens_per_second": 180.5, "ttft_seconds": 5.10, "total_index_output_tokens_millions": 37.0},
       {"model": "gpt-5.6-luna", "effort": "xhigh", "intelligence": 49, "output_tokens_per_second": 191.9, "ttft_seconds": 27.96, "total_index_output_tokens_millions": 67.0},
+      {"model": "gpt-5.6-luna", "effort": "max", "intelligence": 51, "output_tokens_per_second": 184.0, "ttft_seconds": 116.5, "total_index_output_tokens_millions": 130.0, "cursorbench_score_percent": 61.1, "cursorbench_tokens": 87973, "cursorbench_steps": 61},
       {"model": "gpt-5.5", "effort": "low", "intelligence": 43, "output_tokens_per_second": 60.6, "ttft_seconds": null, "total_index_output_tokens_millions": 6.8},
       {"model": "gpt-5.5", "effort": "medium", "intelligence": 50, "output_tokens_per_second": 60.7, "ttft_seconds": null, "total_index_output_tokens_millions": 21.0},
       {"model": "gpt-5.5", "effort": "high", "intelligence": 53, "output_tokens_per_second": 66.5, "ttft_seconds": null, "total_index_output_tokens_millions": 43.0}
     ]
   },
   "routing_lanes": {
-    "mechanical_clear": {"model": "gpt-5.6-luna", "effort": "low"},
-    "mechanical_large": {"model": "gpt-5.6-luna", "effort": "medium"},
-    "ordinary_bounded": {"model": "gpt-5.6-terra", "effort": "low"},
-    "ordinary_interacting": {"model": "gpt-5.6-terra", "effort": "medium"},
+    "mechanical_default": {"model": "gpt-5.6-luna", "effort": "medium"},
+    "ordinary_default": {"model": "gpt-5.6-luna", "effort": "high"},
+    "bounded_deep_deterministic": {"model": "gpt-5.6-luna", "effort": "max"},
+    "latency_priority": {"model": "gpt-5.6-terra", "effort": "high"},
     "complex_bounded": {"model": "gpt-5.6-sol", "effort": "medium"},
     "complex_uncertain_or_high_consequence": {"model": "gpt-5.6-sol", "effort": "high"},
     "complex_failed_escalation": {"model": "gpt-5.6-sol", "effort": "xhigh"}
   },
   "efficiency_hypothesis": {
     "baseline": "all applicable AI work uses gpt-5.6-sol/medium",
-    "illustrative_task_mix_percent": {"mechanical_clear": 25, "ordinary_bounded": 45, "complex_bounded": 25, "complex_uncertain_or_high_consequence": 5},
-    "weighted_api_ttft_proxy_reduction_percent": 44,
-    "weighted_index_output_proxy_reduction_percent": 30,
-    "estimated_codex_turnaround_improvement_percent": {"low": 15, "high": 30},
-    "status": "heuristic; tool execution and verification time are not represented by API proxies"
+    "illustrative_task_mix_percent": {"mechanical_default": 25, "ordinary_default": 40, "latency_priority": 5, "complex_bounded": 25, "complex_uncertain_or_high_consequence": 5},
+    "weighted_api_ttft_proxy_reduction_percent": 9,
+    "weighted_chatbench_response_proxy_reduction_percent": 19,
+    "weighted_cursor_cost_proxy_reduction_percent": 62,
+    "weighted_index_output_proxy_change_percent": 92,
+    "estimated_codex_turnaround_improvement_percent": {"low": 10, "high": 20},
+    "status": "heuristic; higher output volume may improve quality but is not a speed gain, and tool execution and verification time are not represented by API proxies"
   }
 }

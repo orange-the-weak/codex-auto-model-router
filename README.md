@@ -20,7 +20,7 @@ Send this in Codex:
 $skill-installer Install Codex Auto Model Router from https://github.com/orange-the-weak/codex-auto-model-router
 ```
 
-Restart Codex afterward. To install all 24 optional custom-agent presets or migrate from the old name, clone the repository and run the installer for your platform:
+Restart Codex afterward. To install all 30 optional custom-agent presets or migrate from the old name, clone the repository and run the installer for your platform:
 
 ```bash
 git clone https://github.com/orange-the-weak/codex-auto-model-router.git
@@ -36,26 +36,28 @@ Windows PowerShell:
 
 ## Evidence-backed routing
 
-The current policy is calibrated from OpenAI coding results, the independent Artificial Analysis Coding Agent Index, and the DeepSWE, Terminal-Bench, and SWE-Bench Pro methodologies. API per-effort measurements inform only relative capability, latency, and output growth; they are not treated as Codex wall time or subscription cost.
+The policy is calibrated from OpenAI coding results and Codex credit rates, CursorBench 3.2, Artificial Analysis, and the DeepSWE, Terminal-Bench, and SWE-Bench Pro methodologies. ChatBench is retained only as a weak speed/cost proxy because its category scores reweight third-party API metrics rather than run an independent coding-agent harness.
 
 | Route | Default use |
 |---|---|
-| **Luna low** | Clear mechanical edits and deterministic checks |
-| **Luna medium** | Large repetitive batches |
-| **Terra low** | Bounded ordinary work with deterministic verification |
-| **Terra medium** | Ordinary work with interacting files or constraints |
+| **Luna medium** | All mechanical and repetitive work; automatic routing never goes lower |
+| **Luna high** | Default for ordinary bounded work |
+| **Luna max** | Genuinely deep or large deterministic work whose latency budget allows it |
+| **Terra high** | Explicit latency priority when a shorter reasoning path matters more than Luna/high quality |
 | **Sol medium** | Bounded complex work |
 | **Sol high** | High ambiguity, coupling, judgment, or consequence |
 | **Sol xhigh** | A failed complex attempt, or explicit user choice |
 
-Task evidence and user overrides always win. The benchmark snapshot is versioned, offline, and valid for 90 days; missing, invalid, or stale evidence falls back to deterministic rules without blocking work. See the [full evidence report](references/benchmark-evidence.md) and [machine-readable snapshot](references/benchmark-evidence.json).
+Luna currently uses 4% of Sol's Codex token credits. CursorBench places Luna/medium above Luna/low by 10.1 points, so saving an already-low Luna credit rate no longer justifies the quality loss. Terra/high scores above Sol/low while its ChatBench response proxy is substantially shorter; it therefore survives as a latency specialist rather than a default middle tier. Task evidence and user overrides always win, and the full model-effort matrix remains explicitly selectable. The snapshot is versioned, offline, and valid for 90 days; invalid or stale evidence falls back without blocking work. See the [full evidence report](references/benchmark-evidence.md) and [machine-readable snapshot](references/benchmark-evidence.json).
 
-For an illustrative mixed workload, the current policy estimates **15–30% faster AI-work turnaround** than using Sol/medium everywhere. This is a conservative hypothesis—not a universal Codex benchmark—and should be refined from local usage history.
+Native Ultra is off by default. The Router never selects it automatically because it already has dependency-aware concurrency. If you explicitly enable Ultra, the request is kept to one bounded Sol or Terra Segment and Router-managed parallelism is disabled, so the two orchestration layers do not stack.
+
+For an illustrative mixed workload, the seven-lane policy estimates **10–20% faster AI-work turnaround** than using Sol/medium everywhere, while the Cursor cost proxy falls by about 62%. Higher Luna output volume is not counted as a speed gain, and API cost is not Codex subscription cost. These remain hypotheses to refine from local history.
 
 ## How it works
 
 - Re-evaluates every applicable request instead of inheriting the previous route.
-- Uses a one-Segment fast path: a locally matched route skips the full DAG, cursor, replay claim, and Restore chain. Multi-Segment state gates are combined into one `begin` and one `finish` call.
+- Uses a one-Segment fast path. `begin` persists the canonical plan and identity; after that, `finish` and `restore` resolve by three IDs instead of rebuilding the plan after context compaction.
 - Splits analysis, implementation, verification, or review only when different routes materially help.
 - Caps automatic concurrency at 4 parallel tasks, then reduces it to useful independent width and observed free slots. The coordinator reserves one slot, so a four-slot Codex session normally peaks at three parallel tasks.
 - Counts the coordinator in the visible summary: `Concurrency plan: 4 tasks (including main)`. Internal capacity still remains one coordinator plus three leaf tasks.
@@ -80,6 +82,9 @@ For an illustrative mixed workload, the current policy estimates **15–30% fast
 $codex-auto-model-router Analyze this repository and recommend routes.
 $codex-auto-model-router Implement this feature with dynamic segment routing.
 $codex-auto-model-router Use GPT-5.6 Terra high for this task.
+$codex-auto-model-router Use GPT-5.6 Luna high for this bounded implementation.
+$codex-auto-model-router Use GPT-5.6 Luna max for this bounded refactor.
+$codex-auto-model-router Explicitly enable Sol ultra for this one bounded task.
 $codex-auto-model-router Query usage ratios and retune from observed outcomes.
 ```
 
@@ -95,7 +100,9 @@ Reports are written to `docs/codex-model-routing-report.md`; verified usage is s
 
 ## A personal note
 
-This is my first open-source project. I built it after spending too much time making the same model-choice decision across Codex projects. Practical feedback, issue reports, and small improvements are very welcome.
+This is my first open-source project. I built it after repeatedly stopping between Sol, Terra, and Luna and wondering whether a task really needed the heavier option.
+
+Eventually I turned that recurring decision into a Skill. Practical feedback—especially a route that was too strong, too weak, or needlessly split—is more useful than a star.
 
 ## Feedback
 

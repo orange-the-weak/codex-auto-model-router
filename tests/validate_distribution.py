@@ -14,6 +14,7 @@ def fail(message):
 
 gitignore_text = (ROOT / ".gitignore").read_text(encoding="utf-8")
 for ignored_private_output in (
+    ".codex/model-routing-runtime/",
     "benchmarks/gpt56-matrix/",
     "docs/xiaohongshu-launch-post/",
     "README 2.md",
@@ -147,6 +148,19 @@ for budget_contract in (
         fail(f"adaptive budget contract is missing: {budget_contract}")
 if "Never inherit the previous request's strength" not in skill_text or "never show `current-route` or `keep` placeholders" not in skill_text:
     fail("per-request dynamic routing contract is missing")
+for max_contract in (
+    "Use Luna/medium as the automatic floor for mechanical work",
+    "Use Luna/high as the default for ordinary bounded work",
+    "raise to Luna/max only when the work is unusually deep or large",
+    "Use Terra/high only when fast return is explicitly prioritized",
+    "Seven automatic lanes",
+    "full model-effort matrix remains available by explicit user override",
+    "`max` is the highest automatic single-route effort",
+    "Never select `ultra` automatically",
+    "disable `dependency-parallel-v1`",
+):
+    if max_contract not in skill_text:
+        fail(f"Luna max routing contract is missing: {max_contract}")
 if "Never make a persistent same-task switch when the original model or effort is unknown" not in skill_text:
     fail("safe-restore rule is missing")
 if "A failed segment stops the chain" not in skill_text or "Never re-plan after execution begins" not in skill_text:
@@ -181,6 +195,7 @@ for invariant in (
     "`apply-fast-v1` has no cursor",
     "observed total slots - coordinator - running tasks",
     "scripts/router_runtime.py begin",
+    "Later `finish` and `restore` resolve that state with `route_id + segment_id + attempt_id`",
     "context capsule",
 ):
     if invariant not in state_machine:
@@ -250,7 +265,8 @@ for contract in ("dependency-parallel-v1", "wait-any", "stop-dispatch-drain-runn
         fail(f"parallel execution reference is missing: {contract}")
 runtime_text = (ROOT / "scripts" / "router_runtime.py").read_text(encoding="utf-8")
 for contract in (
-    "def begin", "def finish", "def worker_start", "def worker_finish",
+    "def begin", "def finish", "def restore", "def worker_start", "def worker_finish",
+    "canonical_plan", "runtime state cannot be persisted", "_fallback_ledger",
     "validate_fast_envelope", "segment_claim", "routing_efficiency", "context_capsule",
 ):
     if contract not in runtime_text:
@@ -264,10 +280,31 @@ if evidence.get("runtime_network_required") is not False:
     fail("benchmark evidence must remain offline at runtime")
 if evidence.get("policy", {}).get("gpt55_fallback_requires_gpt56_family_unavailable") is not True:
     fail("benchmark evidence does not protect the GPT-5.6 family fallback rule")
-if len(evidence.get("sources", [])) < 6:
+for key in (
+    "max_is_single_route_effort",
+    "ultra_is_separate_orchestration_mode",
+    "ultra_requires_explicit_user_enable",
+    "ultra_disables_router_parallelism",
+    "luna_high_precedes_max_for_moderate_depth",
+    "full_matrix_remains_explicit_override_only",
+    "luna_medium_is_mechanical_floor",
+    "terra_high_is_latency_specialist",
+    "chatbench_category_scores_are_proxy_only",
+):
+    if evidence.get("policy", {}).get(key) is not True:
+        fail(f"benchmark evidence policy is missing: {key}")
+if evidence.get("policy", {}).get("automatic_lane_count") != 7:
+    fail("benchmark evidence automatic lane count must be seven")
+if len(evidence.get("routing_lanes", {})) != 7:
+    fail("benchmark evidence must expose exactly seven automatic lanes")
+if len(evidence.get("sources", [])) < 11:
     fail("benchmark evidence does not contain enough attributable sources")
-if len(evidence.get("effort_profiles", {}).get("metrics", [])) < 15:
+if len(evidence.get("effort_profiles", {}).get("metrics", [])) < 18:
     fail("benchmark evidence effort matrix is incomplete")
+if len(evidence.get("cursorbench_3_2", {}).get("results", [])) != 15:
+    fail("CursorBench GPT-5.6 effort matrix is incomplete")
+if len(evidence.get("chatbench_v0_2_0", {}).get("coding_proxy_results", [])) != 14:
+    fail("ChatBench proxy matrix is incomplete")
 if "GPT-5.5" not in (ROOT / "references" / "benchmark-evidence.md").read_text(encoding="utf-8"):
     fail("benchmark evidence report is missing the GPT-5.5 comparison")
 
@@ -275,7 +312,7 @@ models = {"sol": "gpt-5.6-sol", "terra": "gpt-5.6-terra", "luna": "gpt-5.6-luna"
 router_count = 0
 executor_count = 0
 for tier, model in models.items():
-    for effort in ("low", "medium", "high", "xhigh"):
+    for effort in ("low", "medium", "high", "xhigh", "max"):
         if tier == "sol" and effort == "medium":
             name = "codex-auto-model-router.toml"
         elif effort == "medium":
@@ -322,8 +359,10 @@ for tier, model in models.items():
             fail(f"executor preset mapping is missing: {executor_name}")
         executor_count += 1
 
-if router_count != 12 or executor_count != 12:
-    fail(f"expected 12 router and 12 executor presets, found {router_count} and {executor_count}")
+if router_count != 15 or executor_count != 15:
+    fail(f"expected 15 router and 15 executor presets, found {router_count} and {executor_count}")
+if list((ROOT / "codex-agents").glob("*ultra*.toml")):
+    fail("Ultra must remain explicit and must not have a Router or executor preset")
 
 legacy_presets = list((ROOT / "codex-agents").glob("project-model-*.toml"))
 if legacy_presets:
@@ -362,4 +401,4 @@ for forbidden in ("s" + "k-" + "live", "BEGIN " + "PRIVATE KEY", "api" + "_key")
         ):
             fail(f"possible secret marker {forbidden!r} in {path}")
 
-print("distribution OK: skill metadata, UI metadata, 12 router presets, 12 executor presets, no obvious secrets")
+print("distribution OK: skill metadata, UI metadata, 15 router presets, 15 executor presets, no obvious secrets")

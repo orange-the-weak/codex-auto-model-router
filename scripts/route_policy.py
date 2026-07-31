@@ -22,6 +22,7 @@ FAMILY_FALLBACK_ORDER = {
     "gpt-5.6-luna": ("gpt-5.6-terra", "gpt-5.6-sol"),
 }
 RUNTIME_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+ROUTED_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 THREAD_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 SEGMENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 AGENT_TASK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,47}$")
@@ -82,6 +83,8 @@ MODEL_ALIASES = {
 }
 EFFORT_ALIASES = {
     "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh",
+    "max": "max", "maximum": "max",
+    "ultra": "ultra",
     "very high": "xhigh", "very-high": "xhigh",
     "extra high": "xhigh", "extra-high": "xhigh",
 }
@@ -129,12 +132,34 @@ def load_benchmark_evidence(path=None, today=None):
             raise ValueError("task-evidence-precedence-missing")
         if policy.get("gpt55_fallback_requires_gpt56_family_unavailable") is not True:
             raise ValueError("gpt56-family-fallback-guard-missing")
+        if policy.get("max_is_single_route_effort") is not True:
+            raise ValueError("max-route-policy-missing")
+        if policy.get("ultra_is_separate_orchestration_mode") is not True:
+            raise ValueError("ultra-separation-policy-missing")
+        if policy.get("ultra_requires_explicit_user_enable") is not True:
+            raise ValueError("ultra-explicit-enable-policy-missing")
+        if policy.get("ultra_disables_router_parallelism") is not True:
+            raise ValueError("ultra-parallel-exclusion-policy-missing")
+        if policy.get("automatic_lane_count") != 7:
+            raise ValueError("automatic-lane-count-missing")
+        if policy.get("full_matrix_remains_explicit_override_only") is not True:
+            raise ValueError("explicit-override-matrix-boundary-missing")
+        if policy.get("luna_medium_is_mechanical_floor") is not True:
+            raise ValueError("luna-medium-floor-missing")
+        if policy.get("luna_high_precedes_max_for_moderate_depth") is not True:
+            raise ValueError("luna-high-boundary-missing")
+        if policy.get("terra_high_is_latency_specialist") is not True:
+            raise ValueError("terra-high-boundary-missing")
+        if policy.get("chatbench_category_scores_are_proxy_only") is not True:
+            raise ValueError("chatbench-proxy-boundary-missing")
         source_ids = {
             source.get("id") for source in sources if isinstance(source, dict)
         }
         required_sources = {
             "openai-gpt56-launch", "aa-coding-agent-index-v1.1",
-            "aa-intelligence-index-v4.1",
+            "aa-intelligence-index-v4.1", "openai-codex-rate-card",
+            "cursorbench-3.2", "aa-gpt56-max",
+            "chatbench-v0.2.0",
         }
         if not required_sources.issubset(source_ids):
             raise ValueError("required-sources-missing")
@@ -145,20 +170,22 @@ def load_benchmark_evidence(path=None, today=None):
         }
         expected_efforts = {
             (model, effort) for model in MODELS
-            for effort in ("low", "medium", "high", "xhigh")
+            for effort in ROUTED_EFFORTS
         }
         if not expected_efforts.issubset(gpt56_efforts):
             raise ValueError("gpt56-effort-matrix-incomplete")
         required_lanes = {
-            "mechanical_clear", "mechanical_large", "ordinary_bounded",
-            "ordinary_interacting", "complex_bounded",
+            "mechanical_default", "ordinary_default", "bounded_deep_deterministic",
+            "latency_priority", "complex_bounded",
             "complex_uncertain_or_high_consequence", "complex_failed_escalation",
         }
-        if not isinstance(lanes, dict) or not required_lanes.issubset(lanes):
+        if not isinstance(lanes, dict) or set(lanes) != required_lanes:
             raise ValueError("missing-routing-lanes")
         for lane in required_lanes:
             normalize_model(lanes[lane].get("model"))
-            normalize_effort(lanes[lane].get("effort"))
+            lane_effort = normalize_effort(lanes[lane].get("effort"))
+            if lane_effort not in ROUTED_EFFORTS:
+                raise ValueError("automatic-routing-lane-uses-ultra")
     except (KeyError, TypeError, ValueError) as exc:
         return unavailable_evidence("invalid", f"evidence-schema-error:{exc}")
 
@@ -210,6 +237,13 @@ def _task_signals(task_kind, risk, size, ambiguity=None, coupling=None,
     }
 
 
+def _latency_priority(value=None):
+    value = value or "normal"
+    if value not in ("low", "normal", "high"):
+        raise ValueError(f"unsupported latency_priority: {value}")
+    return value
+
+
 def normalize_model(value):
     if value is None:
         return None
@@ -226,6 +260,18 @@ def normalize_effort(value):
     if normalized is None:
         raise ValueError(f"unsupported effort: {value}")
     return normalized
+
+
+def _validate_ultra_route(model, effort, *, explicit, mode):
+    """Keep native Ultra opt-in and outside Router-managed orchestration."""
+    if effort != "ultra":
+        return
+    if not explicit:
+        raise ValueError("ultra requires an explicit user effort override")
+    if mode != "apply":
+        raise ValueError("ultra is supported only for an explicit Apply request")
+    if model == "gpt-5.6-luna":
+        raise ValueError("GPT-5.6 Luna does not support ultra")
 
 
 def normalize_available_model(value):
@@ -245,6 +291,9 @@ def resolve_family_fallback(target_model, target_effort, available_models=None):
     """Resolve pre-execution availability without leaving GPT-5.6 prematurely."""
     target_model = normalize_model(target_model)
     target_effort = normalize_effort(target_effort)
+    _validate_ultra_route(
+        target_model, target_effort, explicit=target_effort == "ultra", mode="apply"
+    )
     if available_models is None:
         return {
             "target": {"model": target_model, "effort": target_effort},
@@ -263,13 +312,20 @@ def resolve_family_fallback(target_model, target_effort, available_models=None):
         reason = "target-available"
     else:
         execution_model = next(
-            (model for model in FAMILY_FALLBACK_ORDER[target_model] if model in available),
+            (
+                model for model in FAMILY_FALLBACK_ORDER[target_model]
+                if model in available
+                and not (target_effort == "ultra" and model == "gpt-5.6-luna")
+            ),
             None,
         )
         reason = "gpt56-family-fallback" if execution_model else None
 
     family_available = any(model in available for model in MODELS)
-    if execution_model is None and not family_available and GPT55_MODEL in available:
+    if (
+        execution_model is None and target_effort != "ultra"
+        and not family_available and GPT55_MODEL in available
+    ):
         execution_model = GPT55_MODEL
         reason = "gpt56-family-unavailable"
     elif execution_model is None:
@@ -374,7 +430,7 @@ def detect_current_route(sessions_root=None, environ=None):
 def recommended_route(
     mode, task_kind, risk, size, report_model=None, report_effort=None,
     ambiguity=None, coupling=None, verification=None, consequence=None,
-    prior_failure=False, evidence=None,
+    prior_failure=False, evidence=None, latency_priority=None,
 ):
     if mode == "apply" and (report_model is not None or report_effort is not None):
         if report_model is None or report_effort is None:
@@ -386,6 +442,7 @@ def recommended_route(
         consequence, prior_failure,
     )
     evidence = evidence or load_benchmark_evidence()
+    latency_priority = _latency_priority(latency_priority)
 
     if mode in ("assess", "retune"):
         # Router analysis is intentionally fixed at the user-approved route.
@@ -393,7 +450,9 @@ def recommended_route(
         return "gpt-5.6-sol", "high", "fixed-analysis-default"
 
     if evidence.get("status") != "active":
-        return _legacy_recommended_route(mode, task_kind, risk, size)
+        return _legacy_recommended_route(
+            mode, task_kind, risk, size, latency_priority=latency_priority
+        )
 
     lanes = evidence["lanes"]
     if task_kind == "complex" and signals["prior_failure"]:
@@ -403,30 +462,43 @@ def recommended_route(
         or signals["coupling"] == "high" or signals["verification"] == "judgment"
     ):
         lane = "complex_uncertain_or_high_consequence"
+    elif (
+        task_kind in ("ordinary", "complex")
+        and size != "tiny"
+        and signals["ambiguity"] == "low"
+        and signals["coupling"] in ("low", "medium")
+        and signals["verification"] == "deterministic"
+        and signals["consequence"] == "low"
+    ):
+        if task_kind == "ordinary" and latency_priority == "high":
+            lane = "latency_priority"
+        elif task_kind == "complex" or size == "large":
+            lane = "bounded_deep_deterministic"
+        else:
+            lane = "ordinary_default"
     elif task_kind == "complex":
         lane = "complex_bounded"
     elif task_kind == "mechanical":
-        lane = "mechanical_large" if size == "large" else "mechanical_clear"
-    elif (
-        signals["ambiguity"] == "low" and signals["coupling"] == "low"
-        and signals["verification"] == "deterministic"
-    ):
-        lane = "ordinary_bounded"
+        lane = "mechanical_default"
+    elif latency_priority == "high":
+        lane = "latency_priority"
     else:
-        lane = "ordinary_interacting"
+        lane = "ordinary_default"
     selected = lanes[lane]
     return normalize_model(selected["model"]), normalize_effort(selected["effort"]), f"benchmark-prior:{lane}"
 
 
-def _legacy_recommended_route(mode, task_kind, risk, size):
+def _legacy_recommended_route(
+    mode, task_kind, risk, size, latency_priority="normal"
+):
     """Retained as an explicit reference for stale/invalid snapshot tests."""
     if risk == "high" or task_kind == "complex":
         return "gpt-5.6-sol", "high", "deterministic-fallback"
     if task_kind == "mechanical":
-        effort = "medium" if size == "large" else "low"
-        return "gpt-5.6-luna", effort, "deterministic-fallback"
-    effort = "high" if size == "large" else ("low" if risk == "low" else "medium")
-    return "gpt-5.6-terra", effort, "deterministic-fallback"
+        return "gpt-5.6-luna", "medium", "deterministic-fallback"
+    if latency_priority == "high":
+        return "gpt-5.6-terra", "high", "deterministic-fallback"
+    return "gpt-5.6-luna", "high", "deterministic-fallback"
 
 
 def select_route(
@@ -445,6 +517,7 @@ def select_route(
     consequence=None,
     prior_failure=False,
     evidence_path=None,
+    latency_priority=None,
 ):
     report_model = normalize_model(report_model)
     report_effort = normalize_effort(report_effort)
@@ -452,6 +525,7 @@ def select_route(
     target_model, target_effort, source = recommended_route(
         mode, task_kind, risk, size, report_model, report_effort,
         ambiguity, coupling, verification, consequence, prior_failure, evidence,
+        latency_priority,
     )
 
     explicit_override = model_override is not None or effort_override is not None
@@ -459,8 +533,13 @@ def select_route(
         target_model = normalize_model(model_override)
     if effort_override is not None:
         target_effort = normalize_effort(effort_override)
+        if target_effort == "ultra" and model_override is None:
+            target_model = "gpt-5.6-sol"
     if explicit_override:
         source = "user-override"
+    _validate_ultra_route(
+        target_model, target_effort, explicit=explicit_override, mode=mode
+    )
 
     current = current or unavailable_current()
     execution_model, execution_effort = target_model, target_effort
@@ -493,6 +572,9 @@ def select_route(
         "routing_evidence": evidence_audit(evidence),
         "restore_required": restore_required,
         "explicit_override": explicit_override,
+        "execution_mode": (
+            "native-ultra" if target_effort == "ultra" else "router-managed"
+        ),
     }
 
 
@@ -782,10 +864,12 @@ def _validate_parallel_segment_schema(segments, require_semantic_id=False):
         )
         if any(segment.get(key) != value for key, value in expected_signals.items()):
             raise ValueError(f"segment {segment_id} has invalid task evidence")
+        if segment.get("latency_priority") is not None:
+            _latency_priority(segment.get("latency_priority"))
 
         if segment.get("model") not in MODELS:
             raise ValueError(f"segment {segment_id} has invalid GPT-5.6 model")
-        if segment.get("effort") not in ("low", "medium", "high", "xhigh"):
+        if segment.get("effort") not in ROUTED_EFFORTS:
             raise ValueError(f"segment {segment_id} has invalid reasoning effort")
         if segment.get("work_estimate") not in ("short", "normal", "long"):
             raise ValueError(f"segment {segment_id} has invalid work_estimate")
@@ -1203,6 +1287,20 @@ def plan_parallel_segments(
     if report_model is not None and len(raw_segments) != 1:
         raise ValueError(
             "a global report route applies only to one-segment Apply; use per-segment report routes"
+        )
+    requested_efforts = [
+        normalize_effort(value) for value in (effort_override, report_effort)
+        if value is not None
+    ]
+    requested_efforts.extend(
+        normalize_effort(raw.get("effort"))
+        for raw in raw_segments
+        if isinstance(raw, dict) and raw.get("effort") is not None
+    )
+    if "ultra" in requested_efforts:
+        raise ValueError(
+            "native Ultra disables Router-managed parallelism; "
+            "use exactly one bounded Apply Segment"
         )
     if runtime_total_slots is not None and runtime_max_threads is not None:
         raise ValueError("use runtime_total_slots or legacy runtime_max_threads, not both")
@@ -1729,6 +1827,19 @@ def validate_fast_envelope(plan, route_id, segment_id, attempt_id):
     segment = segments[0]
     if segment_id != segment.get("segment_id"):
         raise ValueError("fast envelope segment_id mismatch")
+    is_native_ultra = segment.get("effort") == "ultra"
+    if is_native_ultra:
+        _validate_ultra_route(
+            segment.get("model"), segment.get("effort"),
+            explicit=plan.get("explicit_override") is True, mode="apply",
+        )
+        if (
+            segment.get("reason") != "user-override"
+            or plan.get("execution_mode") != "native-ultra"
+        ):
+            raise ValueError("fast Ultra plan is not an explicit native-Ultra request")
+    elif plan.get("execution_mode") not in (None, "router-managed"):
+        raise ValueError("fast plan has invalid execution mode")
     expected_hash = plan_hash(
         segments, route_id, plan.get("original"), plan.get("restore_required"),
         plan.get("segment_budget"), plan.get("switch_budget"),
@@ -1826,6 +1937,20 @@ def plan_apply_segments(
         raise ValueError(
             "a global report route applies only to one-segment Apply; use per-segment report routes"
         )
+    raw_ultra_overrides = [
+        raw for raw in raw_segments
+        if isinstance(raw, dict)
+        and normalize_effort(raw.get("effort")) == "ultra"
+        and raw.get("route_source", "user-override") == "user-override"
+    ]
+    native_ultra_requested = global_effort == "ultra" or bool(raw_ultra_overrides)
+    if report_effort == "ultra":
+        raise ValueError("ultra requires an explicit user effort override")
+    if native_ultra_requested and len(raw_segments) != 1:
+        raise ValueError(
+            "native Ultra requires exactly one bounded Apply Segment and "
+            "disables Router-managed parallelism"
+        )
     current = current or unavailable_current()
     evidence = load_benchmark_evidence(evidence_path)
     current_route = None
@@ -1860,6 +1985,7 @@ def plan_apply_segments(
         verification = raw.get("verification")
         consequence = raw.get("consequence")
         prior_failure = raw.get("prior_failure", False)
+        latency_priority = _latency_priority(raw.get("latency_priority"))
         if task_kind not in ("mechanical", "ordinary", "complex"):
             raise ValueError(f"invalid task_kind for segment {segment_id}")
         if risk not in ("low", "normal", "high"):
@@ -1876,6 +2002,7 @@ def plan_apply_segments(
             ambiguity=signals["ambiguity"], coupling=signals["coupling"],
             verification=signals["verification"], consequence=signals["consequence"],
             prior_failure=signals["prior_failure"], evidence=evidence,
+            latency_priority=latency_priority,
         )
         segment_model = normalize_model(raw.get("model"))
         segment_effort = normalize_effort(raw.get("effort"))
@@ -1897,10 +2024,27 @@ def plan_apply_segments(
         explicit = any((global_model, global_effort)) or route_source == "user-override"
         target_model = global_model or segment_model or report_default_model or target_model
         target_effort = global_effort or segment_effort or report_default_effort or target_effort
+        if target_effort == "ultra" and not (global_model or segment_model):
+            target_model = "gpt-5.6-sol"
         if explicit:
             source = "user-override"
         elif route_source == "report" or report_default_model:
             source = "report"
+        _validate_ultra_route(
+            target_model, target_effort, explicit=explicit, mode="apply"
+        )
+        prohibited_actions = _optional_segment_list(
+            raw.get("prohibited_actions"), "prohibited_actions", segment_id
+        )
+        if not prohibited_actions:
+            prohibited_actions = [
+                "do-not-replan",
+                (
+                    "do-not-add-router-managed-delegation"
+                    if target_effort == "ultra" else "do-not-delegate"
+                ),
+                "do-not-touch-out-of-scope-files",
+            ]
 
         routed.append({
             "segment_id": segment_id,
@@ -1912,6 +2056,7 @@ def plan_apply_segments(
             "risk": risk,
             "size": size,
             **signals,
+            "latency_priority": latency_priority,
             "acceptance": _segment_list(raw.get("acceptance"), "acceptance", segment_id),
             "validation_budget": _segment_text(
                 raw.get("validation_budget"), "validation_budget", segment_id
@@ -1919,9 +2064,7 @@ def plan_apply_segments(
             "decisions": _optional_segment_list(
                 raw.get("decisions"), "decisions", segment_id
             ),
-            "prohibited_actions": _optional_segment_list(
-                raw.get("prohibited_actions"), "prohibited_actions", segment_id
-            ) or ["do-not-replan", "do-not-delegate", "do-not-touch-out-of-scope-files"],
+            "prohibited_actions": prohibited_actions,
             "model": target_model,
             "effort": target_effort,
             "reason": source,
@@ -1988,6 +2131,11 @@ def plan_apply_segments(
             and raw.get("route_source", "user-override") == "user-override"
             for raw in raw_segments
         )),
+        "execution_mode": (
+            "native-ultra"
+            if len(segments) == 1 and segments[0]["effort"] == "ultra"
+            else "router-managed"
+        ),
     }
     if protocol == FAST_PROTOCOL:
         dispatch = segments[0]["dispatch"]
@@ -2028,6 +2176,10 @@ def parser():
     root.add_argument("--coupling", choices=("low", "medium", "high"))
     root.add_argument("--verification", choices=("deterministic", "mixed", "judgment"))
     root.add_argument("--consequence", choices=("low", "normal", "high"))
+    root.add_argument(
+        "--latency-priority", choices=("low", "normal", "high"),
+        help="How strongly this task prioritizes fast return over deeper reasoning",
+    )
     root.add_argument("--prior-failure", action="store_true")
     root.add_argument("--evidence-path", type=Path, help="Offline benchmark evidence snapshot")
     root.add_argument("--model")
@@ -2214,6 +2366,7 @@ def main():
             args.consequence,
             args.prior_failure,
             args.evidence_path,
+            args.latency_priority,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

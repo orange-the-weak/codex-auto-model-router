@@ -16,7 +16,7 @@ GPT-5.6 在 Codex 中提供三种模型和多档推理强度。这个 Skill 自�
 $skill-installer 从 GitHub 安装 https://github.com/orange-the-weak/codex-auto-model-router
 ```
 
-安装后重启 Codex。如需全部 24 个可选自定义 Agent 预设，或从旧名称迁移，可克隆后运行对应系统的安装脚本：
+安装后重启 Codex。如需全部 30 个可选自定义 Agent 预设，或从旧名称迁移，可克隆后运行对应系统的安装脚本：
 
 ```bash
 git clone https://github.com/orange-the-weak/codex-auto-model-router.git
@@ -32,26 +32,28 @@ Windows PowerShell：
 
 ## 基于公开测评的路由
 
-当前策略参考 OpenAI coding 结果、Artificial Analysis Coding Agent Index，以及 DeepSWE、Terminal-Bench、SWE-Bench Pro 的原始方法。API 分档数据只用于判断相对能力、延迟和输出量，不代表 Codex 实际耗时或订阅成本。
+当前策略参考 OpenAI coding 结果与 Codex credit rate、CursorBench 3.2、Artificial Analysis，以及 DeepSWE、Terminal-Bench、SWE-Bench Pro 的原始方法。ChatBench 的分类分数主要是第三方 API 指标的加权代理，因此只作为弱速度/成本先验，不当作独立 Coding Agent 实测。
 
 | 路由 | 默认用途 |
 |---|---|
-| **Luna low** | 明确的机械修改和确定性检查 |
-| **Luna medium** | 大型重复批次 |
-| **Terra low** | 边界清晰、可确定验证的普通任务 |
-| **Terra medium** | 多文件或多约束的普通任务 |
+| **Luna medium** | 所有机械与重复任务；自动路由不再低于此档 |
+| **Luna high** | 有界普通任务的默认档 |
+| **Luna max** | 确实较深或较大、且能接受延迟的确定性任务 |
+| **Terra high** | 显式强调低延迟，且更看重较短推理链而非 Luna/high 质量时 |
 | **Sol medium** | 有界复杂任务 |
 | **Sol high** | 高歧义、高耦合、判断型验证或高后果任务 |
 | **Sol xhigh** | 复杂任务已有失败，或用户明确指定 |
 
-任务证据和用户指定始终优先。测评快照带版本、离线运行、有效期 90 天；缺失、损坏或过期时自动回退确定性规则，不阻塞任务。详见[完整测评报告](references/benchmark-evidence.md)和[机器可读快照](references/benchmark-evidence.json)。
+Luna 当前每类 Codex token 的 credit 仅为 Sol 的 4%。CursorBench 中 Luna/medium 比 low 高 10.1 分；为了节省已经很低的 credit 而承受明显质量损失，意义不大。Terra/high 的分数高于 Sol/low，ChatBench 响应代理又明显更短，因此只保留为低延迟专家，而不再承担默认中间档。任务证据和用户指定始终优先，完整模型与推理组合仍可显式选择；快照离线运行、有效期 90 天，失效时自动回退。详见[完整测评报告](references/benchmark-evidence.md)和[机器可读快照](references/benchmark-evidence.json)。
 
-按示例混合任务估算，相比所有任务固定使用 Sol/medium，当前策略预计可让 **AI 工作周转增效约 15–30%**。这是保守假设，不是通用 Codex 实测；后续应由本地使用记录继续校准。
+原生 Ultra 默认关闭。Router 已自带依赖感知并发，因此不会自动选择 Ultra。只有用户显式开启时，才会将其用于一个有界的 Sol 或 Terra 任务段，并停用 Router 并发，避免两套调度叠加。
+
+按示例混合任务估算，7 档策略相比所有任务固定 Sol/medium，预计可让 **AI 工作周转增效约 10–20%**，Cursor 成本代理约下降 62%。Luna 更高的输出量不算作速度收益，API 成本也不等于 Codex 订阅成本；这些仍需本地账本继续校准。
 
 ## 工作方式
 
 - 每次适用请求都重新评估，不继承上一轮的强弱档位。
-- 单 Segment 使用快速路径：当前路由已匹配时跳过完整 DAG、cursor、claim 和 Restore 链；多段状态检查合并为一次 `begin` 与一次 `finish`。
+- 单 Segment 使用快速路径。`begin` 持久化 canonical plan 和身份；此后 `finish`、`restore` 只凭三个 ID 读取状态，不再在上下文压缩后重建计划。
 - 只有分析、实现、验证或审查确实需要不同能力时才拆分。
 - 自动并行任务上限为 4，再按独立宽度和已观测空闲槽位减少。主线程需占 1 个槽位负责调度与汇总；因此总槽位为 4 时，并行任务峰值通常是 3。
 - 对话框将主任务算入并发计划，简化显示为 `并发计划：4 个任务（含主任务）`；内部仍按 1 个主任务 + 3 个子任务校验容量。
@@ -76,6 +78,9 @@ Windows PowerShell：
 $codex-auto-model-router 分析当前仓库并推荐路由
 $codex-auto-model-router 动态分段实现这个功能
 $codex-auto-model-router 这个任务使用 GPT-5.6 Terra high
+$codex-auto-model-router 这个有界实现使用 GPT-5.6 Luna high
+$codex-auto-model-router 这个有界重构使用 GPT-5.6 Luna max
+$codex-auto-model-router 这个单段任务显式开启 Sol ultra
 $codex-auto-model-router 查询使用比例并根据真实结果微调
 ```
 
@@ -91,7 +96,9 @@ Codex 自动路由｜并发计划：4 个任务（含主任务）｜来源：sma
 
 ## 关于这个项目
 
-这是我的第一个开源项目。它来自一个很实际的困扰：我在不同 Codex 项目里反复做同样的模型选择。欢迎真实使用反馈、问题报告和小改进。
+这是我的第一个开源项目。它来自一个很实际的困扰：我总在 Sol、Terra、Luna 之间来回切，琢磨一个任务到底要不要上更重的档位。
+
+后来我干脆把这套反复做的判断写成了 Skill。欢迎真实反馈，尤其是选强了、选弱了或拆得不顺的案例；比起一个 Star，这些对我更有帮助。
 
 ## 反馈
 
