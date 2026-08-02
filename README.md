@@ -8,11 +8,26 @@
 
 [中文说明](README.zh-CN.md)
 
-## Why this tool?
+**Automatic model selection**
 
-![Automatic model selection](docs/assets/automatic-model-selection.svg)
+`Task → evaluate scope, ambiguity, risk, and latency → choose model + reasoning effort → execute → verify`
 
-![Dependency-aware concurrency](docs/assets/dependency-aware-concurrency.svg)
+| Route | Best for |
+|---|---|
+| **Luna** | Repetitive, ordinary, or deterministic work |
+| **Terra** | Latency-sensitive work |
+| **Sol** | Complex, ambiguous, or high-risk work |
+
+**Dependency-aware concurrency**
+
+```text
+Task graph
+├─ Independent task A ─┐
+├─ Independent task B ─┼─→ verify and merge
+└─ Task C after A ─────┘
+
+Shared files or resources → run serially
+```
 
 ## Quick start
 

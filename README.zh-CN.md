@@ -4,11 +4,26 @@
 
 [English README](README.md)
 
-## 为什么做这个工具？
+**自动选择模型**
 
-![自动选择模型](docs/assets/automatic-model-selection-zh-CN.svg)
+`任务 → 评估范围、歧义、风险和时延 → 选择模型与推理强度 → 执行 → 验证`
 
-![依赖感知并发](docs/assets/dependency-aware-concurrency-zh-CN.svg)
+| 路由 | 适合任务 |
+|---|---|
+| **Luna** | 重复、普通或确定性任务 |
+| **Terra** | 时延敏感任务 |
+| **Sol** | 复杂、高歧义或高风险任务 |
+
+**依赖感知并发**
+
+```text
+任务依赖图
+├─ 独立任务 A ─┐
+├─ 独立任务 B ─┼─→ 验证并汇总
+└─ A 完成后执行 C ─┘
+
+共享文件或资源 → 串行执行
+```
 
 ## 快速安装
 
