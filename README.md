@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Validate](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml/badge.svg)](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml)
 
-**Automatic, dynamic per-segment model, reasoning, and concurrency routing for GPT-5.6 in OpenAI Codex.** Evidence-calibrated routing sends each bounded task to Sol, Terra, or Luna at the lowest sufficient effort—with no external API or API key.
+**Automatic, dynamic per-segment model, reasoning, and concurrency routing for GPT-5.6 in OpenAI Codex.** Evidence-calibrated routing selects the best-fit Sol, Terra, or Luna model and reasoning effort for each bounded task—with no external API or API key.
 
 [中文说明](README.zh-CN.md)
 

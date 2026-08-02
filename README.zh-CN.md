@@ -1,12 +1,14 @@
 # Codex Auto Model Router：动态分段路由
 
-**为 OpenAI Codex 自动执行动态分段的 GPT-5.6 模型、推理强度与并发路由。** 策略经公开测评校准，为每个有界任务选择刚好够用的 Sol、Terra 或 Luna；不需要外部 API 或 API Key。
+**为 OpenAI Codex 自动执行动态分段的 GPT-5.6 模型、推理强度与并发路由。** 策略经公开测评校准，为每个有界任务选择最匹配的 Sol、Terra 或 Luna 模型及推理强度；不需要外部 API 或 API Key。
 
 [English README](README.md)
 
 ## 为什么做这个工具？
 
-GPT-5.6 在 Codex 中提供三种模型和多档推理强度。这个 Skill 自动重新评估每个有价值的 Segment，只在任务受益时动态切换，完成后恢复可验证的原 GPT-5.6 路由。
+![自动选择模型](docs/assets/automatic-model-selection-zh-CN.svg)
+
+![依赖感知并发](docs/assets/dependency-aware-concurrency-zh-CN.svg)
 
 ## 快速安装
 

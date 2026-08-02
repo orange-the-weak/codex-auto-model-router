@@ -14,7 +14,7 @@
   <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" filter="url(#shadow2)">
     <rect x="54" y="170" width="196" height="134" rx="22" fill="#202d40" stroke="#42556a"/>
     <text x="80" y="207" fill="#92a8b8" font-size="15" font-weight="700">COORDINATOR</text>
-    <text x="80" y="244" fill="#f3f6f9" font-size="22" font-weight="760">Build task graph</text>
+    <text x="80" y="244" fill="#f3f6f9" font-size="20" font-weight="760">Build task graph</text>
     <text x="80" y="274" fill="#a9bac7" font-size="14">dependencies · scopes</text>
 
     <rect x="366" y="139" width="236" height="72" rx="18" fill="#183a37" stroke="#5aa98c"/>
@@ -27,7 +27,7 @@
 
     <rect x="366" y="321" width="236" height="72" rx="18" fill="#3b3323" stroke="#b99a52"/>
     <text x="390" y="353" fill="#e6d18f" font-size="18" font-weight="800">TASK C · VERIFY</text>
-    <text x="390" y="375" fill="#c9b98c" font-size="13">after required dependency</text>
+    <text x="390" y="375" fill="#c9b98c" font-size="12">after required dependency</text>
 
     <rect x="694" y="145" width="220" height="108" rx="21" fill="#243247" stroke="#4c6179"/>
     <text x="720" y="180" fill="#f3f6f9" font-size="19" font-weight="760">WAIT-ANY</text>
@@ -57,5 +57,5 @@
     <path d="M914 339 C956 339 958 300 986 300"/>
   </g>
 
-  <text x="54" y="430" fill="#8fa5b6" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="15">Up to four tasks including the coordinator · disjoint write scopes · no pre-created queue</text>
+  <text x="54" y="430" fill="#8fa5b6" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="14">Up to four tasks including the coordinator · disjoint write scopes · no pre-created queue</text>
 </svg>
