@@ -10,13 +10,13 @@
 
 **Automatic model selection**
 
-`Task → evaluate scope, ambiguity, risk, and latency → choose model + reasoning effort → execute → verify`
-
-| Route | Best for |
-|---|---|
-| **Luna** | Repetitive, ordinary, or deterministic work |
-| **Terra** | Latency-sensitive work |
-| **Sol** | Complex, ambiguous, or high-risk work |
+```text
+Task
+└─ Evaluate scope, ambiguity, risk, and latency
+   ├─ Repetitive, ordinary, or deterministic → Luna ─┐
+   ├─ Latency-sensitive → Terra ─────────────────────┼─→ execute → verify
+   └─ Complex, ambiguous, or high-risk → Sol ────────┘
+```
 
 **Dependency-aware concurrency**
 
