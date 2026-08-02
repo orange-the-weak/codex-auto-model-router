@@ -104,6 +104,8 @@ This is my first open-source project. I built it after repeatedly stopping betwe
 
 Eventually I turned that recurring decision into a Skill. Practical feedback—especially a route that was too strong, too weak, or needlessly split—is more useful than a star.
 
+本开源项目已链接并感谢 [LINUX DO 社区](https://linux.do/) 的支持与交流。
+
 ## Feedback
 
 Found a route that was too weak, too expensive, or unnecessarily fragmented? [Share a routing result](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=routing-feedback.yml) without private prompts or source code. For bugs and proposals, use [GitHub Issues](https://github.com/orange-the-weak/codex-auto-model-router/issues).
