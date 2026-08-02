@@ -10,7 +10,9 @@
 
 ## Why this tool?
 
-GPT-5.6 adds three model tiers and several reasoning levels to Codex. This Skill automatically re-evaluates each useful Segment, dynamically switches only when the work benefits, and restores a verified original GPT-5.6 route when finished.
+![Automatic model selection](docs/assets/automatic-model-selection.svg)
+
+![Dependency-aware concurrency](docs/assets/dependency-aware-concurrency.svg)
 
 ## Quick start
 
