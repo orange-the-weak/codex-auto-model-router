@@ -1,6 +1,6 @@
 # Explicit custom-agent preset mapping
 
-Use this compatibility mapping only when the subagent interface explicitly accepts a preset or agent name. Selecting a generic task name does not apply a preset.
+Use this mapping when the agent interface explicitly accepts an agent type. Router Lite returns the Apply `agent_type` directly; selecting a generic task name does not apply a model preset.
 
 ## Assess and Retune (read-only router)
 
@@ -18,10 +18,12 @@ Use this compatibility mapping only when the subagent interface explicitly accep
 | Terra | `codex_auto_model_executor_terra_low` | `codex_auto_model_executor_terra` | `codex_auto_model_executor_terra_high` | `codex_auto_model_executor_terra_xhigh` | `codex_auto_model_executor_terra_max` |
 | Luna | `codex_auto_model_executor_luna_low` | `codex_auto_model_executor_luna` | `codex_auto_model_executor_luna_high` | `codex_auto_model_executor_luna_xhigh` | `codex_auto_model_executor_luna_max` |
 
-Every new parallel Apply executor receives a hash-bound `dispatch-ticket-v1` with `route_id`, `plan_hash`, `segment_id`, `attempt_id`, exact bounded goal, ownership, acceptance, and validation budget. It runs ID-only `router_runtime.py attach` before project work. `ROUTE_PROJECT_MODELS_EXECUTOR=1` remains a legacy prompt marker and must not be treated as an OS environment variable. The coordinator validates the result and advances the immutable plan; the selected agent must not plan, route, advance, or delegate again.
+Router Lite gives each Apply executor a direct bounded task: goal, relevant paths and decisions, acceptance criteria, constraints, validation budget, stop condition, and recovery budget. Treat the capsule as self-contained: do not load unrelated memory or add redundant validation after acceptance is proven. It does not send IDs, hashes, tickets, ledgers, environment markers, or the full chat. The executor reads applicable project instructions, performs only that task, never delegates, and returns the project result to the coordinator.
 
-For `dependency-parallel-v1`, every executor is still a leaf using exactly one Apply preset. Add immutable dependencies, plan hash, access mode, `write_scopes`, `conflict_keys`, and the selected Segment route to its prompt. The Coordinator alone owns the frontier, wait-any loop, failure transition, and deterministic aggregation. A parallel worker must not spawn another agent even when its model supports proactive delegation.
+For Lite parallel work, every executor is still a leaf using exactly one Apply preset. The Coordinator alone owns dependencies, write-scope conflicts, free capacity, wait-any refill, failure handling, and aggregation. A parallel worker must not spawn another agent even when its model supports proactive delegation.
 
 All presets intentionally target GPT-5.6. If one preset is unavailable, choose another 5.6 preset using Sol → Terra → Luna, Terra → Sol → Luna, or Luna → Terra → Sol. Do not substitute a generic GPT-5.5 agent while any listed 5.6 preset remains selectable.
 
-`max` is a single-route reasoning effort. `ultra` is disabled by default and has no Router preset. It is used only after an explicit user opt-in for one bounded Sol or Terra Apply Segment, with Router-managed parallelism disabled because native Ultra may delegate proactively.
+The legacy strict ticket protocol remains documented in [execution-state-machine.md](execution-state-machine.md) and is used only after explicit strict-mode selection.
+
+`max` is a single-route reasoning effort. `ultra` is disabled by default and has no Router preset. It is used only after an explicit user opt-in for one bounded Sol or Terra task, with Router-managed parallelism disabled because native Ultra may delegate proactively.

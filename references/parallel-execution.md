@@ -1,4 +1,22 @@
-# Dependency-parallel execution protocol
+# Parallel execution protocols
+
+Router Lite is the default. The coordinator passes direct bounded tasks to explicitly selected leaf agents, tracks live agents with the native task interface, refills a free slot when any result arrives, and records analytics only after the project result. It does not create route hashes, claims, tickets, ledgers, or a waiting agent queue. Parallelism requires at least two independent tasks of roughly 90 seconds, non-overlapping writes, verified free capacity, and estimated net benefit after cold start, dispatch, aggregation, and tail imbalance; otherwise stay serial. Each task declares whether its result is required and defaults to one alternate recovery attempt. After all required acceptance checks pass, cancel optional stragglers that cannot change the answer.
+
+## Router Lite activation gate
+
+`router_lite.py decide --estimated-seconds N` keeps work below the default 90-second break-even in the coordinator only when the current verified GPT-5.6 route is a policy-accepted target or fallback. Missing estimates preserve normal model routing; explicit model choices, weaker current routes, high risk, high consequence, and prior reasoning or verification failure bypass the cost fast path.
+
+Fresh and reused executors have different costs. Three current Codex App probes measured fresh context materialization at 31.3–31.6 seconds, fresh session-to-first-tool at 35.5–39.6 seconds, and same-agent follow-up-to-first-tool at 2.7–9.4 seconds. `router_lite.py plan` therefore uses conservative configurable priors of 40 seconds for a fresh first action and 10 seconds for a reused first action, plus 10 seconds initial coordination, 8 seconds per additional back-to-back dispatch, and 10 seconds aggregation. The sample is small and local; these values are planning priors, not platform guarantees.
+
+The coordinator may pass `--reuse-candidates-json` only after qualifying each candidate from the live task interface. The compact input contains `agent_task_name`, `model`, and `effort`; it is not persistent state. Qualification requires the same user request and repository realpath, exact model and effort, the same permissions and sandbox, an idle/completed agent with no pending tool call, an accepted prior result, and released write scopes and conflict keys. Exclude failed, interrupted, external-action, authentication, deployment, and sensitive-data agents. Clear the in-memory registry when a new user request starts.
+
+The planner assigns tasks to route-aware executor lanes. A matching prequalified candidate or compatible completed lane pays the reused prior; a new lane, route change, or exhausted reuse allowance pays the fresh prior. One follow-up per executor is the default. Before the actual `followup_task`, recheck the live agent and ownership state; a stale or busy candidate falls back to a fresh executor or local execution without a state gate. Every follow-up receives a new self-contained capsule and must not rely on the agent's previous conclusions.
+
+Planning still requires at least 30 seconds and 15% benefit against estimated serial work. Two fresh 90-second tasks remain below the gate; two independently qualified reused 90-second tasks may pass. The result exposes `dispatch_now`, `executor_lanes`, activation counts, and `reuse_policy`, and labels its estimate `planning-only-not-measured-speedup`.
+
+After one compact visible notice, launch every `dispatch_now` task without intervening reads, state gates, ledger writes, repeated commentary, or additional planning. Refill a released compatible lane immediately through the existing task; otherwise start fresh only when the planned benefit remains positive. This removes coordinator-created gaps without mistaking normal asynchronous startup for failure.
+
+The `dependency-parallel-v1` protocol below is legacy strict mode. Use it only when the user explicitly requests strict ledger auditing, replay protection, or a reproducible routing experiment.
 
 `dependency-parallel-v1` adds bounded leaf executors without changing `segmented-v1`.
 

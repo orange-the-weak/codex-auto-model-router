@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Auto Model Router"
-  short_description: "为 GPT-5.6 动态选择模型、low 至 max 推理与安全并发"
-  default_prompt: "Use $codex-auto-model-router to re-evaluate this request, use Luna medium for mechanical work, Luna high for ordinary bounded work and normal scans, Luna xhigh for large bounded scans, and Luna max only for large deterministic deep work; reserve Terra high for explicit latency priority and Sol for real complexity or consequence. For parallel work persist the plan once, issue hash-bound bounded tickets, attach executors by ID, never auto-select Ultra, stop on failure, and report the runtime-generated current-run concurrency brief."
+  short_description: "为 GPT-5.6 轻量选模、分配推理强度与有用并发"
+  default_prompt: "Use $codex-auto-model-router in Router Lite mode: select the lowest sufficient GPT-5.6 route, keep short work local, safely reuse a compatible same-request executor once, parallelize only when activation-aware net benefit is positive, fail open locally, and never auto-select Ultra."

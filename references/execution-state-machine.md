@@ -1,4 +1,6 @@
-# Fast, segmented, and dependency-parallel execution state machine
+# Legacy strict execution state machine
+
+This reference is not the default Apply path. Router Lite uses direct local or leaf-agent execution without hashes, claims, cursor, ledger gates, or Restore. Read and use this state machine only after the user explicitly requests strict routing, strict ledger auditing, replay protection, or a reproducible routing experiment.
 
 Use this state machine for Apply:
 
@@ -105,6 +107,8 @@ Never put mode flags, IDs, hashes, paths, JSON, or the full plan before the read
 The coordinator retains the complete immutable plan and conversation context. `prepare-dispatch` persists it and returns `dispatch-ticket-v1` capsules containing only the goal, necessary decisions, dependencies, selected route, access/write scopes, conflict keys, acceptance, validation budget, prohibited actions, and immutable IDs/hash. No worker receives a duplicate plan or outer concurrency object. `agent_task_name` is the content-based semantic `segment_id` normalized to Codex's `[a-z0-9_]+` grammar. `attach` validates the ticket against persisted state. Any identity/hash mismatch or latched route failure is terminal.
 
 ## Same-task chain
+
+Before switching models, the coordinator calls `router_runtime.py prepare-route` with the complete canonical envelope. This validates and persists the normalized plan once. The continuation carries only `route_id`, `segment_id`, and `attempt_id`; `begin` reloads the canonical plan from runtime state. Never copy or reconstruct `canonical_plan` in a continuation prompt. Missing state stops before project work instead of accepting a partial plan.
 
 The Coordinator checks once that the continuation tool accepts `model` and `thinking`. A locally matched first segment may execute before any continuation. Otherwise it sends the first segment with its selected route.
 

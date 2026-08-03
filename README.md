@@ -1,43 +1,24 @@
-# Codex Auto Model Router — Dynamic Per-Segment Routing
+# Codex Auto Model Router
 
-[![Codex Skill](https://img.shields.io/badge/OpenAI%20Codex-Skill-111827)](https://github.com/openai/skills)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Validate](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml/badge.svg)](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml)
 
-**Automatic, dynamic per-segment model, reasoning, and concurrency routing for GPT-5.6 in OpenAI Codex.** Evidence-calibrated routing selects the best-fit Sol, Terra, or Luna model and reasoning effort for each bounded task—with no external API or API key.
+**A lightweight GPT-5.6 model and reasoning router for OpenAI Codex.** It selects Sol, Terra, or Luna, chooses low through max reasoning, and uses bounded parallel agents only when they should actually help. No external API or API key is required.
 
-[中文说明](README.zh-CN.md)
+[简体中文](README.zh-CN.md) · [Routing feedback](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=routing-feedback.yml) · [Bug report](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=bug-report.yml)
 
-**Automatic model selection**
+## Why
 
-```text
-Task
-└─ Evaluate scope, ambiguity, risk, and latency
-   ├─ Repetitive, ordinary, or deterministic → Luna ─┐
-   ├─ Latency-sensitive → Terra ─────────────────────┼─→ execute → verify
-   └─ Complex, ambiguous, or high-risk → Sol ────────┘
-```
+GPT-5.6 gives Codex many useful model and reasoning combinations. Choosing one for every task quickly became its own chore. I built this Skill to make that choice automatic—and then learned that a router which blocks the real work is worse than no router at all.
 
-**Dependency-aware concurrency**
-
-```text
-Task graph
-├─ Independent task A ─┐
-├─ Independent task B ─┼─→ verify and merge
-└─ Task C after A ─────┘
-
-Shared files or resources → run serially
-```
+Version 2 therefore defaults to a fail-open Lite architecture: choose quickly, delegate once when useful, and keep bookkeeping out of the critical path. This is my first open-source project; practical feedback is genuinely welcome.
 
 ## Quick start
 
-Send this in Codex:
+Ask Codex:
 
-```text
-$skill-installer Install Codex Auto Model Router from https://github.com/orange-the-weak/codex-auto-model-router
-```
+> Install the `codex-auto-model-router` Skill from `https://github.com/orange-the-weak/codex-auto-model-router`.
 
-Restart Codex afterward. To install all 30 optional custom-agent presets or migrate from the old name, clone the repository and run the installer for your platform:
+Or install manually:
 
 ```bash
 git clone https://github.com/orange-the-weak/codex-auto-model-router.git
@@ -45,98 +26,85 @@ cd codex-auto-model-router
 ./install.sh
 ```
 
-Windows PowerShell:
+Restart Codex after installation.
 
-```powershell
-.\install.ps1
-```
+## Router Lite
 
-## Evidence-backed routing
+Every applicable request follows one of three paths:
 
-The policy is calibrated from OpenAI coding results and Codex credit rates, CursorBench 3.2, Artificial Analysis, and the DeepSWE, Terminal-Bench, and SWE-Bench Pro methodologies. ChatBench is retained only as a weak speed/cost proxy because its category scores reweight third-party API metrics rather than run an independent coding-agent harness.
-
-| Route | Default use |
+| Path | Behavior |
 |---|---|
-| **Luna medium** | All mechanical and repetitive work; automatic routing never goes lower |
-| **Luna high** | Default for ordinary bounded work and normal-size evidence scans |
-| **Luna xhigh** | Large bounded scans/reviews where max startup and token expansion are unnecessary |
-| **Luna max** | Genuinely large deterministic deep work whose latency budget allows it |
-| **Terra high** | Explicit latency priority when a shorter reasoning path matters more than Luna/high quality |
-| **Sol medium** | Bounded complex work |
-| **Sol high** | High ambiguity, coupling, or consequence; judgment alone is not enough |
-| **Sol xhigh** | A classified reasoning/verification failure on complex work, or explicit choice |
+| Fast | The current route already matches, or the work is cheaper than agent startup; execute locally. |
+| Delegate | Start or safely reuse one explicitly selected internal agent; the coordinator keeps its model. |
+| Parallel | Run only worthwhile independent tasks that fit verified free capacity. |
 
-Luna currently uses 4% of Sol's Codex token credits. CursorBench places Luna/medium above Luna/low by 10.1 points, so saving an already-low Luna credit rate no longer justifies the quality loss. Terra/high scores above Sol/low while its ChatBench response proxy is substantially shorter; it therefore survives as a latency specialist rather than a default middle tier. Task evidence and user overrides always win, and the full model-effort matrix remains explicitly selectable. The snapshot is versioned, offline, and valid for 90 days; invalid or stale evidence falls back without blocking work. See the [full evidence report](references/benchmark-evidence.md) and [machine-readable snapshot](references/benchmark-evidence.json).
+There is no model Restore, plan hash, cursor, environment guard, or blocking ledger on the default path. If routing or agent startup fails, ordinary work continues locally once. The legacy strict state machine remains available only when the user explicitly requests strict auditing or replay protection.
 
-Native Ultra is off by default. The Router never selects it automatically because it already has dependency-aware concurrency. If you explicitly enable Ultra, the request is kept to one bounded Sol or Terra Segment and Router-managed parallelism is disabled, so the two orchestration layers do not stack.
+Tiny mechanical edits, deterministic tool-bound chains, and bounded work estimated below 90 seconds stay local when the current verified GPT-5.6 route is already sufficient. A weaker current route never replaces the recommendation, and an explicit user choice always wins.
 
-For an illustrative mixed workload, the eight-lane policy estimates **10–20% faster AI-work turnaround** than using Sol/medium everywhere, while the Cursor cost proxy falls by about 62%. Higher Luna output volume is not counted as a speed gain, and API cost is not Codex subscription cost. These remain hypotheses to refine from local history.
+Delegated agents receive a self-contained task capsule and stop as soon as acceptance is proven. Within the same request, an idle agent may be reused once only when repository, route, permissions, and ownership still match. Reuse never crosses user requests.
 
-## How it works
+Automatic parallelism requires independent work, non-overlapping writes, verified capacity, and positive net benefit after activation and aggregation. Local probes separated the old 40-second estimate into 35.5–39.6 seconds to a fresh first tool versus 2.7–9.4 seconds when reusing the same agent. Planning therefore uses conservative 40-second fresh and 10-second reused priors, requires at least 30 seconds and 15% benefit, and refills compatible agents immediately. These are local planning estimates, not a platform SLA or speedup claim.
 
-- Re-evaluates every applicable request instead of inheriting the previous route.
-- Uses a one-Segment fast path. `begin` persists the canonical plan and identity; after that, `finish` and `restore` resolve by three IDs instead of rebuilding the plan after context compaction.
-- For parallel work, `prepare-dispatch` persists the full plan once and emits hash-bound bounded tickets. Executors use ID-only `attach`, so they do not reread the full plan, rebuild concurrency metadata, or depend on a shell marker.
-- Splits analysis, implementation, verification, or review only when different routes materially help.
-- Caps automatic concurrency at 4 parallel tasks, then reduces it to useful independent width and observed free slots. The coordinator reserves one slot, so a four-slot Codex session normally peaks at three parallel tasks.
-- Counts the coordinator in the visible summary: `Concurrency plan: 4 tasks (including main)`. Internal capacity still remains one coordinator plus three leaf tasks.
-- Without observed capacity, dispatches one task and refills only after another slot is confirmed. Requests above 4 require proven free capacity; no pre-created queue.
-- Uses critical-path-priority wait-any scheduling to reduce tail latency. Compatible short siblings may merge; long tasks split only at real independent boundaries.
-- Keeps the full conversation in the coordinator; parallel tasks receive only a bounded context capsule with necessary decisions, scope, acceptance, and immutable IDs.
-- Names each leaf agent from its task content, such as `runtime_ledger_audit`, instead of Router-generated random or ordinal labels. Any extra decorative nickname comes from the Codex client.
-- Requires disjoint write scopes and serializes Git index, lockfiles, project files, migrations, deploy targets, shared simulators, and other mutable resources through conflict keys.
-- Uses a standard 4-segment/4-switch budget, adaptive 6/6 for genuinely complex or large plans, and an explicit hard limit of 8/8. Restore counts as a switch.
-- Keeps fallback inside GPT-5.6: Sol tries Terra then Luna; Terra tries Sol then Luna; Luna tries Terra then Sol. GPT-5.5 is allowed only when the complete 5.6 family is unavailable.
-- Announces the selected model and reasoning once per segment, stops on failure, and restores a verified original GPT-5.6 route once.
-- Keeps model-switch messages readable: task and route information appear first, while bounded internal IDs and state stay at the end of the continuation prompt.
-- Records only verified execution in a local JSONL ledger; recommendations never count as observed use.
-- Stores each completed task's bounded result in one atomic route inbox. The last collection task can return a ready synthesis ticket immediately, while dependent tasks load only the results they declared.
-- Captures each parallel task's dispatch-confirmed and result-received boundaries on one coordinator monotonic clock, then separates actual elapsed time, cumulative task time, useful task overlap, orchestration gaps, and peak concurrency. Models never supply timing numbers.
-- Keeps older aggregate-only records readable but excludes them from verified history.
-- Tracks verified routing, queue, startup, switch/Restore, useful-execution, round-trip, and state-gate overhead without guessing missing data.
-- Ends each Apply brief with the runtime-generated current-run concurrency line. Reliable schema-v2 timing separates `task overlap` from `orchestration gap`; it does not claim speedup without a controlled serial A/B run.
-
-## Use
-
-```text
-$codex-auto-model-router Analyze this repository and recommend routes.
-$codex-auto-model-router Implement this feature with dynamic segment routing.
-$codex-auto-model-router Use GPT-5.6 Terra high for this task.
-$codex-auto-model-router Use GPT-5.6 Luna high for this bounded implementation.
-$codex-auto-model-router Use GPT-5.6 Luna max for this bounded refactor.
-$codex-auto-model-router Explicitly enable Sol ultra for this one bounded task.
-$codex-auto-model-router Query usage ratios and retune from observed outcomes.
+```mermaid
+flowchart TD
+    A["Applicable Codex request"] --> B["Select the lowest sufficient GPT-5.6 route"]
+    B --> C{"Useful independent work?"}
+    C -- "No" --> D{"Current route sufficient or work under 90s?"}
+    D -- "Yes" --> L["Run locally"]
+    D -- "No" --> E{"Compatible idle executor in this request?"}
+    E -- "Yes" --> R["Reuse once · 10s planning prior"]
+    E -- "No" --> F["Start fresh executor · 40s planning prior"]
+    C -- "Yes" --> G{"Free capacity, disjoint writes, and ≥30s / 15% benefit?"}
+    G -- "No" --> D
+    G -- "Yes" --> H["Build route-aware lanes · longest first"]
+    H --> I{"Compatible lane becomes idle?"}
+    I -- "Yes" --> J["Follow up immediately · reuse once"]
+    I -- "No" --> K["Start fresh only while benefit remains"]
+    J --> M["Wait-any · stop optional stragglers"]
+    K --> M
+    L --> N["Validate and return"]
+    R --> N
+    F --> N
+    M --> N
 ```
 
-Example notice:
+## What changed in v0.2
 
-```text
-Codex automatic routing | Task segment: Analyze the change | Model: GPT-5.6 Sol | Reasoning: high | High ambiguity
-Codex automatic routing | Concurrency plan: 4 tasks (including main) | Source: smart-reduced | Critical-path priority
-并发：峰值 4（含主任务）｜实际用时：2分0秒｜子任务累计：4分48秒｜任务重叠：2分58秒｜编排空档：10秒
-```
+- Router Lite removes Restore, hashes, state gates, and blocking ledgers from normal work.
+- Short or deterministic work stays local when the current GPT-5.6 route is sufficient.
+- Parallel planning now distinguishes fresh and reused executors, schedules route-aware lanes, and refills completed compatible agents without a new task cold start.
+- Reuse is limited to one safe follow-up in the same request; route changes, stale ownership, failures, and sensitive external actions stay fresh or local.
+- Ultra remains opt-in, and fallback stays inside GPT-5.6 while any Sol, Terra, or Luna route is available.
 
-Reports are written to `docs/codex-model-routing-report.md`; verified usage is stored in `.codex/model-routing-history.jsonl`. The ledger contains routing metadata and outcomes, not prompts, source code, secrets, or conversation text.
+## Model gradient
 
-## A personal note
+| Work | Default route |
+|---|---|
+| Deterministic mechanical work | Luna / medium |
+| Ordinary bounded work | Luna / high |
+| Large bounded scans or reviews | Luna / xhigh |
+| Large deterministic deep work | Luna / max |
+| Explicit latency priority | Terra / high |
+| Bounded complex work | Sol / medium |
+| High ambiguity, coupling, or consequence | Sol / high |
+| Failed complex reasoning or verification | Sol / xhigh |
 
-This is my first open-source project. I built it after repeatedly stopping between Sol, Terra, and Luna and wondering whether a task really needed the heavier option.
+Ultra is never automatic. Explicit Ultra uses its native orchestration and disables Router-managed parallelism. GPT-5.5 is used only after the complete GPT-5.6 family is proven unavailable.
 
-Eventually I turned that recurring decision into a Skill. Practical feedback—especially a route that was too strong, too weak, or needlessly split—is more useful than a star.
+## Evidence and history
 
-本开源项目已链接并感谢 [LINUX DO 社区](https://linux.do/) 的支持与交流。
+Routing is calibrated with offline public coding-agent evidence from OpenAI, Artificial Analysis, CursorBench, ChatBench, DeepSWE, SWE-Bench Pro, and Terminal-Bench. Task evidence and user overrides remain primary. API effort data is only a relative prior, not measured Codex subscription cost or wall-clock time.
 
-## Feedback
+See [benchmark evidence](references/benchmark-evidence.md) and the [machine-readable snapshot](references/benchmark-evidence.json). The snapshot is optional at runtime; missing, invalid, or stale evidence falls back to deterministic rules without blocking work.
 
-Found a route that was too weak, too expensive, or unnecessarily fragmented? [Share a routing result](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=routing-feedback.yml) without private prompts or source code. For bugs and proposals, use [GitHub Issues](https://github.com/orange-the-weak/codex-auto-model-router/issues).
+Usage history is written after execution on a best-effort basis. It records observed model mix and concurrency without making analytics a prerequisite for the project result.
 
-## Compatibility and development
-
-This project requires Codex with personal Skill support. Same-task overrides and custom agents depend on the active surface. While any GPT-5.6 route is selectable, the Skill neither falls back nor restores to GPT-5.5 or an ambiguous `available-default`. If a task starts on 5.5 and successfully enters 5.6, it stays on the verified 5.6 route. A 5.5 fallback is recorded and shown only when Sol, Terra, and Luna are all unavailable.
+## Development
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests
 python3 tests/validate_distribution.py
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [LICENSE](LICENSE). This independent community project is not affiliated with or endorsed by OpenAI.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for privacy-safe feedback and development guidance.

@@ -24,7 +24,7 @@ OpenAI's coding-agent results and the independent Coding Agent Index support Sol
 | xhigh | A large bounded evidence scan/review needs more coverage without max's startup cost, or a difficult complex problem has comparable reasoning-failure evidence | Luna for bounded scans; Sol for failed complex reasoning |
 | max | Demanding bounded work benefits from more exploration and verification, and extra latency/tokens are acceptable | Luna for low-consequence deterministic deep work; other models by explicit override |
 
-Never choose an effort merely because the model supports it. Luna/max is justified by boundedness, deterministic verification, and low consequence—not by Luna's low token rate alone. Ultra is disabled by default and never appears in automatic lanes. If the user explicitly enables native Ultra, use one bounded Sol or Terra Apply Segment and disable Router-managed parallelism; Luna/ultra is unsupported.
+Never choose an effort merely because the model supports it. Luna/max is justified by boundedness, deterministic verification, and low consequence—not by Luna's low token rate alone. Ultra is disabled by default and never appears in automatic lanes. If the user explicitly enables native Ultra, use one bounded Sol or Terra task and disable Router-managed parallelism; Luna/ultra is unsupported.
 
 ## Six routing signals
 
@@ -102,7 +102,7 @@ Prefer measured repository-specific timing or evaluation evidence when it exists
    - Optimized normal lane: 10–25%.
    - Escalation lane: -10–0% direct speed improvement.
 3. Weight the lower and upper bounds by the task mix. Clamp the overall range to 0–60% and round each bound to the nearest 5 percentage points.
-4. Subtract observed model-switch and Restore/Return time. Treat it as a normal bounded overhead rather than a reason to inherit the previous route; if it is not measured, state that the estimate excludes unknown routing overhead and do not claim a measured gain.
+4. Subtract observed Lite classification, leaf-agent startup, and aggregation time. The coordinator does not switch or Restore. If overhead is not measured, state that the estimate excludes it and do not claim a measured gain.
 5. Explain the task-mix assumptions and identify the two or three changes contributing most to the result.
 
 Exclude unavoidable external waiting such as dependency downloads, network services, simulator or device delays, approval waits, and full builds unless the repository contains measured evidence showing that the proposed workflow changes them. Do not present generic model-tier marketing claims as benchmarks. If evidence is too weak to estimate the task mix, report `预计增效：暂无法可靠估算` and state what evidence is missing instead of inventing a percentage.

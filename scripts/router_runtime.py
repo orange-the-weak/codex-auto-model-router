@@ -977,6 +977,29 @@ def attach(args):
     }, ensure_ascii=False, sort_keys=True))
 
 
+def prepare_route(args):
+    """Persist a validated serial plan before a model switch."""
+    try:
+        envelope = _load(args.envelope_json, "envelope")
+        plan = envelope.get("plan")
+        if not isinstance(plan, dict) or plan.get("protocol") not in (
+            policy.FAST_PROTOCOL, policy.SEGMENTED_PROTOCOL,
+        ):
+            raise ValueError("serial preparation requires a canonical serial plan")
+        segment = _validate(envelope)
+        state, state_path = _bind_or_verify_state(args, plan, segment)
+    except ValueError as exc:
+        raise SystemExit(f"serial preparation stopped: {exc}") from exc
+    print(json.dumps({
+        "ok": True, "state_gate": "prepared", "protocol": plan["protocol"],
+        "route_id": plan["route_id"], "plan_hash": plan["plan_hash"],
+        "segment_id": segment["segment_id"], "attempt_id": segment["attempt_id"],
+        "runtime_state_persisted": True, "state_path": str(state_path),
+        "ledger_fallback": state.get("ledger_fallback", False),
+        "warnings": state.get("warnings", []),
+    }, ensure_ascii=False, sort_keys=True))
+
+
 def begin(args):
     envelope = None
     state = None
@@ -2127,6 +2150,10 @@ def parser():
     starter.add_argument("--envelope-json", required=True)
     starter.add_argument("--trusted-dispatch-capacity-json")
     starter.set_defaults(func=begin)
+    serial_preparer = commands.add_parser("prepare-route")
+    serial_preparer.add_argument("--ledger", type=Path, required=True)
+    serial_preparer.add_argument("--envelope-json", required=True)
+    serial_preparer.set_defaults(func=prepare_route)
     preparer = commands.add_parser("prepare-dispatch")
     preparer.add_argument("--ledger", type=Path, required=True)
     preparer.add_argument("--plan-json")

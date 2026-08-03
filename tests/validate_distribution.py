@@ -69,8 +69,8 @@ if not 25 <= len(values.get("short_description", "")) <= 64:
     fail("openai.yaml short_description length is invalid")
 if "$codex-auto-model-router" not in values.get("default_prompt", ""):
     fail("openai.yaml default prompt does not invoke the skill")
-if "## Visible routing protocol" not in skill_text or "Codex 自动路由｜任务段：<task segment>" not in skill_text:
-    fail("visible routing protocol is missing")
+if "Codex 自动路由｜任务：<name>" not in skill_text:
+    fail("visible Lite routing protocol is missing")
 for obsolete_segment_counter in (
     "Segment <index>/<total>",
     "Segment 1/1",
@@ -79,14 +79,19 @@ for obsolete_segment_counter in (
     for path in (ROOT / "SKILL.md", ROOT / "README.md", ROOT / "README.zh-CN.md"):
         if obsolete_segment_counter in path.read_text(encoding="utf-8"):
             fail(f"visible Segment counter remains in {path.name}: {obsolete_segment_counter}")
-if "含主任务，先派发" in skill_text:
-    fail("unknown-capacity prompt does not use the unified concurrency plan shape")
-if "## Path dispatch" not in skill_text or "ROUTE_PROJECT_MODELS_EXECUTOR=1`" not in skill_text:
-    fail("coordinator/router/executor path dispatch is missing")
-if "## Capability check and Dispatch" not in skill_text or "Never create a new top-level Codex task" not in skill_text:
-    fail("same-task routing contract is missing")
-if "A task/agent name alone is not proof of model selection" not in skill_text:
-    fail("generic subagent model-safety guard is missing")
+for lite_contract in (
+    "Use Router Lite by default",
+    "router_lite.py decide",
+    "The coordinator never changes its own model",
+    "no Restore step",
+    "within 15 seconds",
+    "Do not rebuild an envelope",
+    "Treat every ledger error as a non-blocking warning",
+    "## Strict compatibility mode",
+    "Never silently enter strict mode",
+):
+    if lite_contract not in skill_text:
+        fail(f"Router Lite contract is missing: {lite_contract}")
 for distribution_text, label in (
     (skill_text, "SKILL.md"),
     ((ROOT / "README.md").read_text(encoding="utf-8"), "README.md"),
@@ -95,97 +100,38 @@ for distribution_text, label in (
 ):
     if "worker_time_compression_percent" in distribution_text:
         fail(f"obsolete compression wording is exposed in {label}")
-for stable_phrase in (
-    "并发：峰值 <leaf peak + 1>（含主任务）｜实际用时：<h时m分s秒>｜子任务累计：<h时m分s秒>｜任务重叠：<h时m分s秒>｜编排空档：<h时m分s秒>",
-    "并发计划：<leaf cap + 1> 个任务（含主任务）｜测量：待记录",
-    "coordinator's monotonic clock",
-    "historical aggregate",
-    "Print the returned `parallel_execution_brief` verbatim",
-):
-    if stable_phrase not in skill_text and stable_phrase not in (ROOT / "references" / "parallel-execution.md").read_text(encoding="utf-8"):
-        fail(f"stable distribution contract is missing: {stable_phrase}")
-if "A normal successful completion needs no separate model-identity or runtime-verification warning" not in skill_text:
-    fail("normal completion suppression rule is missing")
-readable_section = skill_text.split("## Readable continuation prompt", 1)
-if len(readable_section) != 2:
-    fail("readable continuation prompt contract is missing")
-readable_section = readable_section[1].split("\n## ", 1)[0]
+readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+readme_zh_text = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
 for phrase in (
-    "继续当前任务：<task segment>",
-    "Codex 自动路由｜任务段：<task segment>",
-    "<!-- CODEX_ROUTER_INTERNAL",
-    "任务已完成，正在恢复原模型并返回结果。",
+    "flowchart TD", "Reuse once · 10s planning prior",
+    "Build route-aware lanes · longest first", "What changed in v0.2",
 ):
-    if phrase not in readable_section:
-        fail(f"readable continuation prompt phrase is missing: {phrase}")
-if not (
-    readable_section.index("继续当前任务：<task segment>")
-    < readable_section.index("<!-- CODEX_ROUTER_INTERNAL")
-    < readable_section.index("ROUTE_PROJECT_MODELS_ROUTED_TURN=1")
+    if phrase not in readme_text:
+        fail(f"English Router Lite flow or release note is missing: {phrase}")
+for phrase in (
+    "flowchart TD", "安全复用一次 · 规划按 10 秒",
+    "按路由建立执行 lane · 最长任务优先", "v0.2 更新重点",
 ):
-    fail("continuation prompt must place readable content before machine fields")
-if "Never begin it with `ROUTE_PROJECT_MODELS_*`" not in readable_section:
-    fail("machine-first continuation guard is missing")
-if "Use this order once for the complete plan" not in skill_text or "explicitly model-selectable executor presets" not in skill_text:
-    fail("switch-to-subagent fallback order is missing")
-for family_guard in (
-    "Never accept `available-default`, the current model, or GPT-5.5 while any GPT-5.6 route remains selectable",
-    "Use GPT-5.5 only after the capability surface explicitly exposes no GPT-5.6 model",
-    "fallback_reason=gpt56-family-unavailable",
-    "Do not restore to an original GPT-5.5 setting after a GPT-5.6 Segment succeeds",
+    if phrase not in readme_zh_text:
+        fail(f"Chinese Router Lite flow or release note is missing: {phrase}")
+for model_contract in (
+    "Luna/medium", "Luna/high", "Luna/xhigh", "Luna/max",
+    "Terra/high", "Sol/medium", "Sol/high", "Sol/xhigh",
+    "Never select Ultra automatically",
+    "GPT-5.5 is allowed only after the complete GPT-5.6 family is proven unavailable",
 ):
-    if family_guard not in skill_text:
-        fail(f"GPT-5.6 family fallback guard is missing: {family_guard}")
-if "ROUTED_MODE=APPLY_SEGMENT" not in skill_text or "ROUTED_MODE=APPLY_ONESHOT" not in skill_text or "## Restore and Return" not in skill_text:
-    fail("segmented Apply, compatibility, or restore contract is missing")
-for budget_contract in (
-    "standard budget of four routed segments and four switches",
-    "Expand automatically to six segments and six switches",
-    "Eight segments and eight switches are absolute hard limits",
-    "budget_source=standard|adaptive-extended|user-override",
-):
-    if budget_contract not in skill_text:
-        fail(f"adaptive budget contract is missing: {budget_contract}")
-if "Never inherit the previous request's strength" not in skill_text or "never show `current-route` or `keep` placeholders" not in skill_text:
-    fail("per-request dynamic routing contract is missing")
-for max_contract in (
-    "Use Luna/medium as the mechanical floor",
-    "Luna/high for ordinary bounded work",
-    "Use Luna/xhigh for large bounded scan/review work",
-    "Use Luna/max only for genuinely large deterministic deep work",
-    "Terra/high is an explicit latency specialist",
-    "Eight automatic lanes",
-    "The full model-effort matrix remains available by explicit user override",
-    "`max` is the highest automatic single-route effort",
-    "Never select `ultra` automatically",
-    "disable `dependency-parallel-v1`",
-):
-    if max_contract not in skill_text:
-        fail(f"Luna max routing contract is missing: {max_contract}")
-if "Never make a persistent same-task switch when the original model or effort is unknown" not in skill_text:
-    fail("safe-restore rule is missing")
-if "A failed segment stops the chain" not in skill_text or "Never re-plan after execution begins" not in skill_text:
-    fail("segment failure or recursion guard is missing")
+    if model_contract not in skill_text:
+        fail(f"Lite model gradient is missing: {model_contract}")
 for parallel_contract in (
-    "## Dependency-aware parallel planning",
-    "dependency-parallel-v1",
-    "critical-path",
-    "wait-any",
-    "stop-dispatch-drain-running",
-    "write_scopes",
-    "conflict_keys",
-    "Workers receive only a bounded context capsule",
-    "parallelism_source=standard|smart-reduced|user-override",
-    "Automatic planning requests at most 4",
-    "Create only the executors covered by the current ticket batch",
-    "dispatch-ticket-v1",
-    "prepare-dispatch",
-    "End every Apply chat summary with one concise concurrency line",
-    "agent_task_name",
-    "并发计划：<effective + coordinator> 个任务（含主任务）",
+    "## Useful parallelism", "roughly 90 seconds each",
+    "non-overlapping write scopes", "verified free worker capacity",
+    "both 30 seconds and 15%", "Order ready tasks longest-first",
+    "at most four total tasks including the coordinator",
+    "Do not create a waiting agent queue", "Leaf agents may not delegate",
+    "Never claim speedup without a controlled serial comparison",
 ):
     if parallel_contract not in skill_text:
-        fail(f"parallel routing contract is missing: {parallel_contract}")
+        fail(f"Lite parallel contract is missing: {parallel_contract}")
 state_machine = (ROOT / "references" / "execution-state-machine.md").read_text(encoding="utf-8")
 for invariant in (
     "one immutable `route_id`",
@@ -268,7 +214,7 @@ for contract in ("dependency-parallel-v1", "wait-any", "stop-dispatch-drain-runn
         fail(f"parallel execution reference is missing: {contract}")
 runtime_text = (ROOT / "scripts" / "router_runtime.py").read_text(encoding="utf-8")
 for contract in (
-    "def begin", "def finish", "def restore", "def worker_start", "def worker_finish",
+    "def prepare_route", "def begin", "def finish", "def restore", "def worker_start", "def worker_finish",
     "def prepare_dispatch", "def attach", "dispatch-ticket-v1",
     "canonical_plan", "result_inbox", "continuation_ticket",
     "runtime state cannot be persisted", "_fallback_ledger",
@@ -276,6 +222,31 @@ for contract in (
 ):
     if contract not in runtime_text:
         fail(f"combined Router runtime contract is missing: {contract}")
+lite_text = (ROOT / "scripts" / "router_lite.py").read_text(encoding="utf-8")
+for contract in (
+    'LITE_PROTOCOL = "router-lite-v2"', '"action": "local"',
+    '"action": "parallel" if parallel', '"restore_required": False',
+    '"fail_open": True', 'startup_failure_takeover_seconds',
+    'ledger-best-effort', 'DEFAULT_MAX_TOTAL_TASKS = 4',
+    'DEFAULT_MIN_PARALLEL_SECONDS = 90',
+    'DEFAULT_MIN_DELEGATE_SECONDS = 90',
+    'DEFAULT_FRESH_EXECUTOR_SECONDS = 40',
+    'DEFAULT_REUSED_EXECUTOR_SECONDS = 10',
+    'DEFAULT_MAX_REUSES_PER_EXECUTOR = 1',
+    'DEFAULT_SPAWN_STAGGER_SECONDS = 8',
+    'DEFAULT_MIN_PARALLEL_SAVINGS_RATIO = 0.15',
+    '"startup-aware-local-fast-path"', '"dispatch_now"',
+    '"executor_lanes"', '"reuse_policy"', '"same-request-only"',
+    '"--reuse-candidates-json"',
+):
+    if contract not in lite_text:
+        fail(f"Router Lite implementation contract is missing: {contract}")
+for contract in (
+    "35.5–39.6 seconds", "2.7–9.4 seconds",
+    "One follow-up per executor", "recheck the live agent",
+):
+    if contract not in parallel_reference:
+        fail(f"executor reuse reference is missing: {contract}")
 evidence = json.loads(
     (ROOT / "references" / "benchmark-evidence.json").read_text(encoding="utf-8")
 )
@@ -333,8 +304,8 @@ for tier, model in models.items():
             fail(f"incorrect preset: {name}")
         if data.get("sandbox_mode") != "read-only":
             fail(f"agent must be read-only: {name}")
-        if "ROUTE_PROJECT_MODELS_SUBAGENT=1" not in data.get("developer_instructions", ""):
-            fail(f"router subagent recursion guard is missing: {name}")
+        if "Perform only Assess or Retune" not in data.get("developer_instructions", "") or "recursive delegation" not in data.get("developer_instructions", ""):
+            fail(f"router subagent scope guard is missing: {name}")
         if f"`{data.get('name')}`" not in preset_mapping:
             fail(f"router preset mapping is missing: {name}")
         router_count += 1
@@ -357,10 +328,13 @@ for tier, model in models.items():
         if executor.get("sandbox_mode") != "workspace-write":
             fail(f"executor must be workspace-write: {executor_name}")
         instructions = executor.get("developer_instructions", "")
-        if "dispatch-ticket-v1" not in instructions or "ROUTE_PROJECT_MODELS_EXECUTOR=1" not in instructions:
-            fail(f"executor ticket/legacy guard is missing: {executor_name}")
-        if not all(field in instructions for field in ("route_id", "segment_id", "attempt_id")) or "do not plan, route, advance" not in instructions:
-            fail(f"executor segment guard is missing: {executor_name}")
+        for phrase in (
+            "Accept a direct Lite task", "do not require route IDs, hashes, tickets",
+            "do not route or delegate", "Treat the task capsule as self-contained",
+            "Stop when acceptance is proven", "Never create a top-level Codex task",
+        ):
+            if phrase not in instructions:
+                fail(f"executor Lite guard is missing from {executor_name}: {phrase}")
         if f"`{executor.get('name')}`" not in preset_mapping:
             fail(f"executor preset mapping is missing: {executor_name}")
         executor_count += 1

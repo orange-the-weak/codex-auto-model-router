@@ -73,6 +73,12 @@ class RouterRuntimeTests(unittest.TestCase):
                 ))
         return json.loads(output.getvalue())
 
+    def prepare_route_result(self, envelope):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            RUNTIME.prepare_route(self.args(envelope_json=json.dumps(envelope)))
+        return json.loads(output.getvalue())
+
     def prepare_result(self, plan, runtime_total_slots=4, running_workers=0):
         output = io.StringIO()
         capacity = {
@@ -112,6 +118,32 @@ class RouterRuntimeTests(unittest.TestCase):
             current=current("gpt-5.6-luna", "low"),
             runtime_total_slots=3,
         )
+
+    def test_serial_prepare_then_compact_begin_preserves_hash_bound_fields(self):
+        plan = RUNTIME.policy.plan_apply_segments(
+            [segment()], current=current("gpt-5.6-sol", "medium")
+        )
+        prepared = self.prepare_route_result(self.envelope(plan))
+        self.assertEqual(prepared["state_gate"], "prepared")
+        compact = {
+            "route_id": plan["route_id"],
+            "segment_id": plan["segments"][0]["segment_id"],
+            "attempt_id": plan["segments"][0]["attempt_id"],
+        }
+        result = self.begin_result(compact, current(
+            plan["segments"][0]["model"], plan["segments"][0]["effort"]
+        ))
+        self.assertEqual(result["state_gate"], "passed")
+        state, _ = RUNTIME._locate_state(self.args(), plan["route_id"])
+        self.assertEqual(state["canonical_plan"]["routing_evidence"], plan["routing_evidence"])
+
+    def test_serial_prepare_rejects_plan_missing_hash_bound_evidence(self):
+        plan = RUNTIME.policy.plan_apply_segments(
+            [segment()], current=current("gpt-5.6-sol", "medium")
+        )
+        del plan["routing_evidence"]
+        with self.assertRaisesRegex(SystemExit, "plan hash mismatch"):
+            self.prepare_route_result(self.envelope(plan))
 
     def parallel_envelope(self, plan, identifier="one"):
         selected = next(
