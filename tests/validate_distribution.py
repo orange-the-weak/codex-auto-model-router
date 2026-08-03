@@ -103,17 +103,19 @@ for distribution_text, label in (
 readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
 readme_zh_text = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
 for phrase in (
-    "flowchart TD", "Reuse once · 10s planning prior",
-    "Build route-aware lanes · longest first", "What changed in v0.2",
+    "Automatic model routing", "Current route is sufficient or work is short → run locally",
+    "Adaptive parallelism", "Net benefit → run in parallel and refill on completion",
+    "What changed in v0.2",
 ):
     if phrase not in readme_text:
-        fail(f"English Router Lite flow or release note is missing: {phrase}")
+        fail(f"English Router Lite overview or release note is missing: {phrase}")
 for phrase in (
-    "flowchart TD", "安全复用一次 · 规划按 10 秒",
-    "按路由建立执行 lane · 最长任务优先", "v0.2 更新重点",
+    "自动选择模型", "当前模型够用或任务很短 → 主线程直接完成",
+    "自动适配并发", "有净收益 → 并发执行，完成即补位",
+    "v0.2 更新重点",
 ):
     if phrase not in readme_zh_text:
-        fail(f"Chinese Router Lite flow or release note is missing: {phrase}")
+        fail(f"Chinese Router Lite overview or release note is missing: {phrase}")
 for model_contract in (
     "Luna/medium", "Luna/high", "Luna/xhigh", "Luna/max",
     "Terra/high", "Sol/medium", "Sol/high", "Sol/xhigh",

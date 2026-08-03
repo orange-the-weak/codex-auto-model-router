@@ -2,15 +2,38 @@
 
 [![Validate](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml/badge.svg)](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml)
 
-**面向 OpenAI Codex 的轻量 GPT-5.6 模型与推理强度路由器。** 自动选择 Sol、Terra 或 Luna，以及 low 到 max 推理；只有确实能提速时才启用有界并发。不需要外部 API 或 API Key。
+**面向 OpenAI Codex 的轻量 GPT-5.6 模型与推理强度路由器。** 自动选择 Sol、Terra 或 Luna，以及 low 到 max 推理；只有确实能提速时才启用有界并发。
 
 [English](README.md) · [路由反馈](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=routing-feedback.yml) · [问题反馈](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=bug-report.yml)
-
-## 为什么做这个工具？
 
 GPT-5.6 给 Codex 带来了很多有用的模型和推理组合，但每次都判断一遍，很快也成了一件麻烦事。我最初只是想让选择自动化，后来又发现：如果 Router 自己挡住了真正的工作，那还不如不用。
 
 所以 v2 默认采用 fail-open 的 Lite 架构：快速选择，需要时只委派一次，台账不再进入关键路径。这也是我的第一个开源项目，欢迎把真实使用中的好坏都告诉我。
+
+**自动选择模型**
+
+```text
+当前请求
+└─ 只根据这次任务重新评估
+   ├─ 机械、普通或有界扫描 → Luna
+   ├─ 明确追求低延迟 → Terra
+   └─ 复杂、高歧义或高后果 → Sol
+      ↓
+   当前模型够用或任务很短 → 主线程直接完成
+   否则 → 启动或安全复用匹配执行器
+```
+
+**自动适配并发**
+
+```text
+任务
+├─ 能否拆成独立、耗时且互不冲突的子任务？
+│  ├─ 否 → 串行执行
+│  └─ 是 → 检查空闲槽位与启动、汇总成本
+│     ├─ 没有净收益 → 串行执行
+│     └─ 有净收益 → 并发执行，完成即补位
+└─ 共享文件、构建资源或外部操作 → 串行执行
+```
 
 ## 快速安装
 
@@ -45,29 +68,6 @@ cd codex-auto-model-router
 委派任务只携带自足的最小上下文，达到验收条件就停止。同一请求内，只有仓库、路由、权限和写入所有权都仍然匹配时，空闲执行器才允许复用一次；不会跨用户请求复用。
 
 自动并发要求任务真正独立、写入范围不重叠、容量可验证，并且扣除激活和汇总成本后仍有收益。最新本机探针把原来的 40 秒拆开了：新执行器首次调用工具需要 35.5–39.6 秒，复用同一执行器只需 2.7–9.4 秒。规划因此保守采用新建 40 秒、复用 10 秒，并要求至少节省 30 秒和 15%；兼容执行器完成后立即补位。这些只是本机规划先验，不是平台 SLA 或提速承诺。
-
-```mermaid
-flowchart TD
-    A["适用的 Codex 请求"] --> B["选择最低够用的 GPT-5.6 路由"]
-    B --> C{"存在值得并行的独立任务？"}
-    C -- "否" --> D{"当前路由足够，或任务不足 90 秒？"}
-    D -- "是" --> L["主线程直接执行"]
-    D -- "否" --> E{"同一请求内有兼容的空闲执行器？"}
-    E -- "是" --> R["安全复用一次 · 规划按 10 秒"]
-    E -- "否" --> F["新建执行器 · 规划按 40 秒"]
-    C -- "是" --> G{"有空闲容量、写入不冲突，且收益 ≥30 秒 / 15%？"}
-    G -- "否" --> D
-    G -- "是" --> H["按路由建立执行 lane · 最长任务优先"]
-    H --> I{"兼容 lane 已空闲？"}
-    I -- "是" --> J["立即补位 · 最多复用一次"]
-    I -- "否" --> K["仍有净收益时才新建"]
-    J --> M["完成即返回 · 停止无关尾部任务"]
-    K --> M
-    L --> N["验证并交付"]
-    R --> N
-    F --> N
-    M --> N
-```
 
 ## v0.2 更新重点
 

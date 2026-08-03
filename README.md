@@ -2,15 +2,38 @@
 
 [![Validate](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml/badge.svg)](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml)
 
-**A lightweight GPT-5.6 model and reasoning router for OpenAI Codex.** It selects Sol, Terra, or Luna, chooses low through max reasoning, and uses bounded parallel agents only when they should actually help. No external API or API key is required.
+**A lightweight GPT-5.6 model and reasoning router for OpenAI Codex.** It selects Sol, Terra, or Luna, chooses low through max reasoning, and uses bounded parallel agents only when they should actually help.
 
 [简体中文](README.zh-CN.md) · [Routing feedback](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=routing-feedback.yml) · [Bug report](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=bug-report.yml)
-
-## Why
 
 GPT-5.6 gives Codex many useful model and reasoning combinations. Choosing one for every task quickly became its own chore. I built this Skill to make that choice automatic—and then learned that a router which blocks the real work is worse than no router at all.
 
 Version 2 therefore defaults to a fail-open Lite architecture: choose quickly, delegate once when useful, and keep bookkeeping out of the critical path. This is my first open-source project; practical feedback is genuinely welcome.
+
+**Automatic model routing**
+
+```text
+Request
+└─ Re-evaluate the task itself
+   ├─ Mechanical, ordinary, or bounded scan → Luna
+   ├─ Explicit latency priority → Terra
+   └─ Complex, ambiguous, or consequential → Sol
+      ↓
+   Current route is sufficient or work is short → run locally
+   Otherwise → start or safely reuse a matching executor
+```
+
+**Adaptive parallelism**
+
+```text
+Task
+├─ Independent, substantial, non-conflicting subtasks?
+│  ├─ No → run serially
+│  └─ Yes → check free capacity and startup/aggregation cost
+│     ├─ No net benefit → run serially
+│     └─ Net benefit → run in parallel and refill on completion
+└─ Shared files, build resources, or external actions → run serially
+```
 
 ## Quick start
 
@@ -45,29 +68,6 @@ Tiny mechanical edits, deterministic tool-bound chains, and bounded work estimat
 Delegated agents receive a self-contained task capsule and stop as soon as acceptance is proven. Within the same request, an idle agent may be reused once only when repository, route, permissions, and ownership still match. Reuse never crosses user requests.
 
 Automatic parallelism requires independent work, non-overlapping writes, verified capacity, and positive net benefit after activation and aggregation. Local probes separated the old 40-second estimate into 35.5–39.6 seconds to a fresh first tool versus 2.7–9.4 seconds when reusing the same agent. Planning therefore uses conservative 40-second fresh and 10-second reused priors, requires at least 30 seconds and 15% benefit, and refills compatible agents immediately. These are local planning estimates, not a platform SLA or speedup claim.
-
-```mermaid
-flowchart TD
-    A["Applicable Codex request"] --> B["Select the lowest sufficient GPT-5.6 route"]
-    B --> C{"Useful independent work?"}
-    C -- "No" --> D{"Current route sufficient or work under 90s?"}
-    D -- "Yes" --> L["Run locally"]
-    D -- "No" --> E{"Compatible idle executor in this request?"}
-    E -- "Yes" --> R["Reuse once · 10s planning prior"]
-    E -- "No" --> F["Start fresh executor · 40s planning prior"]
-    C -- "Yes" --> G{"Free capacity, disjoint writes, and ≥30s / 15% benefit?"}
-    G -- "No" --> D
-    G -- "Yes" --> H["Build route-aware lanes · longest first"]
-    H --> I{"Compatible lane becomes idle?"}
-    I -- "Yes" --> J["Follow up immediately · reuse once"]
-    I -- "No" --> K["Start fresh only while benefit remains"]
-    J --> M["Wait-any · stop optional stragglers"]
-    K --> M
-    L --> N["Validate and return"]
-    R --> N
-    F --> N
-    M --> N
-```
 
 ## What changed in v0.2
 
