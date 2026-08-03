@@ -96,7 +96,7 @@ for distribution_text, label in (
     if "worker_time_compression_percent" in distribution_text:
         fail(f"obsolete compression wording is exposed in {label}")
 for stable_phrase in (
-    "并发：峰值 <leaf peak + 1>（含主任务）｜实际用时：<h时m分s秒>｜并行任务累计用时：<h时m分s秒>｜并行省时估算：<1 - actual / cumulative>%｜槽位利用：<(cumulative + actual) / ((leaf peak + 1) × actual)>%",
+    "并发：峰值 <leaf peak + 1>（含主任务）｜实际用时：<h时m分s秒>｜子任务累计：<h时m分s秒>｜任务重叠：<h时m分s秒>｜编排空档：<h时m分s秒>",
     "并发计划：<leaf cap + 1> 个任务（含主任务）｜测量：待记录",
     "coordinator's monotonic clock",
     "historical aggregate",
@@ -149,12 +149,13 @@ for budget_contract in (
 if "Never inherit the previous request's strength" not in skill_text or "never show `current-route` or `keep` placeholders" not in skill_text:
     fail("per-request dynamic routing contract is missing")
 for max_contract in (
-    "Use Luna/medium as the automatic floor for mechanical work",
-    "Use Luna/high as the default for ordinary bounded work",
-    "raise to Luna/max only when the work is unusually deep or large",
-    "Use Terra/high only when fast return is explicitly prioritized",
-    "Seven automatic lanes",
-    "full model-effort matrix remains available by explicit user override",
+    "Use Luna/medium as the mechanical floor",
+    "Luna/high for ordinary bounded work",
+    "Use Luna/xhigh for large bounded scan/review work",
+    "Use Luna/max only for genuinely large deterministic deep work",
+    "Terra/high is an explicit latency specialist",
+    "Eight automatic lanes",
+    "The full model-effort matrix remains available by explicit user override",
     "`max` is the highest automatic single-route effort",
     "Never select `ultra` automatically",
     "disable `dependency-parallel-v1`",
@@ -176,7 +177,9 @@ for parallel_contract in (
     "Workers receive only a bounded context capsule",
     "parallelism_source=standard|smart-reduced|user-override",
     "Automatic planning requests at most 4",
-    "Create an executor only after confirming a free slot",
+    "Create only the executors covered by the current ticket batch",
+    "dispatch-ticket-v1",
+    "prepare-dispatch",
     "End every Apply chat summary with one concise concurrency line",
     "agent_task_name",
     "并发计划：<effective + coordinator> 个任务（含主任务）",
@@ -196,7 +199,7 @@ for invariant in (
     "observed total slots - coordinator - running tasks",
     "scripts/router_runtime.py begin",
     "Later `finish` and `restore` resolve that state with `route_id + segment_id + attempt_id`",
-    "context capsule",
+    "dispatch-ticket-v1",
 ):
     if invariant not in state_machine:
         fail(f"state-machine invariant is missing: {invariant}")
@@ -260,13 +263,15 @@ if installer_tests.returncode:
 
 preset_mapping = (ROOT / "references" / "preset-mapping.md").read_text(encoding="utf-8")
 parallel_reference = (ROOT / "references" / "parallel-execution.md").read_text(encoding="utf-8")
-for contract in ("dependency-parallel-v1", "wait-any", "stop-dispatch-drain-running", "write_scopes", "conflict_keys", "parallelism_source=standard|smart-reduced|user-override", "observed_total_slots", "coordinator_slots", "bounded context capsule", "agent_task_name", "并发计划：<N> 个任务（含主任务）", "并行省时估算", "not a controlled serial A/B speedup"):
+for contract in ("dependency-parallel-v1", "wait-any", "stop-dispatch-drain-running", "write_scopes", "conflict_keys", "parallelism_source=standard|smart-reduced|user-override", "observed_total_slots", "coordinator_slots", "dispatch-ticket-v1", "agent_task_name", "result inbox", "并发计划：<N> 个任务（含主任务）", "任务重叠", "编排空档", "controlled speedup claim"):
     if contract not in parallel_reference:
         fail(f"parallel execution reference is missing: {contract}")
 runtime_text = (ROOT / "scripts" / "router_runtime.py").read_text(encoding="utf-8")
 for contract in (
     "def begin", "def finish", "def restore", "def worker_start", "def worker_finish",
-    "canonical_plan", "runtime state cannot be persisted", "_fallback_ledger",
+    "def prepare_dispatch", "def attach", "dispatch-ticket-v1",
+    "canonical_plan", "result_inbox", "continuation_ticket",
+    "runtime state cannot be persisted", "_fallback_ledger",
     "validate_fast_envelope", "segment_claim", "routing_efficiency", "context_capsule",
 ):
     if contract not in runtime_text:
@@ -293,10 +298,10 @@ for key in (
 ):
     if evidence.get("policy", {}).get(key) is not True:
         fail(f"benchmark evidence policy is missing: {key}")
-if evidence.get("policy", {}).get("automatic_lane_count") != 7:
-    fail("benchmark evidence automatic lane count must be seven")
-if len(evidence.get("routing_lanes", {})) != 7:
-    fail("benchmark evidence must expose exactly seven automatic lanes")
+if evidence.get("policy", {}).get("automatic_lane_count") != 8:
+    fail("benchmark evidence automatic lane count must be eight")
+if len(evidence.get("routing_lanes", {})) != 8:
+    fail("benchmark evidence must expose exactly eight automatic lanes")
 if len(evidence.get("sources", [])) < 11:
     fail("benchmark evidence does not contain enough attributable sources")
 if len(evidence.get("effort_profiles", {}).get("metrics", [])) < 18:
@@ -351,9 +356,10 @@ for tier, model in models.items():
             fail(f"incorrect executor preset: {executor_name}")
         if executor.get("sandbox_mode") != "workspace-write":
             fail(f"executor must be workspace-write: {executor_name}")
-        if "ROUTE_PROJECT_MODELS_EXECUTOR=1" not in executor.get("developer_instructions", ""):
-            fail(f"executor recursion guard is missing: {executor_name}")
-        if "route_id and segment_id" not in executor.get("developer_instructions", "") or "do not plan, route, advance" not in executor.get("developer_instructions", ""):
+        instructions = executor.get("developer_instructions", "")
+        if "dispatch-ticket-v1" not in instructions or "ROUTE_PROJECT_MODELS_EXECUTOR=1" not in instructions:
+            fail(f"executor ticket/legacy guard is missing: {executor_name}")
+        if not all(field in instructions for field in ("route_id", "segment_id", "attempt_id")) or "do not plan, route, advance" not in instructions:
             fail(f"executor segment guard is missing: {executor_name}")
         if f"`{executor.get('name')}`" not in preset_mapping:
             fail(f"executor preset mapping is missing: {executor_name}")

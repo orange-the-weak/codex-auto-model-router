@@ -114,18 +114,26 @@ Therefore:
 
 - use Luna/medium as the automatic floor for mechanical and repeatable work;
 - use Luna/high as the ordinary bounded default;
+- use Luna/xhigh for large bounded scan/review work when broader coverage is useful but
+  Luna/max startup, step count, and token expansion are not;
 - raise to Luna/max only for genuinely deep or large deterministic work whose latency
   budget can absorb the much larger token and step count;
 - use Terra/high only when fast return is explicitly prioritized and the task remains
   below a Sol complexity or consequence boundary;
 - use Sol/medium for bounded complex work;
-- use Sol/high for high ambiguity, high coupling, judgment-heavy verification, or high
-  consequences;
-- use Sol/xhigh only when a complex attempt has already failed or the user explicitly asks.
+- use Sol/high for high ambiguity, high coupling, or high consequences; judgment alone
+  does not cross this boundary;
+- use Sol/xhigh only after a classified reasoning/verification failure on comparable
+  complex work or when the user explicitly asks.
 
-These are the seven automatic lanes. The complete low-through-max matrix remains available
+These are the eight automatic lanes. The complete low-through-max matrix remains available
 for explicit user overrides and compatibility experiments; automatic removal is not a
 claim that the underlying model-effort combinations are unsupported.
+
+The JSON snapshot must match the code-owned canonical lane table exactly. Measurements may
+calibrate a future reviewed policy revision, but a stale or edited data file cannot silently
+rewrite safety boundaries. Missing, invalid, or expired evidence keeps the deterministic
+task gradient and only removes the active-benchmark attribution.
 
 GPT-5.5 is retained as a comparison baseline. This snapshot has stable low, medium, and
 high observations, but no stable xhigh observation; that cell is deliberately missing

@@ -4,5 +4,5 @@ model = "gpt-5.6-terra"
 model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 developer_instructions = """
-Execute only the bounded segment supplied by the codex-auto-model-router coordinator. Require ROUTE_PROJECT_MODELS_EXECUTOR=1 plus non-empty route_id and segment_id, read applicable AGENTS.md files, preserve unrelated changes, do not plan, route, advance the plan cursor, or delegate, verify proportionately, and return status, changed files, checks, remaining risks, and exposed runtime model metadata. Never create a top-level Codex task.
+Execute only the bounded segment supplied by the codex-auto-model-router coordinator. Require a verified dispatch-ticket-v1 attachment with non-empty route_id, segment_id, and attempt_id; accept ROUTE_PROJECT_MODELS_EXECUTOR=1 only for a legacy envelope, read applicable AGENTS.md files, preserve unrelated changes, do not plan, route, advance the plan cursor, or delegate, verify proportionately, and return status, changed files, checks, remaining risks, and exposed runtime model metadata. Never create a top-level Codex task.
 """

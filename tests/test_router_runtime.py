@@ -73,6 +73,39 @@ class RouterRuntimeTests(unittest.TestCase):
                 ))
         return json.loads(output.getvalue())
 
+    def prepare_result(self, plan, runtime_total_slots=4, running_workers=0):
+        output = io.StringIO()
+        capacity = {
+            "schema_version": RUNTIME.DISPATCH_CAPACITY_SCHEMA_VERSION,
+            "route_id": plan["route_id"], "plan_hash": plan["plan_hash"],
+            "observation_id": f"observation-{plan['route_id']}",
+            "observation_source": "task-metadata",
+            "capacity_source": "observed-total-slots",
+            "snapshot_scope": "immediate-pre-dispatch",
+            "coordinator_reserved_slots": 1,
+            "runtime_total_slots": runtime_total_slots,
+            "runtime_running_workers": running_workers,
+        }
+        with redirect_stdout(output):
+            RUNTIME.prepare_dispatch(self.args(
+                plan_json=json.dumps(plan), route_id=None,
+                trusted_dispatch_capacity_json=json.dumps(capacity),
+            ))
+        return json.loads(output.getvalue())
+
+    def attach_result(self, ticket, runtime_current):
+        output = io.StringIO()
+        with patch.object(RUNTIME, "_current", return_value=runtime_current):
+            with redirect_stdout(output):
+                RUNTIME.attach(self.args(
+                    route_id=ticket["route_id"],
+                    segment_id=ticket["segment_id"],
+                    attempt_id=ticket["attempt_id"],
+                    ticket_hash=ticket["ticket_hash"],
+                    capability_decision_json=None,
+                ))
+        return json.loads(output.getvalue())
+
     def parallel_plan(self):
         return RUNTIME.policy.plan_parallel_segments(
             [named_segment("one"), named_segment("two")],
@@ -212,6 +245,162 @@ class RouterRuntimeTests(unittest.TestCase):
         self.assertNotIn("segments", result["context_capsule"])
         self.assertFalse(self.ledger.exists())
 
+    def test_prepare_dispatch_batches_ready_work_and_attach_uses_ticket_only(self):
+        plan = RUNTIME.policy.plan_parallel_segments(
+            [named_segment("ios-demand-scan"), named_segment("reddit-demand-scan")],
+            current=current("gpt-5.6-sol", "high"), runtime_total_slots=4,
+        )
+        prepared = self.prepare_result(plan)
+        self.assertEqual(prepared["new_ticket_count"], 2)
+        self.assertEqual(
+            [item["segment_id"] for item in prepared["tickets"]],
+            plan["parallel"]["priority_order"],
+        )
+        ticket = prepared["tickets"][0]
+        self.assertNotIn("plan", ticket)
+        self.assertNotIn("parallelism", ticket)
+        self.assertEqual(ticket["protocol"], RUNTIME.DISPATCH_TICKET_PROTOCOL)
+        attached = self.attach_result(
+            ticket, current(ticket["model"], ticket["effort"])
+        )
+        self.assertEqual(attached["state_gate"], "passed")
+        self.assertEqual(attached["context_capsule"]["goal"], ticket["goal"])
+
+    def test_prepare_dispatch_is_idempotent_and_recovers_outstanding_tickets(self):
+        plan = self.parallel_plan()
+        first = self.prepare_result(plan, runtime_total_slots=3)
+        output = io.StringIO()
+        capacity = {
+            "schema_version": RUNTIME.DISPATCH_CAPACITY_SCHEMA_VERSION,
+            "route_id": plan["route_id"], "plan_hash": plan["plan_hash"],
+            "observation_id": f"observation-{plan['route_id']}",
+            "observation_source": "task-metadata",
+            "capacity_source": "observed-total-slots",
+            "snapshot_scope": "immediate-pre-dispatch",
+            "coordinator_reserved_slots": 1,
+            "runtime_total_slots": 3, "runtime_running_workers": 0,
+        }
+        with redirect_stdout(output):
+            RUNTIME.prepare_dispatch(self.args(
+                plan_json=None, route_id=plan["route_id"],
+                trusted_dispatch_capacity_json=json.dumps(capacity),
+            ))
+        repeated = json.loads(output.getvalue())
+        self.assertEqual(repeated["new_ticket_count"], 0)
+        self.assertEqual(
+            [item["ticket_hash"] for item in repeated["tickets"]],
+            [item["ticket_hash"] for item in first["tickets"]],
+        )
+
+    def test_capacity_observation_is_plan_bound_and_one_use_per_batch(self):
+        plan = RUNTIME.policy.plan_parallel_segments(
+            [
+                named_segment("scan"),
+                dict(named_segment("synthesis"), depends_on=["scan"]),
+            ],
+            current=current("gpt-5.6-sol", "high"), runtime_total_slots=2,
+        )
+        prepared = self.prepare_result(plan, runtime_total_slots=2)
+        ticket = prepared["tickets"][0]
+        with redirect_stdout(io.StringIO()):
+            RUNTIME.worker_start(self.identity_args(plan, ticket["segment_id"]))
+            RUNTIME.worker_finish(self.identity_args(
+                plan, ticket["segment_id"], outcome="completed"
+            ))
+        self.finish_result(self.parallel_result(plan, segment_id=ticket["segment_id"]))
+        reused = {
+            "schema_version": RUNTIME.DISPATCH_CAPACITY_SCHEMA_VERSION,
+            "route_id": plan["route_id"], "plan_hash": plan["plan_hash"],
+            "observation_id": f"observation-{plan['route_id']}",
+            "observation_source": "task-metadata",
+            "capacity_source": "observed-total-slots",
+            "snapshot_scope": "immediate-pre-dispatch",
+            "coordinator_reserved_slots": 1,
+            "runtime_total_slots": 2, "runtime_running_workers": 0,
+        }
+        output = io.StringIO()
+        with redirect_stdout(output):
+            RUNTIME.prepare_dispatch(self.args(
+                plan_json=None, route_id=plan["route_id"],
+                trusted_dispatch_capacity_json=json.dumps(reused),
+            ))
+        recovered = json.loads(output.getvalue())
+        self.assertEqual(recovered["new_ticket_count"], 0)
+        self.assertEqual(
+            recovered["tickets"][0]["segment_id"], "synthesis"
+        )
+        wrong = dict(reused, observation_id="fresh", plan_hash="wrong")
+        with self.assertRaisesRegex(SystemExit, "plan_hash mismatch"):
+            RUNTIME.prepare_dispatch(self.args(
+                plan_json=None, route_id=plan["route_id"],
+                trusted_dispatch_capacity_json=json.dumps(wrong),
+            ))
+
+    def test_last_dependency_finish_persists_handoff_and_prepares_synthesis(self):
+        plan = RUNTIME.policy.plan_parallel_segments(
+            [
+                dict(named_segment("market-scan"), work_estimate="normal"),
+                dict(
+                    named_segment("final-synthesis"),
+                    depends_on=["market-scan"], work_estimate="normal",
+                ),
+            ],
+            current=current("gpt-5.6-sol", "high"), runtime_total_slots=2,
+        )
+        first = self.prepare_result(plan, runtime_total_slots=2)["tickets"][0]
+        with redirect_stdout(io.StringIO()):
+            RUNTIME.worker_start(self.identity_args(plan, first["segment_id"]))
+            RUNTIME.worker_finish(self.identity_args(
+                plan, first["segment_id"], outcome="completed"
+            ))
+        result = self.parallel_result(plan, segment_id=first["segment_id"])
+        result["handoff"] = {
+            "summary": "Three demand signals found",
+            "artifacts": ["/tmp/router-market-scan.json"],
+        }
+        finished = self.finish_result(result)
+        ticket = finished["continuation_ticket"]
+        self.assertEqual(finished["continuation_source"], "completed-worker-slot")
+        self.assertEqual(ticket["segment_id"], "final-synthesis")
+        attached = self.attach_result(
+            ticket, current(ticket["model"], ticket["effort"])
+        )
+        self.assertEqual(attached["dependency_results"], [{
+            "segment_id": "market-scan",
+            "outcome": "completed",
+            "handoff": result["handoff"],
+            "handoff_hash": finished["result_inbox"]["handoff_hash"],
+        }])
+        repeated = self.finish_result(result)
+        self.assertTrue(repeated["finish_recovered"])
+        self.assertEqual(
+            repeated["continuation_ticket"]["ticket_hash"], ticket["ticket_hash"]
+        )
+
+    def test_attach_rejects_wrong_ticket_identity_without_full_plan(self):
+        plan = self.parallel_plan()
+        ticket = self.prepare_result(plan, runtime_total_slots=3)["tickets"][0]
+        with self.assertRaisesRegex(SystemExit, "ticket identity mismatch"):
+            RUNTIME.attach(self.args(
+                route_id=ticket["route_id"], segment_id=ticket["segment_id"],
+                attempt_id=ticket["attempt_id"], ticket_hash="0" * 64,
+                capability_decision_json=None,
+            ))
+
+    def test_attach_rejects_prepared_but_unstarted_ticket_after_latch(self):
+        plan = self.parallel_plan()
+        tickets = self.prepare_result(plan, runtime_total_slots=3)["tickets"]
+        first, second = tickets
+        with redirect_stdout(io.StringIO()):
+            RUNTIME.worker_start(self.identity_args(plan, first["segment_id"]))
+            RUNTIME.worker_finish(self.identity_args(
+                plan, first["segment_id"], outcome="failed"
+            ))
+        with self.assertRaisesRegex(SystemExit, "failure latch"):
+            self.attach_result(
+                second, current(second["model"], second["effort"])
+            )
+
     def test_fast_switch_claims_once_and_blocks_replay(self):
         plan = RUNTIME.policy.plan_apply_segments(
             [segment()], current=current("gpt-5.6-sol", "high")
@@ -285,6 +474,39 @@ class RouterRuntimeTests(unittest.TestCase):
         repeated = self.finish_result(minimal)
         self.assertTrue(repeated["finish_recovered"])
         self.assertFalse(repeated["execution_recorded"])
+
+    def test_repeated_finish_rejects_same_outcome_with_changed_payload(self):
+        plan = RUNTIME.policy.plan_apply_segments(
+            [segment()], current=current("gpt-5.6-sol", "medium")
+        )
+        selected = plan["segments"][0]
+        self.begin_result(
+            self.envelope(plan), current(selected["model"], selected["effort"])
+        )
+        result = {
+            "route_id": plan["route_id"], "segment_id": "docs",
+            "attempt_id": selected["attempt_id"], "outcome": "completed",
+            "source": "user-confirmed", "actual_model": selected["model"],
+            "actual_effort": selected["effort"], "verification": "deterministic",
+        }
+        self.finish_result(result)
+        changed = dict(result, verification="manual")
+        with self.assertRaisesRegex(SystemExit, "finish payload conflicts"):
+            RUNTIME.finish(self.args(result_json=json.dumps(changed)))
+
+    def test_state_write_merges_route_collections_from_stale_readers(self):
+        plan = self.parallel_plan()
+        self.prepare_result(plan, runtime_total_slots=3)
+        state, path = RUNTIME._locate_state(self.args(), plan["route_id"])
+        left = json.loads(json.dumps(state))
+        right = json.loads(json.dumps(state))
+        left.setdefault("segment_results", {})["one"] = {"outcome": "completed"}
+        RUNTIME._write_state_at(path, left)
+        right.setdefault("finishes", {})["two"] = {"outcome": "completed"}
+        RUNTIME._write_state_at(path, right)
+        merged, _ = RUNTIME._locate_state(self.args(), plan["route_id"])
+        self.assertIn("one", merged["segment_results"])
+        self.assertIn("two", merged["finishes"])
 
     def test_compacted_next_begin_hydrates_plan_and_cursor_from_state(self):
         first = named_segment("inspect")
@@ -395,6 +617,8 @@ class RouterRuntimeTests(unittest.TestCase):
             Path(state["effective_ledger"])
         )
         self.assertEqual(warnings, [])
+        self.assertIn("route_contract", [item["event"] for item in events])
+        self.assertIn("segment_claim", [item["event"] for item in events])
         self.assertIn(
             "parallel_worker_start", [item["event"] for item in events]
         )
@@ -722,7 +946,7 @@ class RouterRuntimeTests(unittest.TestCase):
         self.assertEqual(finished["parallel_execution_state"], "recorded")
         self.assertEqual(
             finished["parallel_execution_brief"],
-            "并发：峰值 3（含主任务）｜实际用时：13秒｜并行任务累计用时：20秒｜并行省时估算：38%｜槽位利用：87%",
+            "并发：峰值 3（含主任务）｜实际用时：13秒｜子任务累计：20秒｜任务重叠：8秒｜编排空档：0秒",
         )
         events, warnings = RUNTIME.ledger.read_events(self.ledger)
         self.assertEqual(warnings, [])

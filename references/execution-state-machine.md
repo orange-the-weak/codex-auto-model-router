@@ -16,7 +16,7 @@ Assess and Retune skip `PLAN`, `NORMALIZE`, and `ADVANCE`. Query and Record use 
 - Apply has one normalized plan: one Segment uses `apply-fast-v1`, multiple sequential Segments use `segmented-v1`, and independent work may use `dependency-parallel-v1`.
 - Each segment has one stable `segment_id`, one selected route, one goal, immutable predecessors, and one verification budget.
 - `apply-fast-v1` has no cursor. A local matched Segment skips the replay claim; a switched/continued Segment keeps an atomic claim. Multi-Segment cursors advance only after success.
-- Adjacent segments with the same model and effort are merged before execution.
+- Adjacent segments merge only with an explicit shared `merge_group` and identical route source and task evidence; equal routes alone preserve their boundaries without another switch.
 - Every new Apply request and every candidate Segment is routed from its own evidence. A previous request or Segment route never biases selection in either direction: simple work can move down, and complex work can move up.
 - Automatic routed efforts are `low|medium|high|xhigh|max`. `ultra` is disabled by default. It is legal only as an explicit user opt-in for one bounded `apply-fast-v1` Segment; that native Codex mode combines maximum reasoning with proactive delegation, so `dependency-parallel-v1` must be disabled for the request.
 - The bundled benchmark snapshot is an offline, stale-aware prior. Its audit metadata is immutable in new plans and covered by `plan_hash`; legacy envelopes without that field remain valid. Missing, invalid, or expired evidence falls back without a network request.
@@ -49,7 +49,7 @@ Normalize in this order:
 1. Validate IDs, required fields, linear dependencies, task-evidence enums (including optional `latency_priority=low|normal|high`), and overrides. Reject automatic Ultra, Luna/ultra, multi-Segment Ultra, and every Ultra plus Router-parallel combination.
 2. Choose the lowest sufficient GPT-5.6 model and effort for every candidate.
 3. Compare each independently selected route with the current execution route only to choose local execution or a switch.
-4. Merge adjacent segments with the same route.
+4. Merge only when adjacent Segments share an explicit semantic `merge_group`, route source, and complete task evidence. Equal routes alone remain separate without adding a switch.
 5. Rebuild indexes and linear dependencies.
 6. Record the evidence snapshot status and ID, then select the immutable budget: standard 4/4; adaptive 6/6 only with a concrete complex or large basis; or a user override from 1 to 8. Reject any over-budget plan.
 
@@ -59,7 +59,7 @@ For `dependency-parallel-v1`, require an explicit content-based `segment_id` for
 
 ## Transitions
 
-Use `scripts/router_runtime.py begin` before project work, `finish` after it, and `restore` only in the restored terminal turn. `begin` validates the immutable envelope and actual route, persists canonical state, and then prepares a claim. `finish` accepts the three IDs plus bounded result metadata, loads the persisted plan, and derives the next state. `restore` reads the persisted original route and result; it never receives or recomputes `plan_hash`. All three are idempotent at their legal boundary.
+Use `scripts/router_runtime.py begin` before serial project work, `finish` after it, and `restore` only in the restored terminal turn. For parallel work, the Coordinator calls `prepare-dispatch` once with the canonical plan and thereafter by `route_id`; each executor calls `attach` with its IDs and hash-bound ticket before project tools. `finish` loads the persisted plan and derives the next state. `restore` reads the persisted original route and result; it never receives or recomputes `plan_hash`. All gates are idempotent at their legal boundary.
 
 | State | Success | Failure |
 |---|---|---|
@@ -102,7 +102,7 @@ The prompt order is part of the user-visible contract:
 
 Never put mode flags, IDs, hashes, paths, JSON, or the full plan before the readable block. Restore uses `任务已完成，正在恢复原模型并返回结果。` before its hidden internal block.
 
-The coordinator retains the complete immutable plan and conversation context. Each parallel task receives only its context capsule: goal, necessary prior decisions, dependencies, selected route, access/write scopes, conflict keys, acceptance, validation budget, prohibited actions, and immutable IDs/hashes. `agent_task_name` is the content-based semantic `segment_id` normalized to Codex's `[a-z0-9_]+` task-name grammar (for example, `runtime-ledger-audit` becomes `runtime_ledger_audit`). The Router never invents a random or ordinal name. The receiver validates the capsule against coordinator state and atomically claims `route_id + plan_hash + segment_id + attempt_id` only when the execution can replay. Any mismatch, repeated claim, or latched route failure is terminal.
+The coordinator retains the complete immutable plan and conversation context. `prepare-dispatch` persists it and returns `dispatch-ticket-v1` capsules containing only the goal, necessary decisions, dependencies, selected route, access/write scopes, conflict keys, acceptance, validation budget, prohibited actions, and immutable IDs/hash. No worker receives a duplicate plan or outer concurrency object. `agent_task_name` is the content-based semantic `segment_id` normalized to Codex's `[a-z0-9_]+` grammar. `attach` validates the ticket against persisted state. Any identity/hash mismatch or latched route failure is terminal.
 
 ## Same-task chain
 
@@ -122,9 +122,9 @@ On failure, do not increment the cursor. Mark remaining segments skipped, Restor
 When persistent same-task switching is unavailable or unsafe:
 
 1. Read the capability surface's supported-model list. Unknown availability requires trying the target GPT-5.6 route first.
-2. If the target is unavailable, resolve within the family: Sol → Terra → Luna, Terra → Sol → Luna, Luna → Terra → Sol. Preserve effort.
+2. If the target is unavailable, resolve within GPT-5.6 using the target lane's quality/latency intent; do not blindly preserve effort when that would reverse the reason for the route.
 3. Use a GPT-5.6 executor preset only if the subagent interface explicitly proves the selected model/preset.
-4. Give the executor only one segment with `ROUTE_PROJECT_MODELS_EXECUTOR=1`, `route_id`, and `segment_id`; let the Coordinator validate the result and advance the cursor.
+4. Give the executor one hash-bound ticket and require ID-only `attach`. `ROUTE_PROJECT_MODELS_EXECUTOR=1` is a legacy prompt marker, not a shell-environment authorization check.
 5. Execute locally only if the current model is GPT-5.6, or the capability check proves no GPT-5.6 route exists.
 6. Use GPT-5.5 only after all GPT-5.6 options are proven unavailable. Record and disclose `gpt56-family-unavailable` once.
 

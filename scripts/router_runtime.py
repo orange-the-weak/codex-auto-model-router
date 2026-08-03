@@ -22,6 +22,9 @@ import route_policy as policy  # noqa: E402
 
 RUNTIME_STATE_SCHEMA_VERSION = 1
 RUNTIME_STATE_DIR = "codex-auto-model-router-runtime-v1"
+DISPATCH_TICKET_SCHEMA_VERSION = 1
+DISPATCH_TICKET_PROTOCOL = "dispatch-ticket-v1"
+DISPATCH_CAPACITY_SCHEMA_VERSION = 2
 
 
 def _load(value, label):
@@ -136,6 +139,27 @@ def _write_state_at(path, state):
             existing = _read_state_file(path)
             if existing is not None and existing.get("route_id") != state.get("route_id"):
                 raise ValueError("runtime state route_id mismatch")
+            if existing is not None:
+                if existing.get("plan_hash") != state.get("plan_hash"):
+                    raise ValueError("runtime state plan_hash mismatch")
+                # Coordinator and result callbacks may touch different route
+                # collections close together. Merge append-only maps instead
+                # of letting a stale whole-object write erase another update.
+                for field in (
+                    "claims", "dispatch_tickets", "capacity_observations",
+                    "segment_results", "result_inbox", "finishes",
+                ):
+                    combined = dict(existing.get(field, {}))
+                    combined.update(state.get(field, {}))
+                    state[field] = combined
+                state["warnings"] = list(dict.fromkeys(
+                    existing.get("warnings", []) + state.get("warnings", [])
+                ))
+                if existing.get("restore") is not None and state.get("restore") is None:
+                    state["restore"] = existing["restore"]
+                if existing.get("ledger_fallback"):
+                    state["ledger_fallback"] = True
+                    state["effective_ledger"] = existing["effective_ledger"]
             state["revision"] = max(
                 int(state.get("revision", 0)),
                 int((existing or {}).get("revision", 0)),
@@ -186,6 +210,7 @@ def _new_runtime_state(plan, segment, primary_ledger):
         "ledger_fallback": False,
         "claim": None,
         "segment_results": {},
+        "result_inbox": {},
         "finishes": {},
         "restore": None,
         "warnings": [],
@@ -241,6 +266,15 @@ def _effective_ledger(state):
 
 def _switch_to_fallback_ledger(args, state, state_path, reason):
     fallback = _fallback_ledger(args, state["route_id"])
+    previous = Path(state.get("effective_ledger", args.ledger))
+    if previous != fallback:
+        try:
+            existing, _ = ledger.read_events(previous)
+        except OSError:
+            existing = []
+        for event in existing:
+            if event.get("route_id") == state["route_id"]:
+                ledger.append_event(fallback, dict(event))
     state["effective_ledger"] = str(fallback.resolve())
     state["ledger_fallback"] = True
     warning = f"project ledger unavailable; using isolated temporary ledger ({reason})"
@@ -458,6 +492,96 @@ def _decision_identity(plan, segment):
     }
 
 
+def _segment_for_identity(plan, segment_id):
+    return next(
+        (item for item in plan.get("segments", []) if item.get("segment_id") == segment_id),
+        None,
+    )
+
+
+def _ticket_body(plan, segment):
+    body = policy.context_capsule(plan, segment["segment_id"])
+    body["plan_protocol"] = body.pop("protocol")
+    body["schema_version"] = DISPATCH_TICKET_SCHEMA_VERSION
+    body["protocol"] = DISPATCH_TICKET_PROTOCOL
+    return body
+
+
+def _dispatch_ticket(plan, segment):
+    ticket = _ticket_body(plan, segment)
+    ticket["ticket_hash"] = hashlib.sha256(
+        _canonical_json(ticket).encode("utf-8")
+    ).hexdigest()
+    return ticket
+
+
+def _validate_ticket(ticket):
+    if not isinstance(ticket, dict):
+        raise ValueError("dispatch ticket is missing")
+    supplied = ticket.get("ticket_hash")
+    body = {key: value for key, value in ticket.items() if key != "ticket_hash"}
+    expected = hashlib.sha256(_canonical_json(body).encode("utf-8")).hexdigest()
+    if supplied != expected:
+        raise ValueError("dispatch ticket hash mismatch")
+    if (
+        body.get("schema_version") != DISPATCH_TICKET_SCHEMA_VERSION
+        or body.get("protocol") != DISPATCH_TICKET_PROTOCOL
+    ):
+        raise ValueError("unsupported dispatch ticket")
+    return ticket
+
+
+def _validate_canonical_parallel_plan(plan):
+    if not isinstance(plan, dict) or plan.get("protocol") != policy.PARALLEL_PROTOCOL:
+        raise ValueError("prepare-dispatch requires a dependency-parallel-v1 plan")
+    expected_hash = policy.plan_hash(
+        plan.get("segments"), plan.get("route_id"), plan.get("original"),
+        plan.get("restore_required"), plan.get("segment_budget"),
+        plan.get("switch_budget"), plan.get("budget_source"),
+        plan.get("routing_evidence"), policy.PARALLEL_PROTOCOL,
+        plan.get("parallel"),
+    )
+    if plan.get("plan_hash") != expected_hash:
+        raise ValueError("parallel plan hash mismatch")
+    policy._validate_parallel_segment_schema(
+        plan.get("segments"),
+        require_semantic_id=(
+            plan.get("parallel", {}).get("contract_version")
+            == policy.PARALLEL_CONTRACT_VERSION
+        ),
+    )
+    for segment in plan["segments"]:
+        expected_attempt = hashlib.sha256(
+            f"{plan['route_id']}:{expected_hash}:{segment['segment_id']}".encode("utf-8")
+        ).hexdigest()
+        if segment.get("attempt_id") != expected_attempt:
+            raise ValueError("parallel attempt_id mismatch")
+        policy.validate_context_capsule(
+            plan, policy.context_capsule(plan, segment["segment_id"])
+        )
+    return plan
+
+
+def _dispatch_capacity_observation(plan, value):
+    if value is None:
+        return None, None
+    if value.get("schema_version") != DISPATCH_CAPACITY_SCHEMA_VERSION:
+        raise ValueError("prepare-dispatch requires capacity observation schema_version=2")
+    if value.get("route_id") != plan["route_id"]:
+        raise ValueError("dispatch capacity route_id mismatch")
+    if value.get("plan_hash") != plan["plan_hash"]:
+        raise ValueError("dispatch capacity plan_hash mismatch")
+    observation_id = value.get("observation_id")
+    if not isinstance(observation_id, str) or not observation_id:
+        raise ValueError("dispatch capacity requires observation_id")
+    policy_value = {
+        key: item for key, item in value.items()
+        if key not in ("route_id", "plan_hash", "observation_id")
+    }
+    policy_value["schema_version"] = 1
+    return policy_value, observation_id
+
+
 def _normalized_runtime_route(model, effort):
     normalized_model = policy.normalize_available_model(model)
     normalized_effort = str(effort or "").strip().lower()
@@ -534,6 +658,323 @@ def _begin_runtime_route(envelope, plan, segment, current):
             f"{expected[0]}/{expected[1]}; use an explicit model-selectable executor/switch"
         )
     return decision
+
+
+def _bind_parallel_contract(args, state, state_path, plan):
+    """Bind the immutable plan once and choose one ledger for the whole route."""
+    effective_ledger = _effective_ledger(state)
+    event = {
+        "event": "route_contract", "route_id": plan["route_id"],
+        "plan_hash": plan["plan_hash"], "protocol": plan["protocol"],
+        "contract_version": plan.get("parallel", {}).get("contract_version"),
+        "source": ledger.ROUTE_CONTRACT_SOURCE,
+    }
+    try:
+        ledger.bind_route_contract(effective_ledger, event)
+    except OSError as exc:
+        effective_ledger = _switch_to_fallback_ledger(
+            args, state, state_path, type(exc).__name__
+        )
+        ledger.bind_route_contract(effective_ledger, event)
+    return effective_ledger
+
+
+def _claim_parallel_ticket(args, state, state_path, plan, segment, effective_ledger):
+    claim = {
+        "event": "segment_claim", "route_id": plan["route_id"],
+        "segment_id": segment["segment_id"],
+        "attempt_id": segment["attempt_id"], "plan_hash": plan["plan_hash"],
+        "claim_state": "prepared", "dispatch_reservation_required": True,
+    }
+    reservation = {
+        "event": "parallel_dispatch_reservation",
+        "route_id": plan["route_id"], "plan_hash": plan["plan_hash"],
+        "segment_id": segment["segment_id"],
+        "attempt_id": segment["attempt_id"],
+        "reservation_id": hashlib.sha256(
+            f"{plan['route_id']}:{plan['plan_hash']}:{segment['segment_id']}:"
+            f"{segment['attempt_id']}:dispatch".encode("utf-8")
+        ).hexdigest(),
+        "capture_source": "router-runtime",
+    }
+    try:
+        claim_state = ledger.prepare_segment_claim(
+            effective_ledger, claim, allow_prepared_recovery=True,
+            reservation_event=reservation,
+        )
+    except OSError as exc:
+        effective_ledger = _switch_to_fallback_ledger(
+            args, state, state_path, type(exc).__name__
+        )
+        ledger.bind_route_contract(effective_ledger, {
+            "event": "route_contract", "route_id": plan["route_id"],
+            "plan_hash": plan["plan_hash"], "protocol": plan["protocol"],
+            "contract_version": plan.get("parallel", {}).get("contract_version"),
+            "source": ledger.ROUTE_CONTRACT_SOURCE,
+        })
+        claim_state = ledger.prepare_segment_claim(
+            effective_ledger, claim, allow_prepared_recovery=True,
+            reservation_event=reservation,
+        )
+    if claim_state not in ("prepared", "recovered"):
+        raise ValueError(f"segment claim is {claim_state}")
+    return claim_state, effective_ledger
+
+
+def _parallel_dispatch_state(plan, events, tickets):
+    terminal = _terminal_results(plan, events)
+    starts, finishes = _worker_events(events)
+    completed = [
+        identifier for identifier in plan["parallel"]["aggregation_order"]
+        if terminal.get(identifier, {}).get("outcome") == "completed"
+    ]
+    running = [
+        identifier for identifier in plan["parallel"]["priority_order"]
+        if identifier in starts and identifier not in finishes
+    ]
+    prepared = [
+        identifier for identifier in plan["parallel"]["priority_order"]
+        if identifier in tickets and identifier not in terminal
+        and identifier not in finishes and identifier not in running
+    ]
+    return completed, running, prepared
+
+
+def _bounded_result_handoff(result):
+    """Keep a small structured handoff in runtime state for dependent tasks."""
+    handoff = result.get("handoff")
+    if handoff is None:
+        handoff = {}
+    if not isinstance(handoff, dict):
+        raise ValueError("finish handoff must be an object")
+    encoded = _canonical_json(handoff).encode("utf-8")
+    if len(encoded) > 64 * 1024:
+        raise ValueError("finish handoff exceeds the 64 KiB bound")
+    return json.loads(encoded.decode("utf-8"))
+
+
+def _dependency_results(state, segment):
+    inbox = state.get("result_inbox", {})
+    results = []
+    for identifier in segment.get("depends_on", []):
+        item = inbox.get(identifier)
+        if not isinstance(item, dict):
+            raise ValueError(f"dependency result is missing: {identifier}")
+        results.append({
+            "segment_id": identifier,
+            "outcome": item.get("outcome"),
+            "handoff": item.get("handoff", {}),
+            "handoff_hash": item.get("handoff_hash"),
+        })
+    return results
+
+
+def _prepare_reclaimed_slot_ticket(
+    args, state, state_path, plan, effective_ledger, events,
+):
+    """Issue one ready continuation using the slot released by this result."""
+    stored_tickets = state.setdefault("dispatch_tickets", {})
+    completed, running, prepared = _parallel_dispatch_state(
+        plan, events, stored_tickets
+    )
+    occupied = list(dict.fromkeys(running + prepared))
+    if len(occupied) >= plan["parallel"]["effective_max_parallelism"]:
+        return None, effective_ledger
+    ready = [
+        identifier for identifier in plan["parallel"]["priority_order"]
+        if identifier not in completed and identifier not in occupied
+        and identifier not in stored_tickets
+        and all(
+            dependency in completed
+            for dependency in _segment_for_identity(plan, identifier)["depends_on"]
+        )
+    ]
+    if not ready:
+        return None, effective_ledger
+    segment = _segment_for_identity(plan, ready[0])
+    _, effective_ledger = _claim_parallel_ticket(
+        args, state, state_path, plan, segment, effective_ledger
+    )
+    ticket = _dispatch_ticket(plan, segment)
+    stored_tickets[segment["segment_id"]] = ticket
+    return ticket, effective_ledger
+
+
+def prepare_dispatch(args):
+    """Persist one canonical plan and issue a bounded batch of lightweight tickets."""
+    try:
+        if args.plan_json:
+            plan = _validate_canonical_parallel_plan(_load(args.plan_json, "plan"))
+            route_id = plan["route_id"]
+            first = _segment_for_identity(
+                plan, plan["parallel"]["priority_order"][0]
+            )
+            state, state_path = _bind_or_verify_state(args, plan, first)
+        else:
+            route_id = args.route_id
+            state, state_path = _locate_state(args, route_id)
+            if state is None:
+                raise ValueError("prepare-dispatch requires a persisted route state")
+            plan = _validate_canonical_parallel_plan(state["canonical_plan"])
+        if args.route_id and args.route_id != route_id:
+            raise ValueError("prepare-dispatch route_id mismatch")
+        raw_capacity = (
+            _load(args.trusted_dispatch_capacity_json, "trusted dispatch capacity")
+            if args.trusted_dispatch_capacity_json else None
+        )
+        capacity, observation_id = _dispatch_capacity_observation(plan, raw_capacity)
+        effective_ledger = _bind_parallel_contract(args, state, state_path, plan)
+        events, event_warnings = _route_events_safe(effective_ledger, route_id)
+        if any(
+            item.get("event") == "parallel_stop_latch"
+            and item.get("plan_hash", plan["plan_hash"]) == plan["plan_hash"]
+            for item in events
+        ):
+            raise ValueError("parallel route dispatch stopped by failure latch")
+        stored_tickets = state.setdefault("dispatch_tickets", {})
+        capacity_observations = state.setdefault("capacity_observations", {})
+        observation_reused = observation_id in capacity_observations if observation_id else False
+        completed, running, prepared = _parallel_dispatch_state(
+            plan, events, stored_tickets
+        )
+        occupied = list(dict.fromkeys(running + prepared))
+        returned = [stored_tickets[item] for item in prepared]
+        base_running = (
+            capacity.get("runtime_running_workers", 0)
+            if isinstance(capacity, dict) else 0
+        )
+        newly_issued = []
+        while len(occupied) < plan["parallel"]["effective_max_parallelism"]:
+            ready = [
+                identifier for identifier in plan["parallel"]["priority_order"]
+                if identifier not in completed and identifier not in occupied
+                and identifier not in stored_tickets
+                and all(
+                    dependency in completed
+                    for dependency in _segment_for_identity(plan, identifier)["depends_on"]
+                )
+            ]
+            if not ready:
+                break
+            if observation_reused:
+                raise ValueError("dispatch capacity observation was already consumed")
+            identifier = ready[0]
+            segment = _segment_for_identity(plan, identifier)
+            derived_capacity = None
+            if capacity is not None:
+                derived_capacity = dict(capacity)
+                derived_capacity["runtime_running_workers"] = (
+                    base_running + len(prepared) + len(newly_issued)
+                )
+            policy.validate_parallel_envelope(
+                plan, identifier, completed, occupied, route_id,
+                segment["attempt_id"], dispatch_capacity=derived_capacity,
+                agent_task_name=policy.context_capsule(plan, identifier)["agent_task_name"],
+                trusted_plan_hash=plan["plan_hash"],
+                trusted_contract_version=plan["parallel"].get("contract_version"),
+                dispatch_capacity_trusted=capacity is not None,
+            )
+            _, effective_ledger = _claim_parallel_ticket(
+                args, state, state_path, plan, segment, effective_ledger
+            )
+            ticket = _dispatch_ticket(plan, segment)
+            stored_tickets[identifier] = ticket
+            newly_issued.append(ticket)
+            returned.append(ticket)
+            occupied.append(identifier)
+            if capacity is None:
+                break
+        state["effective_ledger"] = str(effective_ledger.resolve())
+        if observation_id and newly_issued:
+            capacity_observations[observation_id] = {
+                "ticket_hashes": [item["ticket_hash"] for item in newly_issued],
+                "capacity_hash": hashlib.sha256(
+                    _canonical_json(raw_capacity).encode("utf-8")
+                ).hexdigest(),
+            }
+        _write_state_at(state_path, state)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"dispatch preparation stopped: {exc}") from exc
+    print(json.dumps({
+        "ok": True, "protocol": DISPATCH_TICKET_PROTOCOL,
+        "route_id": route_id, "plan_hash": plan["plan_hash"],
+        "tickets": returned, "new_ticket_count": len(newly_issued),
+        "outstanding_ticket_count": len(returned),
+        "completed_ids": completed, "occupied_ids": occupied,
+        "effective_ledger": str(effective_ledger),
+        "ledger_fallback": state.get("ledger_fallback", False),
+        "warnings": state.get("warnings", []) + event_warnings,
+    }, ensure_ascii=False, sort_keys=True))
+
+
+def attach(args):
+    """Validate one persisted dispatch ticket without reconstructing the plan."""
+    try:
+        state, _ = _locate_state(args, args.route_id)
+        if state is None:
+            raise ValueError("dispatch ticket state is missing")
+        plan = _validate_state_identity(
+            state, args.route_id, args.segment_id, args.attempt_id
+        )
+        segment = _segment_for_identity(plan, args.segment_id)
+        ticket = _validate_ticket(
+            state.get("dispatch_tickets", {}).get(args.segment_id)
+        )
+        if ticket.get("ticket_hash") != args.ticket_hash:
+            raise ValueError("dispatch ticket identity mismatch")
+        if any(
+            ticket.get(field) != expected
+            for field, expected in {
+                "route_id": args.route_id, "plan_hash": plan["plan_hash"],
+                "segment_id": args.segment_id, "attempt_id": args.attempt_id,
+            }.items()
+        ):
+            raise ValueError("dispatch ticket content identity mismatch")
+        decision = (
+            _load(args.capability_decision_json, "capability decision")
+            if args.capability_decision_json else None
+        )
+        current = _current(args)
+        _begin_runtime_route(
+            {"capability_decision": decision}, plan, segment, current
+        )
+        effective_ledger = _effective_ledger(state)
+        events, event_warnings = _route_events_safe(effective_ledger, args.route_id)
+        if not any(
+            item.get("event") == "segment_claim"
+            and item.get("plan_hash") == plan["plan_hash"]
+            and item.get("segment_id") == args.segment_id
+            and item.get("attempt_id") == args.attempt_id
+            for item in events
+        ):
+            raise ValueError("dispatch ticket has no persisted claim")
+        started = any(
+            item.get("event") == "parallel_worker_start"
+            and item.get("plan_hash") == plan["plan_hash"]
+            and item.get("segment_id") == args.segment_id
+            and item.get("attempt_id") == args.attempt_id
+            for item in events
+        )
+        if any(
+            item.get("event") == "parallel_stop_latch"
+            and item.get("plan_hash", plan["plan_hash"]) == plan["plan_hash"]
+            for item in events
+        ) and not started:
+            raise ValueError("parallel route dispatch stopped by failure latch")
+        dependency_results = _dependency_results(state, segment)
+    except ValueError as exc:
+        raise SystemExit(f"executor attachment stopped: {exc}") from exc
+    print(json.dumps({
+        "ok": True, "state_gate": "passed", "protocol": DISPATCH_TICKET_PROTOCOL,
+        "route_id": args.route_id, "plan_hash": plan["plan_hash"],
+        "segment_id": args.segment_id, "attempt_id": args.attempt_id,
+        "current": current, "context_capsule": policy.context_capsule(
+            plan, args.segment_id
+        ),
+        "dependency_results": dependency_results,
+        "ledger_fallback": state.get("ledger_fallback", False),
+        "warnings": state.get("warnings", []) + event_warnings,
+    }, ensure_ascii=False, sort_keys=True))
 
 
 def begin(args):
@@ -1199,16 +1640,6 @@ def _execution_event(plan, segment, result, current, identity, events, outcome):
     return event, runtime_metadata
 
 
-def _segment_for_identity(plan, segment_id):
-    return next(
-        (
-            item for item in plan.get("segments", [])
-            if item.get("segment_id") == segment_id
-        ),
-        None,
-    )
-
-
 def _finish_identity(result, supplied_plan):
     route_id = result.get("route_id")
     segment_id = result.get("segment_id")
@@ -1304,11 +1735,21 @@ def finish(args):
     result["segment_id"] = segment_id
     result["attempt_id"] = attempt_id
     result["plan_hash"] = plan["plan_hash"]
+    finish_payload_hash = hashlib.sha256(_canonical_json({
+        key: value for key, value in result.items() if key != "plan"
+    }).encode("utf-8")).hexdigest()
     finishes = state.setdefault("finishes", {})
     recorded_finish = finishes.get(segment_id)
     if recorded_finish is not None:
         if recorded_finish.get("outcome") != result.get("outcome"):
             raise SystemExit("finish state gate stopped: finish outcome conflicts with persisted result")
+        if (
+            recorded_finish.get("payload_hash") is not None
+            and recorded_finish.get("payload_hash") != finish_payload_hash
+        ):
+            raise SystemExit(
+                "finish state gate stopped: finish payload conflicts with persisted result"
+            )
         response = dict(recorded_finish["response"])
         response.update({
             "execution_recorded": False,
@@ -1424,12 +1865,44 @@ def finish(args):
         "outcome": outcome,
         "event": stored_result_event,
     }
+    try:
+        handoff = _bounded_result_handoff(result)
+    except ValueError as exc:
+        handoff = {}
+        ledger_warnings.append(
+            f"bounded dependency handoff was omitted after completion: {exc}"
+        )
+    handoff_hash = hashlib.sha256(
+        _canonical_json(handoff).encode("utf-8")
+    ).hexdigest()
+    state.setdefault("result_inbox", {})[segment_id] = {
+        "attempt_id": attempt_id,
+        "outcome": outcome,
+        "handoff": handoff,
+        "handoff_hash": handoff_hash,
+    }
     events, post_warnings = _route_events_safe(effective_ledger, plan["route_id"])
     events.extend(
         item for item in _state_result_events(state)
         if item.get("event_id") not in {event.get("event_id") for event in events}
     )
     next_state = _next_action(plan, current, events)
+    continuation_ticket = None
+    if (
+        plan.get("protocol") == policy.PARALLEL_PROTOCOL
+        and outcome == "completed"
+        and next_state.get("action") == "refill-frontier"
+    ):
+        try:
+            continuation_ticket, effective_ledger = _prepare_reclaimed_slot_ticket(
+                args, state, state_path, plan, effective_ledger, events
+            )
+            state["effective_ledger"] = str(effective_ledger.resolve())
+        except (OSError, ValueError) as exc:
+            ledger_warnings.append(
+                "ready continuation ticket was not prepared after completion: "
+                f"{type(exc).__name__}"
+            )
     response = {
         "ok": outcome == "completed",
         "execution_recorded": execution_recorded,
@@ -1442,6 +1915,15 @@ def finish(args):
         "runtime_state_recovered_from_legacy_plan": legacy_recovered,
         "warnings": state.get("warnings", []) + ledger_warnings + post_warnings,
         "next": next_state,
+        "result_inbox": {
+            "stored": True,
+            "segment_id": segment_id,
+            "handoff_hash": handoff_hash,
+        },
+        "continuation_ticket": continuation_ticket,
+        "continuation_source": (
+            "completed-worker-slot" if continuation_ticket is not None else None
+        ),
     }
     try:
         runtime_args = SimpleNamespace(**vars(args))
@@ -1460,6 +1942,7 @@ def finish(args):
         response.update(parallel_finalization)
     finishes[segment_id] = {
         "outcome": outcome,
+        "payload_hash": finish_payload_hash,
         "response": response,
     }
     if next_state.get("action") == "restore":
@@ -1644,6 +2127,20 @@ def parser():
     starter.add_argument("--envelope-json", required=True)
     starter.add_argument("--trusted-dispatch-capacity-json")
     starter.set_defaults(func=begin)
+    preparer = commands.add_parser("prepare-dispatch")
+    preparer.add_argument("--ledger", type=Path, required=True)
+    preparer.add_argument("--plan-json")
+    preparer.add_argument("--route-id")
+    preparer.add_argument("--trusted-dispatch-capacity-json")
+    preparer.set_defaults(func=prepare_dispatch)
+    attacher = commands.add_parser("attach")
+    attacher.add_argument("--ledger", type=Path, required=True)
+    attacher.add_argument("--route-id", required=True)
+    attacher.add_argument("--segment-id", required=True)
+    attacher.add_argument("--attempt-id", required=True)
+    attacher.add_argument("--ticket-hash", required=True)
+    attacher.add_argument("--capability-decision-json")
+    attacher.set_defaults(func=attach)
     worker_started = commands.add_parser("worker-start")
     worker_started.add_argument("--ledger", type=Path, required=True)
     worker_started.add_argument("--route-id", required=True)

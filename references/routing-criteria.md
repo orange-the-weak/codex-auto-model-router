@@ -21,7 +21,7 @@ OpenAI's coding-agent results and the independent Coding Agent Index support Sol
 | low | Explicit user override or compatibility testing; never an automatic lane | Any supported model by explicit request |
 | medium | Mechanical execution or bounded complex work | Luna for mechanical work; Sol for bounded complex work |
 | high | Ordinary bounded reasoning, explicit latency priority, or difficult consequential work | Luna by default, Terra for latency, Sol for difficulty or consequence |
-| xhigh | A demonstrably difficult problem resisted a well-scoped attempt or needs exhaustive analysis | Sol, exceptional |
+| xhigh | A large bounded evidence scan/review needs more coverage without max's startup cost, or a difficult complex problem has comparable reasoning-failure evidence | Luna for bounded scans; Sol for failed complex reasoning |
 | max | Demanding bounded work benefits from more exploration and verification, and extra latency/tokens are acceptable | Luna for low-consequence deterministic deep work; other models by explicit override |
 
 Never choose an effort merely because the model supports it. Luna/max is justified by boundedness, deterministic verification, and low consequence—not by Luna's low token rate alone. Ultra is disabled by default and never appears in automatic lanes. If the user explicitly enables native Ultra, use one bounded Sol or Terra Apply Segment and disable Router-managed parallelism; Luna/ultra is unsupported.
@@ -37,7 +37,7 @@ Score each task qualitatively; do not invent false numeric precision.
 5. **Consequence:** Would failure be cosmetic, reversible, user-visible, production-impacting, or security/data-loss sensitive?
 6. **Latency priority:** Does the user explicitly need a fast return, or can deeper reasoning trade latency for fewer revisions?
 
-Automatic routing uses exactly seven lanes. Use Luna/medium as the floor for mechanical work. Use Luna/high for ordinary bounded work, including clear low-consequence implementation with deterministic checks. Raise to Luna/max only when that work is genuinely deep or large enough to justify substantially more tokens, steps, and startup latency. Use Terra/high only when `latency_priority=high` and the task does not cross a Sol boundary. Route bounded complex work to Sol/medium; raise to Sol/high when consequence, ambiguity, coupling, or judgment-heavy verification is high. Use Sol/xhigh only after a well-scoped complex attempt fails or by explicit user request. Luna/low, Terra/low, Terra/medium, Sol/low, and all other supported combinations remain available only by explicit override.
+Automatic routing uses exactly eight lanes. Use Luna/medium as the floor for mechanical work and Luna/high for ordinary bounded work, including normal-size read-only evidence scans. Use Luna/xhigh for a large bounded scan/review when coverage matters but max's much larger startup and token expansion do not. Raise to Luna/max only for genuinely large deterministic deep work with low consequence and acceptable latency. Use Terra/high only when `latency_priority=high` and the task does not cross a Sol boundary. Route bounded complex work to Sol/medium. `verification=judgment` alone is not a Sol/high trigger; high ambiguity, coupling, or consequence is. Use Sol/xhigh only after a classified reasoning/verification failure on comparable complex work or by explicit user request. Infrastructure and unclassified failures do not escalate.
 
 ## Escalation ladder
 
@@ -50,6 +50,8 @@ Escalate one dimension at a time:
 
 Do not escalate because a command failed for an environmental reason such as missing dependencies, permissions, simulator state, network access, or credentials. Fix or report the environment first.
 
+Capability fallback preserves lane intent, not the effort label: Luna/high or Luna/xhigh first falls to Terra/high, Luna/max to Sol/medium, Terra/high to Luna/high, Sol/medium to Terra/xhigh, and Sol/high/xhigh to Terra/max. Use the second canonical substitute only if the first is unavailable. Mark fallback policy version and whether quality degraded; never use GPT-5.5 while any GPT-5.6 family route remains available.
+
 ## Common project patterns
 
 | Work pattern | Starting recommendation |
@@ -57,6 +59,7 @@ Do not escalate because a command failed for an environmental reason such as mis
 | One literal replacement, tiny metadata edit, or formatting-only change | Luna medium |
 | Documentation, localization, config edits, or repeated changes following an accepted example | Luna medium |
 | Clear bounded implementation/refactor with low consequence and deterministic tests | Luna high |
+| Large bounded source scan or review with low coupling | Luna xhigh |
 | Large or genuinely deep deterministic implementation where latency is acceptable | Luna max |
 | UI iteration or interactive diagnosis where fast return is explicit | Terra high |
 | Bounded feature inside one subsystem with deterministic checks | Luna high |
@@ -76,7 +79,7 @@ Do not escalate because a command failed for an environmental reason such as mis
 - Never fetch external benchmark data during Apply. Record the active snapshot ID in new plans; stale, invalid, or missing evidence uses the deterministic fallback.
 - Use one segment by default; add a boundary only when a dependent stage needs a materially different route or verification contract.
 - Re-evaluate each applicable Apply request independently. Treat model-switch latency as small relative to route fit; move both downward from an unnecessarily strong route and upward from an insufficient route.
-- Batch adjacent tasks assigned to the same model and effort. Use the 4/4 standard budget, expand to 6/6 only for a normalized plan with a concrete complex or large basis, and require a user override for anything above that up to the 8/8 hard limit.
+- Preserve adjacent task boundaries even when routes match. Merge only an explicit semantic `merge_group` with identical route source and task evidence. Use the 4/4 standard budget, expand to 6/6 only for a concrete complex or large basis, and require a user override above that up to 8/8.
 - Parallelize only useful independent work. Automatically use at most 4 leaf executors and reduce from observed `agents.max_threads` plus dependency-independent width. Permit a user request above 4 only when both runtime capacity and useful ready work are confirmed; never pre-create a waiting executor queue. Prefer read-heavy parallelism; require disjoint write scopes and serialize shared mutation through conflict keys.
 - Balance tail latency with coarse short/normal/long estimates and critical-path-priority wait-any scheduling. Merge only compatible short siblings; split a long Segment only across genuine independent ownership and verification boundaries.
 

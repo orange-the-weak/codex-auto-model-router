@@ -14,7 +14,7 @@
     "ultra_is_separate_orchestration_mode": true,
     "ultra_requires_explicit_user_enable": true,
     "ultra_disables_router_parallelism": true,
-    "automatic_lane_count": 7,
+    "automatic_lane_count": 8,
     "full_matrix_remains_explicit_override_only": true,
     "luna_medium_is_mechanical_floor": true,
     "luna_high_precedes_max_for_moderate_depth": true,
@@ -221,6 +221,7 @@
   "routing_lanes": {
     "mechanical_default": {"model": "gpt-5.6-luna", "effort": "medium"},
     "ordinary_default": {"model": "gpt-5.6-luna", "effort": "high"},
+    "bounded_scan": {"model": "gpt-5.6-luna", "effort": "xhigh"},
     "bounded_deep_deterministic": {"model": "gpt-5.6-luna", "effort": "max"},
     "latency_priority": {"model": "gpt-5.6-terra", "effort": "high"},
     "complex_bounded": {"model": "gpt-5.6-sol", "effort": "medium"},

@@ -35,7 +35,7 @@ Show counts with percentages. Report success and pressure within comparable task
 
 Show total verified actual elapsed time, cumulative parallel-task duration, and peak concurrency only from schema-v2 `parallel_execution`. Coarse work estimates, plan creation time, and aggregate values supplied by model text are not runtime evidence.
 
-Derive `并行省时估算 = 1 - actual elapsed / cumulative parallel-task duration` and slot utilization from verified runs. Raw `peak_concurrency` and `leaf_parallel_utilization_percent` stay leaf-task-only for schema compatibility; Query and chat use `visible_peak_concurrency = peak_concurrency + 1` and `parallel_utilization_percent`, which include one coordinator interval. The saving is an overlap estimate against concatenating the captured task intervals, not a controlled A/B speedup. Display whole-unit durations and percentages while retaining raw seconds/nanoseconds internally.
+Derive task overlap from intersecting verified task intervals, and derive orchestration gaps from time inside the first-dispatch-to-last-result boundary when no task is active. Raw legacy factor/utilization fields stay machine-readable for schema compatibility, but Query and chat show `visible_peak_concurrency = peak_concurrency + 1`, actual elapsed, cumulative task time, task overlap, and orchestration gap. Do not present `1 - actual / cumulative` as time saved or speedup. Display whole-second durations while retaining raw seconds/nanoseconds internally.
 
 ## Retuning rules
 

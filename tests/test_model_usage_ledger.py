@@ -120,7 +120,7 @@ class LedgerTests(unittest.TestCase):
                 "cumulative_worker_seconds": 288,
                 "peak_concurrency": 3,
             }),
-            "并发：峰值 4（含主任务）｜实际用时：2分0秒｜并行任务累计用时：4分48秒｜并行省时估算：58%｜槽位利用：85%",
+            "并发：峰值 4（含主任务）｜实际用时：2分0秒｜子任务累计：4分48秒｜任务重叠与编排空档：旧记录不可拆分",
         )
         self.assertEqual(
             LEDGER.pending_parallel_brief(3, 4),
@@ -138,7 +138,7 @@ class LedgerTests(unittest.TestCase):
                 "cumulative_worker_seconds": 905.906,
                 "peak_concurrency": 3,
             }),
-            "并发：峰值 4（含主任务）｜实际用时：6分20秒｜并行任务累计用时：15分6秒｜并行省时估算：58%｜槽位利用：85%",
+            "并发：峰值 4（含主任务）｜实际用时：6分20秒｜子任务累计：15分6秒｜任务重叠与编排空档：旧记录不可拆分",
         )
 
     def test_replays_anonymized_codex_task_events_into_auditable_intervals(self):
@@ -182,7 +182,21 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(slow_tail["cumulative_worker_seconds"], 30)
         self.assertEqual(
             LEDGER.parallel_run_brief(slow_tail),
-            "并发：峰值 3（含主任务）｜实际用时：20秒｜并行任务累计用时：30秒｜并行省时估算：33%｜槽位利用：83%",
+            "并发：峰值 3（含主任务）｜实际用时：20秒｜子任务累计：30秒｜任务重叠：10秒｜编排空档：0秒",
+        )
+
+    def test_overlap_diagnostics_separate_overlap_from_orchestration_gap(self):
+        observed = self.verified_run(
+            "observed-handoff-gap", [(0, 500), (392, 801), (915, 1015)]
+        )
+        diagnostics = LEDGER.parallel_overlap_diagnostics(observed)
+        self.assertEqual(observed["wall_clock_seconds"], 1015)
+        self.assertEqual(observed["cumulative_worker_seconds"], 1009)
+        self.assertEqual(diagnostics["overlap_seconds"], 108)
+        self.assertEqual(diagnostics["orchestration_gap_seconds"], 114)
+        self.assertEqual(
+            LEDGER.parallel_run_brief(observed),
+            "并发：峰值 3（含主任务）｜实际用时：16分55秒｜子任务累计：16分49秒｜任务重叠：1分48秒｜编排空档：1分54秒",
         )
 
     def test_interval_metrics_reject_reversed_or_zero_duration(self):
@@ -241,6 +255,8 @@ class LedgerTests(unittest.TestCase):
             "visible_peak_concurrency": 4,
             "effective_parallel_factor": 2.32,
             "parallel_time_saving_estimate_percent": 56.9,
+            "overlap_seconds": 16.5,
+            "orchestration_gap_seconds": 0.0,
             "leaf_parallel_utilization_percent": 77.3,
             "parallel_utilization_percent": 83.0,
         })
@@ -254,17 +270,19 @@ class LedgerTests(unittest.TestCase):
             "timing_provenance": "coordinator-monotonic-v1",
             "effective_parallel_factor": 2.32,
             "parallel_time_saving_estimate_percent": 56.9,
+            "overlap_seconds": 16.5,
+            "orchestration_gap_seconds": 0.0,
             "leaf_parallel_utilization_percent": 77.3,
             "parallel_utilization_percent": 83.0,
         })
         self.assertNotIn("worker_time_compression_percent", json.dumps(summary))
         rendered = LEDGER.render_markdown(summary)
-        self.assertIn("parallel time-saving estimate: 56.9%", rendered)
-        self.assertIn("slot utilization: 83.0%", rendered)
+        self.assertIn("task overlap: 16.5s", rendered)
+        self.assertIn("orchestration gap: 0.0s", rendered)
         self.assertIn("peak concurrency including main: 4", rendered)
         self.assertIn("Historical verified parallel execution", rendered)
         self.assertIn("Current verified parallel run", rendered)
-        self.assertIn("not pure model compute or controlled A/B speedup", rendered)
+        self.assertIn("neither is a controlled serial/parallel speedup", rendered)
 
     def test_parallel_plan_records_adaptive_concurrency_intent(self):
         plan = {
@@ -418,6 +436,8 @@ class LedgerTests(unittest.TestCase):
             "visible_peak_concurrency": 3,
             "effective_parallel_factor": 1.64,
             "parallel_time_saving_estimate_percent": 39.1,
+            "overlap_seconds": 9.0,
+            "orchestration_gap_seconds": 0.0,
             "leaf_parallel_utilization_percent": 82.1,
             "parallel_utilization_percent": 88.1,
         })
@@ -628,7 +648,7 @@ class LedgerTests(unittest.TestCase):
             ],
         )
 
-    def test_dispatch_reservation_orders_launch_before_failure_latch(self):
+    def test_prepared_reservation_cannot_launch_after_failure_latch(self):
         def reservation(segment_id):
             return {
                 "event": "parallel_dispatch_reservation", "route_id": "route-1",
@@ -656,12 +676,15 @@ class LedgerTests(unittest.TestCase):
             self.ledger,
             self.worker_event("parallel_worker_finish", outcome="failed"),
         ))
-        # Segment two was reserved before the latch, so it may still launch
-        # and drain. No Segment three reservation may cross the latch.
-        self.assertTrue(LEDGER.append_event(
-            self.ledger,
-            self.worker_event("parallel_worker_start", segment_id="two", monotonic_ns=3),
-        ))
+        # A reservation is not proof that Segment two was actually launched.
+        # Only already-started workers may drain after the latch.
+        with self.assertRaisesRegex(ValueError, "failure latch"):
+            LEDGER.append_event(
+                self.ledger,
+                self.worker_event(
+                    "parallel_worker_start", segment_id="two", monotonic_ns=3
+                ),
+            )
         with self.assertRaisesRegex(ValueError, "failure latch"):
             LEDGER.prepare_segment_claim(
                 self.ledger,

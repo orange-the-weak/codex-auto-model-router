@@ -142,8 +142,26 @@ class RoutePolicyTests(unittest.TestCase):
             "Sol", "high", ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]
         )
         self.assertEqual(result["execution"]["model"], "gpt-5.6-terra")
+        self.assertEqual(result["execution"]["effort"], "max")
         self.assertEqual(result["reason"], "gpt56-family-fallback")
         self.assertTrue(result["gpt56_family_available"])
+
+    def test_lane_fallback_preserves_intent_instead_of_effort_label(self):
+        cases = (
+            ("Luna", "high", ["Terra", "Sol"], ("gpt-5.6-terra", "high")),
+            ("Luna", "max", ["Sol"], ("gpt-5.6-sol", "medium")),
+            ("Terra", "high", ["Luna", "Sol"], ("gpt-5.6-luna", "high")),
+            ("Sol", "medium", ["Terra", "Luna"], ("gpt-5.6-terra", "xhigh")),
+        )
+        for model, effort, available, expected in cases:
+            with self.subTest(model=model, effort=effort):
+                result = POLICY.resolve_family_fallback(model, effort, available)
+                self.assertEqual(
+                    (result["execution"]["model"], result["execution"]["effort"]),
+                    expected,
+                )
+                self.assertEqual(result["fallback_policy_version"], 2)
+                self.assertIsNotNone(result["target_lane"])
 
     def test_fallback_keeps_terra_target_inside_gpt56_family(self):
         result = POLICY.resolve_family_fallback(
@@ -322,7 +340,7 @@ class RoutePolicyTests(unittest.TestCase):
         )
 
     def test_unusually_deep_deterministic_work_prefers_luna_max(self):
-        for task_kind, size in (("ordinary", "large"), ("complex", "normal")):
+        for task_kind, size in (("ordinary", "large"), ("complex", "large")):
             with self.subTest(task_kind=task_kind, size=size):
                 route = POLICY.select_route(
                     "apply", task_kind=task_kind, risk="low", size=size,
@@ -338,6 +356,39 @@ class RoutePolicyTests(unittest.TestCase):
                     route["recommended"]["source"],
                     "benchmark-prior:bounded_deep_deterministic",
                 )
+
+    def test_bounded_scan_uses_luna_high_or_xhigh_without_forcing_max(self):
+        normal = POLICY.select_route(
+            "apply", task_kind="ordinary", risk="low", size="normal",
+            ambiguity="medium", coupling="low", verification="judgment",
+            consequence="normal", current=current("gpt-5.6-sol", "high"),
+        )
+        large = POLICY.select_route(
+            "apply", task_kind="ordinary", risk="low", size="large",
+            ambiguity="low", coupling="medium", verification="judgment",
+            consequence="low", current=current("gpt-5.6-sol", "high"),
+        )
+        self.assertEqual(
+            (normal["recommended"]["model"], normal["recommended"]["effort"]),
+            ("gpt-5.6-luna", "high"),
+        )
+        self.assertEqual(
+            (large["recommended"]["model"], large["recommended"]["effort"]),
+            ("gpt-5.6-luna", "xhigh"),
+        )
+        self.assertEqual(large["recommended"]["source"], "benchmark-prior:bounded_scan")
+
+    def test_infrastructure_failure_does_not_trigger_sol_xhigh(self):
+        route = POLICY.select_route(
+            "apply", task_kind="complex", risk="normal", size="normal",
+            ambiguity="medium", coupling="medium", verification="mixed",
+            consequence="normal", prior_failure=True,
+            prior_failure_kind="infrastructure", current=current(),
+        )
+        self.assertEqual(
+            (route["recommended"]["model"], route["recommended"]["effort"]),
+            ("gpt-5.6-sol", "medium"),
+        )
 
     def test_latency_critical_bounded_reasoning_uses_terra_high(self):
         route = POLICY.select_route(
@@ -361,6 +412,13 @@ class RoutePolicyTests(unittest.TestCase):
             (route["recommended"]["model"], route["recommended"]["effort"]),
             ("gpt-5.6-sol", "high"),
         )
+
+    def test_high_risk_cannot_hide_behind_lower_consequence(self):
+        with self.assertRaisesRegex(ValueError, "high risk"):
+            POLICY.select_route(
+                "apply", task_kind="ordinary", risk="high",
+                consequence="normal", current=current(),
+            )
 
     def test_max_is_supported_and_ultra_requires_explicit_capable_model(self):
         route = POLICY.select_route(
@@ -398,7 +456,7 @@ class RoutePolicyTests(unittest.TestCase):
                         self.assertNotEqual(route["recommended"]["effort"], "ultra")
                         self.assertEqual(route["execution_mode"], "router-managed")
 
-    def test_automatic_routes_use_only_the_seven_documented_lanes(self):
+    def test_automatic_routes_use_only_the_eight_documented_lanes(self):
         observed = set()
         for task_kind in ("mechanical", "ordinary", "complex"):
             for risk in ("low", "normal", "high"):
@@ -415,6 +473,7 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertTrue(observed.issubset({
             ("gpt-5.6-luna", "medium"),
             ("gpt-5.6-luna", "high"),
+            ("gpt-5.6-luna", "xhigh"),
             ("gpt-5.6-luna", "max"),
             ("gpt-5.6-terra", "high"),
             ("gpt-5.6-sol", "medium"),
@@ -566,11 +625,22 @@ class RoutePolicyTests(unittest.TestCase):
     def test_failed_complex_attempt_is_the_only_automatic_xhigh_escalation(self):
         route = POLICY.select_route(
             "apply", task_kind="complex", prior_failure=True,
+            prior_failure_kind="reasoning",
             current=current("gpt-5.6-sol", "medium"),
         )
         self.assertEqual(
             (route["recommended"]["model"], route["recommended"]["effort"]),
             ("gpt-5.6-sol", "xhigh"),
+        )
+
+    def test_legacy_unclassified_failure_does_not_trigger_xhigh(self):
+        route = POLICY.select_route(
+            "apply", task_kind="complex", prior_failure=True,
+            current=current("gpt-5.6-sol", "medium"),
+        )
+        self.assertEqual(
+            (route["recommended"]["model"], route["recommended"]["effort"]),
+            ("gpt-5.6-sol", "medium"),
         )
 
     def test_active_evidence_snapshot_is_exposed_for_audit(self):
@@ -593,9 +663,12 @@ class RoutePolicyTests(unittest.TestCase):
             self.assertEqual(route["routing_evidence"]["status"], "stale")
             self.assertEqual(
                 (route["recommended"]["model"], route["recommended"]["effort"]),
-                ("gpt-5.6-sol", "high"),
+                ("gpt-5.6-sol", "medium"),
             )
-            self.assertEqual(route["recommended"]["source"], "deterministic-fallback")
+            self.assertEqual(
+                route["recommended"]["source"],
+                "deterministic-policy:complex_bounded",
+            )
 
     def test_invalid_evidence_falls_back_without_crashing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -603,7 +676,10 @@ class RoutePolicyTests(unittest.TestCase):
             path.write_text("{not-json")
             route = POLICY.select_route("apply", current=current(), evidence_path=path)
             self.assertEqual(route["routing_evidence"]["status"], "invalid")
-            self.assertEqual(route["recommended"]["source"], "deterministic-fallback")
+            self.assertEqual(
+                route["recommended"]["source"],
+                "deterministic-policy:ordinary_default",
+            )
 
     def test_evidence_without_required_independent_source_is_invalid(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -631,11 +707,11 @@ class RoutePolicyTests(unittest.TestCase):
                 route["routing_evidence"]["reason"],
             )
 
-    def test_evidence_requires_exactly_seven_automatic_lanes(self):
+    def test_evidence_requires_exactly_eight_automatic_lanes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "evidence.json"
             data = json.loads(POLICY.DEFAULT_EVIDENCE_PATH.read_text())
-            data["policy"]["automatic_lane_count"] = 8
+            data["policy"]["automatic_lane_count"] = 7
             path.write_text(json.dumps(data))
             route = POLICY.select_route("apply", current=current(), evidence_path=path)
             self.assertEqual(route["routing_evidence"]["status"], "invalid")
@@ -649,6 +725,21 @@ class RoutePolicyTests(unittest.TestCase):
             route = POLICY.select_route("apply", current=current(), evidence_path=path)
             self.assertEqual(route["routing_evidence"]["status"], "invalid")
             self.assertIn("missing-routing-lanes", route["routing_evidence"]["reason"])
+
+    def test_evidence_cannot_rewrite_a_canonical_lane(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            data = json.loads(POLICY.DEFAULT_EVIDENCE_PATH.read_text())
+            data["routing_lanes"]["ordinary_default"] = {
+                "model": "gpt-5.6-sol", "effort": "high"
+            }
+            path.write_text(json.dumps(data))
+            route = POLICY.select_route("apply", current=current(), evidence_path=path)
+            self.assertEqual(route["routing_evidence"]["status"], "invalid")
+            self.assertIn(
+                "routing-lane-mapping-mismatch",
+                route["routing_evidence"]["reason"],
+            )
 
     def test_incomplete_gpt56_effort_matrix_is_invalid(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -831,13 +922,21 @@ class RoutePolicyTests(unittest.TestCase):
 
     def test_adjacent_segments_with_same_route_are_merged(self):
         segments = [
-            self.segment("implement"),
-            self.segment("tests"),
+            self.segment("implement", merge_group="delivery"),
+            self.segment("tests", merge_group="delivery"),
         ]
         plan = POLICY.plan_apply_segments(segments, current=current("gpt-5.6-sol", "medium"))
         self.assertEqual(plan["segment_count"], 1)
         self.assertEqual(plan["segments"][0]["source_ids"], ["implement", "tests"])
         self.assertIn("Then:", plan["segments"][0]["goal"])
+
+    def test_same_route_without_explicit_merge_group_preserves_boundaries(self):
+        plan = POLICY.plan_apply_segments(
+            [self.segment("implement"), self.segment("tests")],
+            current=current("gpt-5.6-sol", "medium"),
+        )
+        self.assertEqual(plan["segment_count"], 2)
+        self.assertEqual(plan["switch_count"], 2)
 
     def test_tiny_segment_is_routed_independently_from_previous_strong_segment(self):
         segments = [
@@ -935,7 +1034,8 @@ class RoutePolicyTests(unittest.TestCase):
     def test_parallel_tiny_siblings_merge_without_extension(self):
         plan = POLICY.plan_parallel_segments([
             self.segment(
-                f"tiny-{index}", size="tiny", work_estimate="short", access_mode="read"
+                f"tiny-{index}", size="tiny", work_estimate="short",
+                access_mode="read", merge_group="tiny-scan"
             )
             for index in range(6)
         ], current=current(), runtime_max_threads=8)
@@ -1177,8 +1277,14 @@ class RoutePolicyTests(unittest.TestCase):
 
     def test_compatible_short_siblings_are_merged(self):
         plan = POLICY.plan_parallel_segments([
-            self.segment("one", work_estimate="short", access_mode="read"),
-            self.segment("two", work_estimate="short", access_mode="read"),
+            self.segment(
+                "one", work_estimate="short", access_mode="read",
+                merge_group="scan",
+            ),
+            self.segment(
+                "two", work_estimate="short", access_mode="read",
+                merge_group="scan",
+            ),
             self.segment("join", depends_on=["one", "two"], access_mode="read"),
         ], current=current())
         self.assertEqual(plan["segment_count"], 2)
@@ -1832,7 +1938,10 @@ class RoutePolicyTests(unittest.TestCase):
 
     def test_adjacent_merge_is_counted_before_budget(self):
         plan = POLICY.plan_apply_segments(
-            [self.segment("one"), self.segment("two")],
+            [
+                self.segment("one", merge_group="delivery"),
+                self.segment("two", merge_group="delivery"),
+            ],
             current=current(),
             max_segments=1,
             max_switches=2,

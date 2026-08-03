@@ -91,20 +91,56 @@ def parallel_time_saving_estimate(run):
     return (1 - run["wall_clock_seconds"] / worker) * 100
 
 
+def parallel_overlap_diagnostics(run):
+    """Separate useful task overlap from idle orchestration gaps.
+
+    Neither value is a controlled serial/parallel speedup. They only describe
+    the observed dispatch-confirmed-to-result-received timeline.
+    """
+    intervals = run.get("worker_intervals")
+    if not isinstance(intervals, list) or not intervals:
+        return None
+    ordered = sorted(
+        (
+            item["started_monotonic_ns"],
+            item["result_received_monotonic_ns"],
+        )
+        for item in intervals
+    )
+    merged = []
+    for start, end in ordered:
+        if end <= start:
+            raise ValueError("parallel worker interval must have positive duration")
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    active = sum(end - start for start, end in merged) / 1_000_000_000
+    wall = run["wall_clock_seconds"]
+    worker = run["cumulative_worker_seconds"]
+    return {
+        "active_worker_union_seconds": round(active, 9),
+        "overlap_seconds": round(max(0.0, worker - active), 9),
+        "orchestration_gap_seconds": round(max(0.0, wall - active), 9),
+    }
+
+
 def parallel_run_brief(run):
     wall = run["wall_clock_seconds"]
     worker = run["cumulative_worker_seconds"]
     peak = run["peak_concurrency"]
     visible_peak = peak + 1  # Include the coordinator in user-facing totals.
-    estimate = parallel_time_saving_estimate(run)
-    utilization = (
-        (worker + wall) * 100 / (visible_peak * wall) if wall > 0 else 0
-    )
-    return (
+    brief = (
         f"并发：峰值 {visible_peak}（含主任务）｜实际用时：{_brief_duration(wall)}｜"
-        f"并行任务累计用时：{_brief_duration(worker)}｜"
-        f"并行省时估算：{_rounded_integer(estimate) if estimate is not None else 0}%｜"
-        f"槽位利用：{_rounded_integer(utilization)}%"
+        f"子任务累计：{_brief_duration(worker)}"
+    )
+    diagnostics = parallel_overlap_diagnostics(run)
+    if diagnostics is None:
+        return brief + "｜任务重叠与编排空档：旧记录不可拆分"
+    return (
+        brief
+        + f"｜任务重叠：{_brief_duration(diagnostics['overlap_seconds'])}"
+        + f"｜编排空档：{_brief_duration(diagnostics['orchestration_gap_seconds'])}"
     )
 
 
@@ -881,9 +917,10 @@ def _validate_worker_transition(existing, event):
         reservation = _matching_dispatch_reservation(existing, event)
         if matching_claim.get("dispatch_reservation_required") and reservation is None:
             raise ValueError("parallel worker start requires a dispatch reservation")
-        # A reservation is the total-order boundary. A later failure latch may
-        # not cancel work whose dispatch right was already reserved.
-        if _route_is_latched(existing, event) and reservation is None:
+        # A prepared reservation is not proof that an executor was launched.
+        # After the stop latch, only workers with an already-recorded start may
+        # drain; no new worker-start transition is accepted.
+        if _route_is_latched(existing, event):
             raise ValueError("parallel route dispatch stopped by failure latch")
         return
     if _matching_worker_event(existing, "parallel_worker_start", event) is None:
@@ -1105,6 +1142,14 @@ def build_summary(events, warnings, current_route_id=None):
     efficiency_events = [item for item in events if item.get("event") == "routing_efficiency"]
     parallel_wall = sum(item["wall_clock_seconds"] for item in parallel_runs)
     parallel_worker = sum(item["cumulative_worker_seconds"] for item in parallel_runs)
+    parallel_diagnostics = [parallel_overlap_diagnostics(item) for item in parallel_runs]
+    parallel_overlap = sum(
+        item["overlap_seconds"] for item in parallel_diagnostics if item is not None
+    )
+    orchestration_gap = sum(
+        item["orchestration_gap_seconds"]
+        for item in parallel_diagnostics if item is not None
+    )
     leaf_parallel_capacity = sum(
         item["peak_concurrency"] * item["wall_clock_seconds"]
         for item in parallel_runs
@@ -1124,6 +1169,7 @@ def build_summary(events, warnings, current_route_id=None):
     if current_parallel_event:
         wall = current_parallel_event["wall_clock_seconds"]
         worker = current_parallel_event["cumulative_worker_seconds"]
+        current_diagnostics = parallel_overlap_diagnostics(current_parallel_event)
         current_parallel_run = {
             "route_id": current_parallel_event["route_id"],
             "schema_version": current_parallel_event["schema_version"],
@@ -1144,6 +1190,14 @@ def build_summary(events, warnings, current_route_id=None):
             "parallel_time_saving_estimate_percent": (
                 round(parallel_time_saving_estimate(current_parallel_event), 1)
                 if worker > 0 else None
+            ),
+            "overlap_seconds": (
+                current_diagnostics["overlap_seconds"]
+                if current_diagnostics is not None else None
+            ),
+            "orchestration_gap_seconds": (
+                current_diagnostics["orchestration_gap_seconds"]
+                if current_diagnostics is not None else None
             ),
             "leaf_parallel_utilization_percent": (
                 round(
@@ -1193,6 +1247,8 @@ def build_summary(events, warnings, current_route_id=None):
                     round((1 - parallel_wall / parallel_worker) * 100, 1)
                     if parallel_worker > 0 else None
                 ),
+                "overlap_seconds": round(parallel_overlap, 3),
+                "orchestration_gap_seconds": round(orchestration_gap, 3),
                 "leaf_parallel_utilization_percent": (
                     round(parallel_worker * 100 / leaf_parallel_capacity, 1)
                     if leaf_parallel_capacity > 0 else None
@@ -1285,13 +1341,11 @@ def render_markdown(summary):
             f"Aggregate of {historical_parallel['count']} verified run(s): actual elapsed: "
             f"{historical_parallel['wall_clock_seconds']:g}s; cumulative parallel-task time: "
             f"{historical_parallel['cumulative_worker_seconds']:g}s; peak concurrency including main: "
-            f"{historical_parallel['visible_peak_concurrency'] if historical_parallel['visible_peak_concurrency'] is not None else '—'}; parallel time-saving estimate: "
-            f"{historical_parallel['parallel_time_saving_estimate_percent'] if historical_parallel['parallel_time_saving_estimate_percent'] is not None else '—'}%; slot utilization: "
-            f"{historical_parallel['parallel_utilization_percent'] if historical_parallel['parallel_utilization_percent'] is not None else '—'}%. "
-            "The estimate is 1 - wall clock / cumulative parallel-task time, using "
-            "dispatch-confirmed-to-result-received task intervals concatenated as a "
-            "serial proxy. It includes reasoning, tools, and result-return waiting; it "
-            "is not pure model compute or controlled A/B speedup."
+            f"{historical_parallel['visible_peak_concurrency'] if historical_parallel['visible_peak_concurrency'] is not None else '—'}; task overlap: "
+            f"{historical_parallel['overlap_seconds']:g}s; orchestration gap: "
+            f"{historical_parallel['orchestration_gap_seconds']:g}s. "
+            "Overlap and gap describe the observed task timeline; neither is a "
+            "controlled serial/parallel speedup result."
             if historical_parallel["count"] else
             "Insufficient verified parallel timing data."
         ),
@@ -1341,9 +1395,9 @@ def render_markdown(summary):
                 f"`{current_parallel['clock_source']}`; actual elapsed: "
                 f"{current_parallel['wall_clock_seconds']:g}s; cumulative parallel-task time: "
                 f"{current_parallel['cumulative_worker_seconds']:g}s; peak concurrency including main: "
-                f"{current_parallel['visible_peak_concurrency']}; parallel time-saving estimate: "
-                f"{current_parallel['parallel_time_saving_estimate_percent'] if current_parallel['parallel_time_saving_estimate_percent'] is not None else '—'}%; "
-                f"slot utilization: {current_parallel['parallel_utilization_percent'] if current_parallel['parallel_utilization_percent'] is not None else '—'}%."
+                f"{current_parallel['visible_peak_concurrency']}; task overlap: "
+                f"{current_parallel['overlap_seconds'] if current_parallel['overlap_seconds'] is not None else '—'}s; "
+                f"orchestration gap: {current_parallel['orchestration_gap_seconds'] if current_parallel['orchestration_gap_seconds'] is not None else '—'}s."
             ),
             "",
         ]

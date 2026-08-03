@@ -23,6 +23,28 @@ FAMILY_FALLBACK_ORDER = {
 }
 RUNTIME_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 ROUTED_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+CANONICAL_ROUTING_LANES = {
+    "mechanical_default": {"model": "gpt-5.6-luna", "effort": "medium"},
+    "ordinary_default": {"model": "gpt-5.6-luna", "effort": "high"},
+    "bounded_scan": {"model": "gpt-5.6-luna", "effort": "xhigh"},
+    "bounded_deep_deterministic": {"model": "gpt-5.6-luna", "effort": "max"},
+    "latency_priority": {"model": "gpt-5.6-terra", "effort": "high"},
+    "complex_bounded": {"model": "gpt-5.6-sol", "effort": "medium"},
+    "complex_uncertain_or_high_consequence": {
+        "model": "gpt-5.6-sol", "effort": "high",
+    },
+    "complex_failed_escalation": {"model": "gpt-5.6-sol", "effort": "xhigh"},
+}
+LANE_FALLBACK_ROUTES = {
+    "mechanical_default": (("gpt-5.6-terra", "medium"), ("gpt-5.6-sol", "medium")),
+    "ordinary_default": (("gpt-5.6-terra", "high"), ("gpt-5.6-sol", "medium")),
+    "bounded_scan": (("gpt-5.6-terra", "high"), ("gpt-5.6-sol", "medium")),
+    "bounded_deep_deterministic": (("gpt-5.6-sol", "medium"), ("gpt-5.6-terra", "xhigh")),
+    "latency_priority": (("gpt-5.6-luna", "high"), ("gpt-5.6-sol", "medium")),
+    "complex_bounded": (("gpt-5.6-terra", "xhigh"), ("gpt-5.6-luna", "max")),
+    "complex_uncertain_or_high_consequence": (("gpt-5.6-terra", "max"), ("gpt-5.6-luna", "max")),
+    "complex_failed_escalation": (("gpt-5.6-terra", "max"), ("gpt-5.6-luna", "max")),
+}
 THREAD_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 SEGMENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 AGENT_TASK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,47}$")
@@ -140,7 +162,7 @@ def load_benchmark_evidence(path=None, today=None):
             raise ValueError("ultra-explicit-enable-policy-missing")
         if policy.get("ultra_disables_router_parallelism") is not True:
             raise ValueError("ultra-parallel-exclusion-policy-missing")
-        if policy.get("automatic_lane_count") != 7:
+        if policy.get("automatic_lane_count") != 8:
             raise ValueError("automatic-lane-count-missing")
         if policy.get("full_matrix_remains_explicit_override_only") is not True:
             raise ValueError("explicit-override-matrix-boundary-missing")
@@ -174,13 +196,11 @@ def load_benchmark_evidence(path=None, today=None):
         }
         if not expected_efforts.issubset(gpt56_efforts):
             raise ValueError("gpt56-effort-matrix-incomplete")
-        required_lanes = {
-            "mechanical_default", "ordinary_default", "bounded_deep_deterministic",
-            "latency_priority", "complex_bounded",
-            "complex_uncertain_or_high_consequence", "complex_failed_escalation",
-        }
+        required_lanes = set(CANONICAL_ROUTING_LANES)
         if not isinstance(lanes, dict) or set(lanes) != required_lanes:
             raise ValueError("missing-routing-lanes")
+        if lanes != CANONICAL_ROUTING_LANES:
+            raise ValueError("routing-lane-mapping-mismatch")
         for lane in required_lanes:
             normalize_model(lanes[lane].get("model"))
             lane_effort = normalize_effort(lanes[lane].get("effort"))
@@ -214,6 +234,8 @@ def evidence_audit(evidence):
 
 def _task_signals(task_kind, risk, size, ambiguity=None, coupling=None,
                   verification=None, consequence=None, prior_failure=False):
+    if risk == "high" and consequence not in (None, "high"):
+        raise ValueError("high risk cannot be paired with a lower consequence")
     ambiguity = ambiguity or ("low" if risk == "low" or size == "tiny" else "medium")
     coupling = coupling or ("low" if size == "tiny" else ("high" if size == "large" and task_kind == "complex" else "medium"))
     verification = verification or ("deterministic" if task_kind == "mechanical" or risk == "low" else "mixed")
@@ -294,6 +316,15 @@ def resolve_family_fallback(target_model, target_effort, available_models=None):
     _validate_ultra_route(
         target_model, target_effort, explicit=target_effort == "ultra", mode="apply"
     )
+    target_lane = next((
+        lane for lane, route in CANONICAL_ROUTING_LANES.items()
+        if (route["model"], route["effort"]) == (target_model, target_effort)
+    ), None)
+    metadata = {
+        "fallback_policy_version": 2,
+        "target_lane": target_lane,
+        "quality_degraded": False,
+    }
     if available_models is None:
         return {
             "target": {"model": target_model, "effort": target_effort},
@@ -301,6 +332,7 @@ def resolve_family_fallback(target_model, target_effort, available_models=None):
             "fallback": False,
             "gpt56_family_available": None,
             "reason": "availability-unknown-try-gpt56-target-first",
+            **metadata,
         }
 
     available = {
@@ -309,16 +341,27 @@ def resolve_family_fallback(target_model, target_effort, available_models=None):
     }
     if target_model in available:
         execution_model = target_model
+        execution_effort = target_effort
         reason = "target-available"
     else:
-        execution_model = next(
+        lane_candidates = LANE_FALLBACK_ROUTES.get(target_lane, ())
+        execution_model, execution_effort = next(
             (
-                model for model in FAMILY_FALLBACK_ORDER[target_model]
+                (model, effort) for model, effort in lane_candidates
                 if model in available
-                and not (target_effort == "ultra" and model == "gpt-5.6-luna")
             ),
-            None,
+            (None, None),
         )
+        if execution_model is None:
+            execution_model = next(
+                (
+                    model for model in FAMILY_FALLBACK_ORDER[target_model]
+                    if model in available
+                    and not (target_effort == "ultra" and model == "gpt-5.6-luna")
+                ),
+                None,
+            )
+            execution_effort = target_effort if execution_model else None
         reason = "gpt56-family-fallback" if execution_model else None
 
     family_available = any(model in available for model in MODELS)
@@ -327,16 +370,18 @@ def resolve_family_fallback(target_model, target_effort, available_models=None):
         and not family_available and GPT55_MODEL in available
     ):
         execution_model = GPT55_MODEL
+        execution_effort = target_effort
         reason = "gpt56-family-unavailable"
     elif execution_model is None:
         reason = "no-supported-model-available"
 
     return {
         "target": {"model": target_model, "effort": target_effort},
-        "execution": {"model": execution_model, "effort": target_effort},
-        "fallback": execution_model != target_model,
+        "execution": {"model": execution_model, "effort": execution_effort},
+        "fallback": (execution_model, execution_effort) != (target_model, target_effort),
         "gpt56_family_available": family_available,
         "reason": reason,
+        **dict(metadata, quality_degraded=execution_model != target_model),
     }
 
 
@@ -427,10 +472,23 @@ def detect_current_route(sessions_root=None, environ=None):
     }
 
 
+def _prior_failure_kind(prior_failure, value=None):
+    """Classify prior failures without treating orchestration faults as model faults."""
+    if not prior_failure:
+        if value not in (None, "none"):
+            raise ValueError("prior_failure_kind requires prior_failure=true")
+        return "none"
+    value = value or "unknown"
+    if value not in ("unknown", "reasoning", "verification", "infrastructure"):
+        raise ValueError(f"unsupported prior_failure_kind: {value}")
+    return value
+
+
 def recommended_route(
     mode, task_kind, risk, size, report_model=None, report_effort=None,
     ambiguity=None, coupling=None, verification=None, consequence=None,
     prior_failure=False, evidence=None, latency_priority=None,
+    prior_failure_kind=None,
 ):
     if mode == "apply" and (report_model is not None or report_effort is not None):
         if report_model is None or report_effort is None:
@@ -443,39 +501,52 @@ def recommended_route(
     )
     evidence = evidence or load_benchmark_evidence()
     latency_priority = _latency_priority(latency_priority)
+    failure_kind = _prior_failure_kind(prior_failure, prior_failure_kind)
 
     if mode in ("assess", "retune"):
         # Router analysis is intentionally fixed at the user-approved route.
         # select_route still applies an explicit user override afterwards.
         return "gpt-5.6-sol", "high", "fixed-analysis-default"
 
-    if evidence.get("status") != "active":
-        return _legacy_recommended_route(
-            mode, task_kind, risk, size, latency_priority=latency_priority
-        )
-
-    lanes = evidence["lanes"]
-    if task_kind == "complex" and signals["prior_failure"]:
+    lanes = CANONICAL_ROUTING_LANES
+    if (
+        task_kind == "complex" and signals["prior_failure"]
+        and failure_kind in ("reasoning", "verification")
+    ):
         lane = "complex_failed_escalation"
     elif (
         signals["consequence"] == "high" or signals["ambiguity"] == "high"
-        or signals["coupling"] == "high" or signals["verification"] == "judgment"
+        or signals["coupling"] == "high"
     ):
         lane = "complex_uncertain_or_high_consequence"
     elif (
-        task_kind in ("ordinary", "complex")
+        task_kind == "ordinary"
         and size != "tiny"
         and signals["ambiguity"] == "low"
         and signals["coupling"] in ("low", "medium")
-        and signals["verification"] == "deterministic"
+        and signals["verification"] in ("deterministic", "judgment")
         and signals["consequence"] == "low"
     ):
         if task_kind == "ordinary" and latency_priority == "high":
             lane = "latency_priority"
-        elif task_kind == "complex" or size == "large":
+        elif (
+            task_kind == "ordinary" and size == "large"
+            and signals["verification"] == "judgment"
+        ):
+            lane = "bounded_scan"
+        elif size == "large":
             lane = "bounded_deep_deterministic"
         else:
             lane = "ordinary_default"
+    elif (
+        task_kind == "complex" and size == "large"
+        and signals["ambiguity"] == "low"
+        and signals["coupling"] in ("low", "medium")
+        and signals["verification"] == "deterministic"
+        and signals["consequence"] == "low"
+        and latency_priority != "high"
+    ):
+        lane = "bounded_deep_deterministic"
     elif task_kind == "complex":
         lane = "complex_bounded"
     elif task_kind == "mechanical":
@@ -485,7 +556,14 @@ def recommended_route(
     else:
         lane = "ordinary_default"
     selected = lanes[lane]
-    return normalize_model(selected["model"]), normalize_effort(selected["effort"]), f"benchmark-prior:{lane}"
+    source = (
+        "benchmark-prior" if evidence.get("status") == "active"
+        else "deterministic-policy"
+    )
+    return (
+        normalize_model(selected["model"]), normalize_effort(selected["effort"]),
+        f"{source}:{lane}",
+    )
 
 
 def _legacy_recommended_route(
@@ -518,6 +596,7 @@ def select_route(
     prior_failure=False,
     evidence_path=None,
     latency_priority=None,
+    prior_failure_kind=None,
 ):
     report_model = normalize_model(report_model)
     report_effort = normalize_effort(report_effort)
@@ -525,7 +604,7 @@ def select_route(
     target_model, target_effort, source = recommended_route(
         mode, task_kind, risk, size, report_model, report_effort,
         ambiguity, coupling, verification, consequence, prior_failure, evidence,
-        latency_priority,
+        latency_priority, prior_failure_kind,
     )
 
     explicit_override = model_override is not None or effort_override is not None
@@ -626,11 +705,28 @@ def _agent_task_name(segment_id):
     return task_name
 
 
+def _merge_group(value, segment_id):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not SEGMENT_ID_RE.fullmatch(value):
+        raise ValueError(f"segment {segment_id} has invalid merge_group")
+    return value
+
+
+def _merge_signature(segment):
+    return tuple(segment.get(field) for field in (
+        "model", "effort", "reason", "task_kind", "risk", "ambiguity",
+        "coupling", "verification", "consequence", "prior_failure",
+        "prior_failure_kind", "latency_priority", "merge_group",
+    ))
+
+
 def _merge_adjacent_segments(segments):
     merged = []
     for segment in segments:
-        if merged and (merged[-1]["model"], merged[-1]["effort"]) == (
-            segment["model"], segment["effort"]
+        if (
+            merged and segment.get("merge_group") is not None
+            and _merge_signature(merged[-1]) == _merge_signature(segment)
         ):
             previous = merged[-1]
             previous["goal"] += " Then: " + segment["goal"]
@@ -864,8 +960,15 @@ def _validate_parallel_segment_schema(segments, require_semantic_id=False):
         )
         if any(segment.get(key) != value for key, value in expected_signals.items()):
             raise ValueError(f"segment {segment_id} has invalid task evidence")
+        failure_kind = _prior_failure_kind(
+            segment.get("prior_failure", False), segment.get("prior_failure_kind")
+        )
+        if segment.get("prior_failure_kind") not in (None, failure_kind):
+            raise ValueError(f"segment {segment_id} has invalid prior failure evidence")
         if segment.get("latency_priority") is not None:
             _latency_priority(segment.get("latency_priority"))
+        if segment.get("merge_group") is not None:
+            _merge_group(segment.get("merge_group"), segment_id)
 
         if segment.get("model") not in MODELS:
             raise ValueError(f"segment {segment_id} has invalid GPT-5.6 model")
@@ -958,12 +1061,16 @@ def _merge_short_siblings(segments):
             successors[dependency].append(item["segment_id"])
     groups = {}
     for item in segments:
-        if item["work_estimate"] != "short":
+        if item["work_estimate"] != "short" or item.get("merge_group") is None:
             continue
         key = (
             tuple(item["depends_on"]), tuple(successors[item["segment_id"]]),
             item["model"], item["effort"], item["access_mode"],
-            item["task_kind"], item["risk"], tuple(item["conflict_keys"]),
+            item["task_kind"], item["risk"], item["ambiguity"],
+            item["coupling"], item["verification"], item["consequence"],
+            item["prior_failure"], item.get("prior_failure_kind"),
+            item["latency_priority"], item["merge_group"],
+            tuple(item["conflict_keys"]),
         )
         groups.setdefault(key, []).append(item)
     replaced = {}
@@ -1985,6 +2092,9 @@ def plan_apply_segments(
         verification = raw.get("verification")
         consequence = raw.get("consequence")
         prior_failure = raw.get("prior_failure", False)
+        prior_failure_kind = _prior_failure_kind(
+            prior_failure, raw.get("prior_failure_kind")
+        )
         latency_priority = _latency_priority(raw.get("latency_priority"))
         if task_kind not in ("mechanical", "ordinary", "complex"):
             raise ValueError(f"invalid task_kind for segment {segment_id}")
@@ -2003,6 +2113,7 @@ def plan_apply_segments(
             verification=signals["verification"], consequence=signals["consequence"],
             prior_failure=signals["prior_failure"], evidence=evidence,
             latency_priority=latency_priority,
+            prior_failure_kind=prior_failure_kind,
         )
         segment_model = normalize_model(raw.get("model"))
         segment_effort = normalize_effort(raw.get("effort"))
@@ -2056,7 +2167,9 @@ def plan_apply_segments(
             "risk": risk,
             "size": size,
             **signals,
+            "prior_failure_kind": prior_failure_kind,
             "latency_priority": latency_priority,
+            "merge_group": _merge_group(raw.get("merge_group"), segment_id),
             "acceptance": _segment_list(raw.get("acceptance"), "acceptance", segment_id),
             "validation_budget": _segment_text(
                 raw.get("validation_budget"), "validation_budget", segment_id
@@ -2181,6 +2294,11 @@ def parser():
         help="How strongly this task prioritizes fast return over deeper reasoning",
     )
     root.add_argument("--prior-failure", action="store_true")
+    root.add_argument(
+        "--prior-failure-kind",
+        choices=("reasoning", "verification", "infrastructure"),
+        help="Classify a prior failure so routing faults do not trigger model escalation",
+    )
     root.add_argument("--evidence-path", type=Path, help="Offline benchmark evidence snapshot")
     root.add_argument("--model")
     root.add_argument("--effort")
@@ -2367,6 +2485,7 @@ def main():
             args.prior_failure,
             args.evidence_path,
             args.latency_priority,
+            args.prior_failure_kind,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

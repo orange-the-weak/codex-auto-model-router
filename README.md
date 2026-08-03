@@ -58,23 +58,25 @@ The policy is calibrated from OpenAI coding results and Codex credit rates, Curs
 | Route | Default use |
 |---|---|
 | **Luna medium** | All mechanical and repetitive work; automatic routing never goes lower |
-| **Luna high** | Default for ordinary bounded work |
-| **Luna max** | Genuinely deep or large deterministic work whose latency budget allows it |
+| **Luna high** | Default for ordinary bounded work and normal-size evidence scans |
+| **Luna xhigh** | Large bounded scans/reviews where max startup and token expansion are unnecessary |
+| **Luna max** | Genuinely large deterministic deep work whose latency budget allows it |
 | **Terra high** | Explicit latency priority when a shorter reasoning path matters more than Luna/high quality |
 | **Sol medium** | Bounded complex work |
-| **Sol high** | High ambiguity, coupling, judgment, or consequence |
-| **Sol xhigh** | A failed complex attempt, or explicit user choice |
+| **Sol high** | High ambiguity, coupling, or consequence; judgment alone is not enough |
+| **Sol xhigh** | A classified reasoning/verification failure on complex work, or explicit choice |
 
 Luna currently uses 4% of Sol's Codex token credits. CursorBench places Luna/medium above Luna/low by 10.1 points, so saving an already-low Luna credit rate no longer justifies the quality loss. Terra/high scores above Sol/low while its ChatBench response proxy is substantially shorter; it therefore survives as a latency specialist rather than a default middle tier. Task evidence and user overrides always win, and the full model-effort matrix remains explicitly selectable. The snapshot is versioned, offline, and valid for 90 days; invalid or stale evidence falls back without blocking work. See the [full evidence report](references/benchmark-evidence.md) and [machine-readable snapshot](references/benchmark-evidence.json).
 
 Native Ultra is off by default. The Router never selects it automatically because it already has dependency-aware concurrency. If you explicitly enable Ultra, the request is kept to one bounded Sol or Terra Segment and Router-managed parallelism is disabled, so the two orchestration layers do not stack.
 
-For an illustrative mixed workload, the seven-lane policy estimates **10–20% faster AI-work turnaround** than using Sol/medium everywhere, while the Cursor cost proxy falls by about 62%. Higher Luna output volume is not counted as a speed gain, and API cost is not Codex subscription cost. These remain hypotheses to refine from local history.
+For an illustrative mixed workload, the eight-lane policy estimates **10–20% faster AI-work turnaround** than using Sol/medium everywhere, while the Cursor cost proxy falls by about 62%. Higher Luna output volume is not counted as a speed gain, and API cost is not Codex subscription cost. These remain hypotheses to refine from local history.
 
 ## How it works
 
 - Re-evaluates every applicable request instead of inheriting the previous route.
 - Uses a one-Segment fast path. `begin` persists the canonical plan and identity; after that, `finish` and `restore` resolve by three IDs instead of rebuilding the plan after context compaction.
+- For parallel work, `prepare-dispatch` persists the full plan once and emits hash-bound bounded tickets. Executors use ID-only `attach`, so they do not reread the full plan, rebuild concurrency metadata, or depend on a shell marker.
 - Splits analysis, implementation, verification, or review only when different routes materially help.
 - Caps automatic concurrency at 4 parallel tasks, then reduces it to useful independent width and observed free slots. The coordinator reserves one slot, so a four-slot Codex session normally peaks at three parallel tasks.
 - Counts the coordinator in the visible summary: `Concurrency plan: 4 tasks (including main)`. Internal capacity still remains one coordinator plus three leaf tasks.
@@ -88,10 +90,11 @@ For an illustrative mixed workload, the seven-lane policy estimates **10–20% f
 - Announces the selected model and reasoning once per segment, stops on failure, and restores a verified original GPT-5.6 route once.
 - Keeps model-switch messages readable: task and route information appear first, while bounded internal IDs and state stay at the end of the continuation prompt.
 - Records only verified execution in a local JSONL ledger; recommendations never count as observed use.
-- Captures each parallel task's dispatch-confirmed and result-received boundaries on one coordinator monotonic clock, then derives actual elapsed time, cumulative parallel-task time, peak concurrency, and slot utilization. Models never supply timing numbers.
+- Stores each completed task's bounded result in one atomic route inbox. The last collection task can return a ready synthesis ticket immediately, while dependent tasks load only the results they declared.
+- Captures each parallel task's dispatch-confirmed and result-received boundaries on one coordinator monotonic clock, then separates actual elapsed time, cumulative task time, useful task overlap, orchestration gaps, and peak concurrency. Models never supply timing numbers.
 - Keeps older aggregate-only records readable but excludes them from verified history.
 - Tracks verified routing, queue, startup, switch/Restore, useful-execution, round-trip, and state-gate overhead without guessing missing data.
-- Ends each Apply brief with the runtime-generated current-run concurrency line, reproduced verbatim; Query/history is labeled as a historical aggregate. Reliable schema-v2 timing comes only from complete per-task intervals; otherwise the brief says `测量：待记录`. `并行省时估算` compares observed overlap with concatenating the same tasks; it is not a controlled A/B speedup result.
+- Ends each Apply brief with the runtime-generated current-run concurrency line. Reliable schema-v2 timing separates `task overlap` from `orchestration gap`; it does not claim speedup without a controlled serial A/B run.
 
 ## Use
 
@@ -110,7 +113,7 @@ Example notice:
 ```text
 Codex automatic routing | Task segment: Analyze the change | Model: GPT-5.6 Sol | Reasoning: high | High ambiguity
 Codex automatic routing | Concurrency plan: 4 tasks (including main) | Source: smart-reduced | Critical-path priority
-并发：峰值 4（含主任务）｜实际用时：2分0秒｜并行任务累计用时：4分48秒｜并行省时估算：58%｜槽位利用：85%
+并发：峰值 4（含主任务）｜实际用时：2分0秒｜子任务累计：4分48秒｜任务重叠：2分58秒｜编排空档：10秒
 ```
 
 Reports are written to `docs/codex-model-routing-report.md`; verified usage is stored in `.codex/model-routing-history.jsonl`. The ledger contains routing metadata and outcomes, not prompts, source code, secrets, or conversation text.

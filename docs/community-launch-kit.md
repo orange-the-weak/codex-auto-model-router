@@ -24,11 +24,13 @@ Use these drafts as starting points. Keep the final posts personal and answer ea
 >
 > - Selects GPT-5.6 Sol, Terra, or Luna with low through max reasoning per task segment; Ultra is opt-in only and disables Router-managed parallelism.
 > - Re-evaluates every applicable request instead of inheriting the previous route.
-> - Uses bounded dependency-aware concurrency only when useful independent work exists.
+> - Uses bounded dependency-aware concurrency only when useful independent work exists. The full plan is persisted once; executors receive lightweight, hash-bound tickets instead of rebuilt envelopes.
+> - Stores bounded worker results in an atomic route inbox. When the last dependency finishes, it can return the synthesis ticket immediately instead of waiting through another planning round.
+> - Routes ordinary scans to Luna/high, large bounded scans to Luna/xhigh, deterministic deep work to Luna/max, and keeps genuinely ambiguous or consequential work on Sol.
 > - Keeps fallback inside GPT-5.6 whenever any 5.6 model remains available.
 > - Calibrates defaults from versioned public benchmark evidence while task evidence and user overrides remain primary.
 > - Persists routing state so context compaction cannot force finish/restore to rebuild the full plan.
-> - Records verified routing and concurrency outcomes locally without prompts, source code, telemetry, or external APIs.
+> - Records verified routing and concurrency outcomes locally without prompts, source code, telemetry, or external APIs. Parallel reports now separate task overlap from orchestration gaps instead of presenting a proxy percentage as measured speedup.
 >
 > This is my first open-source project. If it sends a task down the wrong path or makes a clumsy split, that concrete example is the feedback I would value most.
 
@@ -42,7 +44,7 @@ Use these drafts as starting points. Keep the final posts personal and answer ea
 
 > I kept bouncing between Sol, Terra, and Luna in Codex: this task looked small, but was it really? Did it need more reasoning, or was I just overthinking it? After doing that loop one too many times, I decided to turn my own way of choosing into an open-source Skill.
 >
-> It uses Luna/medium as the mechanical floor, Luna/high as the ordinary default, Luna/max only for deep deterministic work, and Terra/high only when latency is explicitly prioritized. Complex or consequential work stays on Sol. It can use dependency-aware concurrency, but only when the task has useful independent boundaries and verified capacity.
+> It uses Luna/medium for mechanical work, Luna/high for ordinary work and normal scans, Luna/xhigh for large bounded scans, and Luna/max only for large deterministic deep work. Terra/high is a latency specialist; real complexity or consequence stays on Sol. Parallel work persists the plan once and gives each executor a hash-bound bounded ticket, so workers start with less repeated context and fewer state-gate surprises.
 >
 > Native Ultra is deliberately off by default. If you explicitly enable it for one bounded task, the Router steps back from its own parallel scheduler instead of stacking two orchestration systems.
 >
@@ -62,7 +64,7 @@ Use these drafts as starting points. Keep the final posts personal and answer ea
 
 > 说实话，Codex 有了 Sol、Terra、Luna、多档推理强度和并行子任务之后，我常常会在几个选项之间来回切：这个活到底该上哪档？是任务真复杂，还是我有点上头了？这样纠结久了，我干脆把自己这套判断整理成了一个开源 Skill。
 >
-> 它会按当前任务段重新选择模型和推理强度：机械任务最低 Luna/medium；普通任务默认 Luna/high；确实较深且可确定验证时才升 Luna/max；只有明确追求低延迟时才用 Terra/high；复杂或高后果任务保留 Sol。存在真正独立的任务边界时才启用并发，不会为了凑数量强行拆分。
+> 它会按当前任务段重新选择模型和推理强度：机械任务用 Luna/medium，普通任务和常规扫描用 Luna/high，大型有界扫描用 Luna/xhigh，只有大型确定性深度任务才升 Luna/max；Terra/high 只负责低延迟，真正复杂或高后果的工作留给 Sol。并发时完整计划只保存一次，每个执行器只拿一张有界票据，少重复读上下文，也少在状态门里兜圈子。
 >
 > 原生 Ultra 默认关闭。只有用户为单个有界任务显式开启时才使用，同时停掉 Router 自己的并发，避免两套调度互相打架。
 >
