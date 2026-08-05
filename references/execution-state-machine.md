@@ -1,6 +1,6 @@
 # Legacy strict execution state machine
 
-This reference is not the default Apply path. Router Lite uses direct local or leaf-agent execution without hashes, claims, cursor, ledger gates, or Restore. Read and use this state machine only after the user explicitly requests strict routing, strict ledger auditing, replay protection, or a reproducible routing experiment.
+This reference is not the default Apply path. The default routing path uses direct local or leaf-agent execution without hashes, claims, cursor, ledger gates, or Restore. Read and use this state machine only after the user explicitly requests strict routing, strict ledger auditing, replay protection, or a reproducible routing experiment.
 
 Use this state machine for Apply:
 

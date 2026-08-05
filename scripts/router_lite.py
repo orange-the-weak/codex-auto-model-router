@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Fast, fail-open model routing for normal Codex work.
+"""Fast, fail-open model advice for normal Codex work.
 
-The Lite path deliberately has no plan hash, cursor, claim, Restore, or
-cross-task runtime state. The coordinator keeps its model; a mismatched route
-is executed by one explicitly selected leaf agent.
+The default path deliberately has no plan hash, cursor, claim, Restore, or
+cross-task runtime state. The coordinator may run independent tools directly
+or use a bounded leaf executor when route-fit benefit clears its overhead.
 """
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -32,7 +33,12 @@ DEFAULT_AGGREGATION_SECONDS = 10
 DEFAULT_MIN_PARALLEL_SAVINGS_SECONDS = 30
 DEFAULT_MIN_PARALLEL_SAVINGS_RATIO = 0.15
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 1
-DEFAULT_MAX_REUSES_PER_EXECUTOR = 1
+DEFAULT_MAX_REUSES_PER_EXECUTOR = 2
+DEFAULT_EXECUTOR_WAIT_POLL_SECONDS = 30
+DEFAULT_EXECUTOR_STALLED_AFTER_SECONDS = 600
+
+EXECUTOR_TERMINAL_STATES = ("completed", "failed", "interrupted")
+EXECUTOR_INTERRUPTIBLE_STATE = "running"
 
 EFFORT_RANK = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}
 
@@ -53,6 +59,23 @@ AGENT_TYPES = {
     ("gpt-5.6-luna", "xhigh"): "codex_auto_model_executor_luna_xhigh",
     ("gpt-5.6-luna", "max"): "codex_auto_model_executor_luna_max",
 }
+
+
+class RouterArgumentError(ValueError):
+    """Argument errors that must fall back to local execution."""
+
+
+class FailOpenArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise RouterArgumentError(message)
+
+
+def _risk_value(value):
+    return {"medium": "normal"}.get(value, value)
+
+
+def _size_value(value):
+    return {"small": "normal", "medium": "normal"}.get(value, value)
 
 
 def _route_is_sufficient(current, selected):
@@ -76,6 +99,21 @@ def _route_is_sufficient(current, selected):
         current_model == model and EFFORT_RANK[current_effort] >= EFFORT_RANK[effort]
         for model, effort in candidates
     )
+
+
+def _subagent_policy(args):
+    """Return the automatic benefit-gated policy with an explicit opt-out."""
+    disabled = bool(getattr(args, "no_subagents", False))
+    return {
+        "mode": "automatic-benefit-gated",
+        "allowed": not disabled,
+        "automatic_creation": not disabled,
+        "automatic_reuse": not disabled,
+        "user_permission_required": False,
+        "disabled_by_user": disabled,
+        # Retained so older wrappers can keep passing the flag while migrating.
+        "legacy_allow_flag_seen": bool(getattr(args, "allow_subagents", False)),
+    }
 
 
 def _decision(args, task=None, current=None):
@@ -121,6 +159,8 @@ def _decision(args, task=None, current=None):
         raise ValueError("minimum delegate seconds cannot be negative")
     current_is_gpt56 = str(current.get("model", "")).startswith("gpt-5.6-")
     current_is_sufficient = _route_is_sufficient(current, selected)
+    subagent_policy = _subagent_policy(args)
+    subagents_allowed = subagent_policy["allowed"]
     short_work = estimated_seconds is not None and estimated_seconds < min_delegate_seconds
     local_cost_fast_path = (
         current.get("status") == "verified"
@@ -129,16 +169,37 @@ def _decision(args, task=None, current=None):
         and not task.get("prior_failure", args.prior_failure)
         and risk != "high"
         and consequence != "high"
+        and current_is_sufficient
         and (
             (task_kind == "mechanical" and size == "tiny")
             or (tool_bound and verification in (None, "deterministic"))
-            or (short_work and current_is_sufficient)
+            or short_work
         )
     )
     matched = current.get("status") == "verified" and (
         current.get("model"), current.get("effort")
     ) == (model, effort)
     ultra = effort == "ultra"
+    route_differs = not matched
+    route_benefit_clear = (
+        route_differs
+        and (
+            explicit_route
+            or (
+                current.get("status") == "verified"
+                and not current_is_sufficient
+            )
+            or not short_work
+        )
+    )
+    if explicit_route:
+        benefit_basis = "explicit-route-choice"
+    elif current.get("status") == "verified" and not current_is_sufficient:
+        benefit_basis = "current-route-insufficient"
+    elif not short_work:
+        benefit_basis = "route-fit-over-task-duration"
+    else:
+        benefit_basis = "startup-cost-not-amortized"
     if local_cost_fast_path:
         action = "local"
         actual_model = current["model"]
@@ -150,30 +211,285 @@ def _decision(args, task=None, current=None):
         else:
             reason = "startup-aware-local-fast-path"
     else:
-        action = "native-ultra" if ultra else "local" if matched else "delegate"
-        actual_model = model
-        actual_effort = effort
-        reason = "already-matched" if matched else selected["recommended"]["source"]
+        if ultra:
+            action = "native-ultra"
+            reason = selected["recommended"]["source"]
+        elif matched:
+            action = "local"
+            reason = "already-matched"
+        elif subagents_allowed and route_benefit_clear:
+            action = "delegate"
+            reason = selected["recommended"]["source"]
+        elif not subagents_allowed:
+            action = "local"
+            reason = "subagents-disabled-by-user"
+        else:
+            action = "local"
+            reason = "route-benefit-not-proven"
+        if action == "local":
+            actual_model = (
+                current.get("model") if current.get("status") == "verified" else None
+            )
+            actual_effort = (
+                current.get("effort") if current.get("status") == "verified" else None
+            )
+        else:
+            actual_model = model
+            actual_effort = effort
+    agent_type = None if action != "delegate" else AGENT_TYPES.get((model, effort))
+    lifecycle_contract = _lifecycle_contract(args)
     return {
         "protocol": LITE_PROTOCOL,
         "action": action,
         "model": actual_model,
         "effort": actual_effort,
-        "agent_type": None if action != "delegate" else AGENT_TYPES.get((model, effort)),
+        "agent_type": agent_type,
+        "spawn_contract": (
+            None if agent_type is None else {
+                "agent_type": agent_type,
+                "fork_turns": "none",
+                "retry_on_contract_error": False,
+                "request_escalated_permissions": False,
+                "return_limited_result_on_permission_boundary": True,
+                "finalize_immediately_after_acceptance": True,
+            }
+        ),
         "recommended_route": {"model": model, "effort": effort},
         "reason": reason,
         "current": current,
         "native_ultra": ultra,
+        "subagent_policy": subagent_policy,
+        "delegation_gate": {
+            "automatic": True,
+            "user_permission_required": False,
+            "benefit_clear": route_benefit_clear,
+            "basis": benefit_basis,
+            "estimated_seconds": estimated_seconds,
+            "minimum_task_seconds": min_delegate_seconds,
+            "fresh_executor_seconds": DEFAULT_FRESH_EXECUTOR_SECONDS,
+        },
+        "tool_concurrency": {
+            "allowed": True,
+            "creates_child_agents": False,
+            "same_model_and_effort": True,
+            "scope": "independent-safe-tool-or-process-calls",
+        },
+        "recommended_route_is_advisory": action == "local" and not matched,
+        "user_model_switch_needed": (
+            action == "local" and not current_is_sufficient
+        ),
         "restore_required": False,
         "fail_open": True,
         "startup_failure_takeover_seconds": 15,
+        "lifecycle_contract": lifecycle_contract,
         "estimated_seconds": estimated_seconds,
         "delegate_break_even_seconds": min_delegate_seconds,
+        "reuse_target": None,
+        "record_contract": {
+            "required_after_execution": action == "delegate",
+            "best_effort": True,
+        },
+    }
+
+
+def _lifecycle_contract(args):
+    poll_seconds = int(getattr(
+        args, "executor_wait_poll_seconds", DEFAULT_EXECUTOR_WAIT_POLL_SECONDS
+    ))
+    stalled_after_seconds = int(getattr(
+        args, "executor_stalled_after_seconds",
+        DEFAULT_EXECUTOR_STALLED_AFTER_SECONDS,
+    ))
+    if poll_seconds <= 0:
+        raise ValueError("executor wait poll seconds must be positive")
+    if stalled_after_seconds <= 0 or poll_seconds > stalled_after_seconds:
+        raise ValueError(
+            "executor stalled threshold must be at least the poll interval"
+        )
+    return {
+        "protocol_only": True,
+        "executor": {
+            "finalize_immediately_after_acceptance": True,
+            "no_post_acceptance_validation_commentary_or_parent_wait": True,
+            "request_escalated_permissions": False,
+            "permission_boundary_result": "limited",
+        },
+        "coordinator": {
+            "wait_poll_seconds": poll_seconds,
+            "terminal_states": list(EXECUTOR_TERMINAL_STATES),
+            "interruptible_state": EXECUTOR_INTERRUPTIBLE_STATE,
+            "completion_authority": ["child-task-complete", "live-agent-status"],
+            "refresh_status_after_wait_update": True,
+            "refresh_status_before_parent_final": True,
+            "wait_timeout_is_stall": False,
+            "parent_final_requires_no_required_running_executors": True,
+            "parent_final_requires_all_owned_children_terminal": True,
+            "parent_final_stops_new_dispatch": True,
+            "parent_final_disables_reuse": True,
+            "parent_final_clears_reuse_registry": True,
+            "parent_final_interrupts_unneeded_running_children": True,
+            "parent_final_interrupts_optional_stragglers": True,
+            "parent_final_rechecks_status_after_interrupt": True,
+            "parent_final_scope": "current-task-tree-only",
+            "delete_child_agent_ui_history_supported": False,
+            "stalled_after_seconds": stalled_after_seconds,
+            "activity_resets_stall_timer": True,
+            "activity_sources": ["reasoning", "tool", "test"],
+            "on_stale_parent_running_after_child_complete": "reconcile-completed",
+            "on_stall": "refresh-status-then-suggest-interrupt-and-finish-locally",
+            "on_completed": "accept-result-and-reuse-only-before-parent-finalization",
+            "clear_reuse_registry_on_new_request": True,
+            "delete_or_interrupt_completed_on_new_request": False,
+        },
+    }
+
+
+def executor_lifecycle_decision(
+    state,
+    *,
+    now_seconds,
+    last_activity_seconds=None,
+    activity_at_seconds=None,
+    task_complete_observed=False,
+    stalled_after_seconds=DEFAULT_EXECUTOR_STALLED_AFTER_SECONDS,
+):
+    """Return coordinator advice without invoking collaboration tools.
+
+    Reasoning, tool, and test progress are represented by ``activity_at_seconds``.
+    The latest observed activity becomes the new stall-timer origin.
+    """
+    if not isinstance(state, str) or not state:
+        raise ValueError("executor state must be a non-empty string")
+    if not isinstance(task_complete_observed, bool):
+        raise ValueError("task complete observation must be boolean")
+    now = float(now_seconds)
+    threshold = float(stalled_after_seconds)
+    if threshold <= 0:
+        raise ValueError("executor stalled threshold must be positive")
+
+    last_activity = (
+        None if last_activity_seconds is None else float(last_activity_seconds)
+    )
+    if activity_at_seconds is not None:
+        activity_at = float(activity_at_seconds)
+        if activity_at > now:
+            raise ValueError("executor activity cannot be in the future")
+        last_activity = (
+            activity_at if last_activity is None else max(last_activity, activity_at)
+        )
+
+    reported_state = state
+    if task_complete_observed:
+        state = "completed"
+
+    if state in EXECUTOR_TERMINAL_STATES:
+        if state == "completed" and reported_state != "completed":
+            decision = "reconcile-completed"
+        else:
+            decision = "accept-completed" if state == "completed" else "accept-terminal"
+        return {
+            "state": state,
+            "reported_state": reported_state,
+            "decision": decision,
+            "should_interrupt": False,
+            "last_activity_seconds": last_activity,
+            "stalled_for_seconds": None,
+            "same_request_reuse": (
+                "prequalify" if state == "completed" else "ineligible"
+            ),
+        }
+
+    if state != EXECUTOR_INTERRUPTIBLE_STATE:
+        return {
+            "state": state,
+            "reported_state": reported_state,
+            "decision": "observe",
+            "should_interrupt": False,
+            "last_activity_seconds": last_activity,
+            "stalled_for_seconds": None,
+            "same_request_reuse": "ineligible",
+        }
+    if last_activity is None:
+        raise ValueError("running executor requires last activity time")
+    if last_activity > now:
+        raise ValueError("executor last activity cannot be in the future")
+
+    stalled_for = now - last_activity
+    stalled = stalled_for >= threshold
+    return {
+        "state": state,
+        "reported_state": reported_state,
+        "decision": "suggest-interrupt" if stalled else "continue-waiting",
+        "should_interrupt": stalled,
+        "last_activity_seconds": last_activity,
+        "stalled_for_seconds": stalled_for,
+        "same_request_reuse": "ineligible",
     }
 
 
 def decide(args):
-    print(json.dumps(_decision(args), ensure_ascii=False, sort_keys=True))
+    result = _decision(args)
+    max_reuses = int(getattr(args, "max_executor_reuses", DEFAULT_MAX_REUSES_PER_EXECUTOR))
+    if not 0 <= max_reuses <= 3:
+        raise ValueError("max executor reuses must be from 0 to 3")
+    subagents_allowed = result["subagent_policy"]["allowed"]
+    if subagents_allowed:
+        candidates, rejected = _reuse_candidates(
+            getattr(args, "reuse_candidates_json", "[]"),
+            max_reuses,
+            _reuse_identity(args),
+        )
+        exclusions = _task_reuse_exclusions({}, args)
+    else:
+        candidates, rejected = [], []
+        exclusions = ["subagents_disabled_by_user"]
+    reused_seconds = int(getattr(
+        args, "reused_executor_seconds", DEFAULT_REUSED_EXECUTOR_SECONDS
+    ))
+    if reused_seconds < 0:
+        raise ValueError("reused executor seconds cannot be negative")
+    recommended_differs = (
+        result["current"].get("model"), result["current"].get("effort")
+    ) != (
+        result["recommended_route"]["model"],
+        result["recommended_route"]["effort"],
+    )
+    reuse_beats_local_startup = (
+        result["action"] == "local"
+        and result["reason"] == "startup-aware-local-fast-path"
+        and recommended_differs
+        and (
+            result["estimated_seconds"] is None
+            or result["estimated_seconds"] >= reused_seconds
+        )
+    )
+    if (
+        subagents_allowed
+        and (result["action"] == "delegate" or reuse_beats_local_startup)
+        and not exclusions
+    ):
+        candidate = next((
+            item for item in candidates
+            if (item["model"], item["effort"]) == (
+                result["recommended_route"]["model"],
+                result["recommended_route"]["effort"],
+            )
+        ), None)
+        if candidate is not None:
+            result["action"] = "reuse"
+            result["reuse_target"] = candidate["agent_task_name"]
+            result["reason"] = "safe-same-request-reuse"
+            result["reused_executor_seconds"] = reused_seconds
+            result["spawn_contract"] = None
+            result["record_contract"]["required_after_execution"] = True
+    result["reuse_policy"] = {
+        "enabled": subagents_allowed,
+        "max_followups_per_executor": max_reuses if subagents_allowed else 0,
+        "eligible_candidates": [item["agent_task_name"] for item in candidates],
+        "rejected_candidates": rejected,
+        "task_exclusions": exclusions,
+    }
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
 def _task_name(task, index):
@@ -209,12 +525,46 @@ def _activation_cost(lane, item, fresh_seconds, reused_seconds, max_reuses):
     if (
         lane["route"] == _route_key(item)
         and lane["followups"] < max_reuses
+        and lane["reuse_eligible"]
+        and item["reuse_eligible"]
     ):
         return "reused", reused_seconds
     return "fresh", fresh_seconds
 
 
-def _reuse_candidates(value):
+def _reuse_identity(args):
+    request_id = getattr(args, "request_id", None)
+    repository = getattr(args, "repository", None)
+    permissions = getattr(args, "permissions_fingerprint", None)
+    sandbox = getattr(args, "sandbox_fingerprint", None)
+    if not all((request_id, repository, permissions, sandbox)):
+        return None
+    return {
+        "request_id": str(request_id),
+        "repository_realpath": os.path.realpath(repository),
+        "permissions_fingerprint": str(permissions),
+        "sandbox_fingerprint": str(sandbox),
+    }
+
+
+def _task_reuse_exclusions(task, args):
+    exclusions = []
+    if bool(task.get("fresh_context_required", getattr(args, "fresh_context_required", False))):
+        exclusions.append("fresh_context_required")
+    if bool(task.get("external_action", getattr(args, "external_action", False))):
+        exclusions.append("external_action")
+    if bool(task.get("sensitive_data", getattr(args, "sensitive_data", False))):
+        exclusions.append("sensitive_data")
+    if task.get("risk", args.risk) == "high" or task.get(
+        "consequence", args.consequence
+    ) == "high":
+        exclusions.append("high_consequence")
+    if task.get("prior_failure", args.prior_failure):
+        exclusions.append("prior_failure")
+    return exclusions
+
+
+def _reuse_candidates(value, max_reuses, identity):
     try:
         candidates = json.loads(value or "[]")
     except json.JSONDecodeError as exc:
@@ -222,6 +572,7 @@ def _reuse_candidates(value):
     if not isinstance(candidates, list) or any(not isinstance(item, dict) for item in candidates):
         raise ValueError("reuse candidates must be an array of objects")
     normalized = []
+    rejected = []
     seen = set()
     for item in candidates:
         name = item.get("agent_task_name")
@@ -233,9 +584,43 @@ def _reuse_candidates(value):
         effort = policy.normalize_effort(item.get("effort"))
         if model not in policy.MODELS or effort not in EFFORT_RANK:
             raise ValueError("reuse candidate requires a supported GPT-5.6 route")
-        normalized.append({"agent_task_name": name, "model": model, "effort": effort})
+        followups_used = item.get("followups_used", 0)
+        if not isinstance(followups_used, int) or followups_used < 0:
+            raise ValueError("reuse candidate followups_used must be a non-negative integer")
+        reasons = []
+        for field in ("idle", "accepted", "ownership_released"):
+            if item.get(field) is not True:
+                reasons.append(field)
+        for field in (
+            "pending_tool_call", "external_action", "sensitive_data", "interrupted",
+            "failed", "prior_failure", "fresh_context_required", "deployment",
+            "authentication", "high_consequence",
+        ):
+            if item.get(field) is not False:
+                reasons.append(field)
+        if identity is None:
+            reasons.append("identity_unavailable")
+        else:
+            for field, expected in identity.items():
+                actual = item.get(field)
+                if field == "repository_realpath" and isinstance(actual, str):
+                    actual = os.path.realpath(actual)
+                if actual != expected:
+                    reasons.append(field)
+        if followups_used >= max_reuses:
+            reasons.append("reuse_limit")
+        candidate = {
+            "agent_task_name": name,
+            "model": model,
+            "effort": effort,
+            "followups_used": followups_used,
+        }
+        if reasons:
+            rejected.append({**candidate, "reasons": reasons})
+        else:
+            normalized.append(candidate)
         seen.add(name)
-    return normalized
+    return normalized, rejected
 
 
 def _executor_schedule(
@@ -255,7 +640,7 @@ def _executor_schedule(
             candidate = next((
                 value for value in unused_candidates
                 if (value["model"], value["effort"]) == _route_key(item)
-            ), None) if max_reuses else None
+            ), None) if max_reuses and item["reuse_eligible"] else None
             if candidate is not None:
                 unused_candidates.remove(candidate)
             activation = "reused" if candidate else "fresh"
@@ -266,7 +651,8 @@ def _executor_schedule(
                 "lane": lane_index + 1,
                 "route": _route_key(item),
                 "available_seconds": finish,
-                "followups": 1 if candidate else 0,
+                "followups": candidate["followups_used"] + 1 if candidate else 0,
+                "reuse_eligible": item["reuse_eligible"],
                 "agent_task_name": (
                     candidate["agent_task_name"] if candidate else item["task_name"]
                 ),
@@ -303,6 +689,7 @@ def _executor_schedule(
             "finish_seconds": finish,
         })
         lane["available_seconds"] = finish
+        lane["reuse_eligible"] = item["reuse_eligible"]
         if activation == "reused":
             lane["followups"] += 1
         else:
@@ -337,12 +724,16 @@ def plan(args):
         if args.no_runtime_detection
         else policy.detect_current_route(args.sessions_root)
     )
+    subagent_policy = _subagent_policy(args)
+    subagents_allowed = subagent_policy["allowed"]
     decisions = []
     for index, task in enumerate(tasks):
         item = dict(task)
         item["task_name"] = _task_name(task, index)
         item["route"] = _decision(args, task, current)
-        item["leaf_agent_type"] = AGENT_TYPES.get(_route_key(item))
+        item["leaf_agent_type"] = (
+            AGENT_TYPES.get(_route_key(item)) if subagents_allowed else None
+        )
         item["estimated_seconds"] = int(task.get("estimated_seconds", 0))
         item["required"] = bool(task.get("required", True))
         item["max_recovery_attempts"] = int(
@@ -353,11 +744,38 @@ def plan(args):
         item["depends_on"] = list(task.get("depends_on", []))
         item["write_scopes"] = list(task.get("write_scopes", []))
         item["conflict_keys"] = list(task.get("conflict_keys", []))
+        item["fresh_context_required"] = bool(task.get("fresh_context_required", False))
+        item["external_action"] = bool(task.get("external_action", False))
+        item["sensitive_data"] = bool(task.get("sensitive_data", False))
+        reuse_exclusions = _task_reuse_exclusions(task, args)
+        item["reuse_eligible"] = subagents_allowed and not reuse_exclusions
+        item["reuse_exclusions"] = reuse_exclusions
         decisions.append(item)
 
     names = {item["task_name"] for item in decisions}
     if any(set(item["depends_on"]) - names for item in decisions):
         raise SystemExit("task dependencies must reference task_name values in this plan")
+    if not subagents_allowed:
+        print(json.dumps({
+            "protocol": LITE_PROTOCOL,
+            "action": "local",
+            "parallel": False,
+            "parallel_kind": "none",
+            "subagent_policy": subagent_policy,
+            "tool_concurrency": {
+                "allowed": True,
+                "creates_child_agents": False,
+                "same_model_and_effort": True,
+                "scope": "independent-safe-tool-or-process-calls",
+                "planning": "coordinator-direct",
+            },
+            "tasks": decisions,
+            "recommendation": (
+                "run in the coordinator; concurrently dispatch only independent "
+                "safe tool or process calls"
+            ),
+        }, ensure_ascii=False, sort_keys=True))
+        return
     ready = [item for item in decisions if not item["depends_on"]]
     worthwhile = [
         item for item in ready
@@ -390,7 +808,10 @@ def plan(args):
     max_executor_reuses = int(getattr(
         args, "max_executor_reuses", DEFAULT_MAX_REUSES_PER_EXECUTOR
     ))
-    reuse_candidates = _reuse_candidates(getattr(args, "reuse_candidates_json", "[]"))
+    reuse_candidates, rejected_reuse_candidates = _reuse_candidates(
+        getattr(args, "reuse_candidates_json", "[]"), max_executor_reuses,
+        _reuse_identity(args),
+    )
     for name in (
         "min_parallel_seconds", "coordination_seconds",
         "spawn_stagger_seconds", "aggregation_seconds", "min_parallel_savings_seconds",
@@ -462,6 +883,7 @@ def plan(args):
         "priority_order": priority_order,
         "executor_lanes": schedule["lanes"] if parallel else [],
         "tasks": decisions,
+        "subagent_policy": subagent_policy,
         "planning_estimate": {
             "kind": "planning-only-not-measured-speedup",
             "serial_seconds": serial_seconds,
@@ -489,11 +911,20 @@ def plan(args):
             "eligible_candidates": [
                 item["agent_task_name"] for item in reuse_candidates
             ],
+            "rejected_candidates": rejected_reuse_candidates,
             "requires_same_repository": True,
             "requires_same_route": True,
             "requires_same_permissions": True,
+            "requires_same_sandbox": True,
+            "required_identity_fields": [
+                "request_id", "repository_realpath",
+                "permissions_fingerprint", "sandbox_fingerprint",
+            ],
             "requires_idle_executor": True,
             "requires_resolved_write_ownership": True,
+            "requires_accepted_result": True,
+            "excludes_fresh_context_reviews": True,
+            "excludes_high_consequence_or_prior_failure": True,
             "recheck_immediately_before_followup": True,
             "cross_request_reuse": False,
         },
@@ -533,8 +964,12 @@ def record(args):
 
 def _add_route_arguments(parser):
     parser.add_argument("--task-kind", choices=("mechanical", "ordinary", "complex"), default="ordinary")
-    parser.add_argument("--risk", choices=("low", "normal", "high"), default="normal")
-    parser.add_argument("--size", choices=("tiny", "normal", "large"), default="normal")
+    parser.add_argument(
+        "--risk", type=_risk_value, choices=("low", "normal", "high"), default="normal"
+    )
+    parser.add_argument(
+        "--size", type=_size_value, choices=("tiny", "normal", "large"), default="normal"
+    )
     parser.add_argument("--ambiguity", choices=("low", "medium", "high"))
     parser.add_argument("--coupling", choices=("low", "medium", "high"))
     parser.add_argument("--verification", choices=("deterministic", "mixed", "judgment"))
@@ -551,16 +986,59 @@ def _add_route_arguments(parser):
     parser.add_argument("--effort")
     parser.add_argument("--sessions-root", type=Path)
     parser.add_argument("--no-runtime-detection", action="store_true")
+    parser.add_argument(
+        "--no-subagents", action="store_true",
+        help=(
+            "Disable automatic delegate, reuse, and agent-parallel actions; "
+            "direct tool concurrency remains available"
+        ),
+    )
+    parser.add_argument(
+        "--allow-subagents", action="store_true", help=argparse.SUPPRESS,
+    )
+    # Compatibility-only context accepted from older callers. Routing decisions
+    # remain driven by the explicit, validated fields above.
+    parser.add_argument("--responsibility", help=argparse.SUPPRESS)
+    parser.add_argument("--signals", help=argparse.SUPPRESS)
+
+
+def _add_reuse_arguments(parser):
+    parser.add_argument("--request-id")
+    parser.add_argument("--repository", type=Path)
+    parser.add_argument("--permissions-fingerprint")
+    parser.add_argument("--sandbox-fingerprint")
+    parser.add_argument("--reuse-candidates-json", default="[]")
+    parser.add_argument(
+        "--reused-executor-seconds", type=int,
+        default=DEFAULT_REUSED_EXECUTOR_SECONDS,
+    )
+    parser.add_argument(
+        "--max-executor-reuses", type=int,
+        default=DEFAULT_MAX_REUSES_PER_EXECUTOR,
+    )
+    parser.add_argument("--fresh-context-required", action="store_true")
+    parser.add_argument("--external-action", action="store_true")
+    parser.add_argument("--sensitive-data", action="store_true")
+    parser.add_argument(
+        "--executor-wait-poll-seconds", type=int,
+        default=DEFAULT_EXECUTOR_WAIT_POLL_SECONDS,
+    )
+    parser.add_argument(
+        "--executor-stalled-after-seconds", type=int,
+        default=DEFAULT_EXECUTOR_STALLED_AFTER_SECONDS,
+    )
 
 
 def parser():
-    root = argparse.ArgumentParser()
+    root = FailOpenArgumentParser()
     commands = root.add_subparsers(dest="command", required=True)
     single = commands.add_parser("decide")
     _add_route_arguments(single)
+    _add_reuse_arguments(single)
     single.set_defaults(func=decide)
     planner = commands.add_parser("plan")
     _add_route_arguments(planner)
+    _add_reuse_arguments(planner)
     planner.add_argument("--tasks-json", required=True)
     planner.add_argument("--max-total-tasks", type=int, default=DEFAULT_MAX_TOTAL_TASKS)
     planner.add_argument("--available-worker-slots", type=int)
@@ -569,18 +1047,6 @@ def parser():
         "--fresh-executor-seconds", "--executor-startup-seconds",
         dest="fresh_executor_seconds", type=int,
         default=DEFAULT_FRESH_EXECUTOR_SECONDS,
-    )
-    planner.add_argument(
-        "--reused-executor-seconds", type=int,
-        default=DEFAULT_REUSED_EXECUTOR_SECONDS,
-    )
-    planner.add_argument(
-        "--max-executor-reuses", type=int,
-        default=DEFAULT_MAX_REUSES_PER_EXECUTOR,
-    )
-    planner.add_argument(
-        "--reuse-candidates-json", default="[]",
-        help="Coordinator-prequalified idle executors from this user request only",
     )
     planner.add_argument(
         "--coordination-seconds", type=int, default=DEFAULT_COORDINATION_SECONDS
@@ -616,9 +1082,9 @@ def parser():
     return root
 
 
-if __name__ == "__main__":
-    args = parser().parse_args()
+def main(argv=None):
     try:
+        args = parser().parse_args(argv)
         args.func(args)
     except (OSError, ValueError, SystemExit) as exc:
         # Routing advice must never block the requested project work.
@@ -628,3 +1094,8 @@ if __name__ == "__main__":
             "fail_open": True,
             "warning": f"router-lite-fallback:{type(exc).__name__}",
         }, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

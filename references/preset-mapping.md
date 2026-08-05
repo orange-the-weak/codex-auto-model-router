@@ -1,6 +1,6 @@
 # Explicit custom-agent preset mapping
 
-Use this mapping when the agent interface explicitly accepts an agent type. Router Lite returns the Apply `agent_type` directly; selecting a generic task name does not apply a model preset.
+Use this mapping when the automatic benefit gate selects a model-specific leaf and the agent interface accepts an agent type. No extra permission prompt is required. Local decisions return no Apply `agent_type`; selecting a generic task name does not apply a model preset.
 
 ## Assess and Retune (read-only router)
 
@@ -18,9 +18,9 @@ Use this mapping when the agent interface explicitly accepts an agent type. Rout
 | Terra | `codex_auto_model_executor_terra_low` | `codex_auto_model_executor_terra` | `codex_auto_model_executor_terra_high` | `codex_auto_model_executor_terra_xhigh` | `codex_auto_model_executor_terra_max` |
 | Luna | `codex_auto_model_executor_luna_low` | `codex_auto_model_executor_luna` | `codex_auto_model_executor_luna_high` | `codex_auto_model_executor_luna_xhigh` | `codex_auto_model_executor_luna_max` |
 
-Router Lite gives each Apply executor a direct bounded task: goal, relevant paths and decisions, acceptance criteria, constraints, validation budget, stop condition, and recovery budget. Treat the capsule as self-contained: do not load unrelated memory or add redundant validation after acceptance is proven. It does not send IDs, hashes, tickets, ledgers, environment markers, or the full chat. The executor reads applicable project instructions, performs only that task, never delegates, and returns the project result to the coordinator.
+The benefit-gated subagent path gives each Apply executor a direct bounded task: goal, relevant paths and decisions, acceptance criteria, constraints, validation budget, stop condition, and recovery budget. Treat the capsule as self-contained: do not load unrelated memory or add redundant validation after acceptance is proven. It does not send IDs, hashes, tickets, ledgers, environment markers, or the full chat. The executor reads applicable project instructions, performs only that task, never delegates, sends one final result, and ends its current turn immediately.
 
-For Lite parallel work, every executor is still a leaf using exactly one Apply preset. The Coordinator alone owns dependencies, write-scope conflicts, free capacity, wait-any refill, failure handling, and aggregation. A parallel worker must not spawn another agent even when its model supports proactive delegation.
+For agent-parallel work, every executor is still a leaf using exactly one Apply preset. The Coordinator alone owns dependencies, write-scope conflicts, free capacity, wait-any refill, failure handling, aggregation, and final cleanup. A parallel worker must not spawn another agent even when its model supports proactive delegation.
 
 All presets intentionally target GPT-5.6. If one preset is unavailable, choose another 5.6 preset using Sol → Terra → Luna, Terra → Sol → Luna, or Luna → Terra → Sol. Do not substitute a generic GPT-5.5 agent while any listed 5.6 preset remains selectable.
 

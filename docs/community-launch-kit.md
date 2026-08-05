@@ -12,30 +12,29 @@ Use these drafts as starting points. Keep the final posts personal and answer ea
 
 `openai-codex`, `codex`, `codex-skill`, `gpt-5-6`, `model-routing`, `reasoning`, `ai-coding-agent`, `developer-tools`
 
-## Router Lite release
+## v0.2 release
 
 **Suggested tag:** `v0.2.0`
 
-**Title:** `v0.2.0 — Router Lite and safe executor reuse`
+**Title:** `v0.2.0 — Fail-open benefit-gated routing`
 
 **Notes**
 
-> Router Lite is a reliability-focused redesign of Codex Auto Model Router. The original version taught me an uncomfortable lesson: a router that blocks the real work is worse than no router at all.
+> Version 2 is a reliability-focused redesign of Codex Auto Model Router. The original version taught me an uncomfortable lesson: a router that blocks the real work is worse than no router at all.
 >
 > - Selects GPT-5.6 Sol, Terra, or Luna with low through max reasoning per task segment; Ultra is opt-in only and disables Router-managed parallelism.
 > - Re-evaluates every applicable request instead of inheriting the previous route.
-> - Keeps the coordinator model unchanged and delegates once to an explicitly selected internal agent when useful; normal work has no Restore step.
+> - Keeps sufficient work in the current coordinator; recommendations never claim to switch an already-running conversation's model or reasoning effort.
 > - Removes hashes, cursors, environment guards, blocking ledgers, and rebuilt envelopes from the default execution path.
-> - Keeps short and deterministic work local when the current GPT-5.6 route is sufficient.
-> - Separates fresh executor cost from same-request reuse: local probes measured 35.5–39.6 seconds to a fresh first tool and 2.7–9.4 seconds to a reused first tool.
-> - Uses route-aware executor lanes, longest-first dispatch, wait-any refill, and bounded concurrency only when independent work repays activation and aggregation cost.
-> - Reuses a compatible idle executor at most once in the same request; route changes, failures, stale ownership, authentication, deployment, and sensitive external actions stay fresh or local.
+> - Runs independent safe tools or processes concurrently in the coordinator without creating child-agent UI entries.
+> - Automatically delegates, reuses, or applies multi-model agent parallelism when route benefit clearly exceeds bounded startup and aggregation overhead; no extra permission prompt is required.
+> - Supports `--no-subagents` as an explicit opt-out and retains bounded executor lifecycle, finalization, and reuse safeguards.
 > - Routes ordinary scans to Luna/high, large bounded scans to Luna/xhigh, deterministic deep work to Luna/max, and keeps genuinely ambiguous or consequential work on Sol.
 > - Keeps fallback inside GPT-5.6 whenever any 5.6 model remains available.
 > - Calibrates defaults from versioned public benchmark evidence while task evidence and user overrides remain primary.
-> - Fails open to one local execution when routing or agent startup fails, unless that could duplicate a dangerous external action.
+> - Fails open to local execution when routing fails; subagent startup failures also fall back locally when safe.
 > - Records routing and concurrency outcomes after completion on a best-effort basis, without prompts, source code, telemetry, or external APIs.
-> - Validated with 257 local tests, distribution checks, Skill validation, and native Codex fresh/reuse probes.
+> - Validated with local tests, distribution checks, Skill validation, and native Codex evidence.
 >
 > This is my first open-source project. If it sends a task down the wrong path or makes a clumsy split, that concrete example is the feedback I would value most.
 
@@ -49,7 +48,7 @@ Use these drafts as starting points. Keep the final posts personal and answer ea
 
 > I kept bouncing between Sol, Terra, and Luna in Codex: this task looked small, but was it really? Did it need more reasoning, or was I just overthinking it? After doing that loop one too many times, I decided to turn my own way of choosing into an open-source Skill.
 >
-> It uses Luna/medium for mechanical work, Luna/high for ordinary work and normal scans, Luna/xhigh for large bounded scans, and Luna/max only for large deterministic deep work. Terra/high is a latency specialist; real complexity or consequence stays on Sol. Router Lite keeps the coordinator model unchanged and leaves hashes, Restore, and blocking ledgers out of normal work. It can safely reuse a matching idle executor once inside the same request, avoiding most of the measured fresh-task initialization without carrying context into the next request.
+> It uses Luna/medium for mechanical work, Luna/high for ordinary work and normal scans, Luna/xhigh for large bounded scans, and Luna/max only for large deterministic deep work. Terra/high is a latency specialist; real complexity or consequence stays on Sol. Because a Skill cannot switch an already-running main conversation, a different route runs in a separate model-specific leaf only when its benefit clearly exceeds bounded overhead. Independent safe tools still run concurrently without child agents, and no extra permission prompt is required for a justified leaf.
 >
 > Native Ultra is deliberately off by default. If you explicitly enable it for one bounded task, the Router steps back from its own parallel scheduler instead of stacking two orchestration systems.
 >
@@ -69,7 +68,7 @@ Use these drafts as starting points. Keep the final posts personal and answer ea
 
 > 说实话，Codex 有了 Sol、Terra、Luna、多档推理强度和并行子任务之后，我常常会在几个选项之间来回切：这个活到底该上哪档？是任务真复杂，还是我有点上头了？这样纠结久了，我干脆把自己这套判断整理成了一个开源 Skill。
 >
-> 它会按当前任务重新选择模型和推理强度：机械任务用 Luna/medium，普通任务和常规扫描用 Luna/high，大型有界扫描用 Luna/xhigh，只有大型确定性深度任务才升 Luna/max；Terra/high 只负责低延迟，真正复杂或高后果的工作留给 Sol。新版 Lite 保持主线程模型不变，普通任务不再经过哈希、Restore 和阻塞式台账；同一请求里如果有路由完全一致的空闲执行器，可以安全复用一次，省掉大部分新任务初始化，但不会把上下文带到下一轮请求。
+> 它会按当前任务推荐模型和推理强度：机械任务用 Luna/medium，普通任务和常规扫描用 Luna/high，大型有界扫描用 Luna/xhigh，只有大型确定性深度任务才升 Luna/max；Terra/high 只负责低延迟，真正复杂或高后果的工作留给 Sol。Skill 不能切换已经开始的主对话，因此不同路由会在收益明确超过有界开销时交给独立的指定模型叶子智能体；独立安全的工具仍直接并发，合理委派无需额外询问许可。
 >
 > 原生 Ultra 默认关闭。只有用户为单个有界任务显式开启时才使用，同时停掉 Router 自己的并发，避免两套调度互相打架。
 >

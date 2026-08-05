@@ -69,8 +69,12 @@ if not 25 <= len(values.get("short_description", "")) <= 64:
     fail("openai.yaml short_description length is invalid")
 if "$codex-auto-model-router" not in values.get("default_prompt", ""):
     fail("openai.yaml default prompt does not invoke the skill")
-if "Codex 自动路由｜任务：<name>" not in skill_text:
-    fail("visible Lite routing protocol is missing")
+if "Codex 自动路由｜任务：<name>｜建议：<model>/<effort>｜执行：<当前主模型|子智能体 model/effort>" not in skill_text:
+    fail("visible routing protocol is missing")
+if "Codex auto route | Task: <name> | Recommendation: <model>/<effort> | Execution: <current coordinator|model/effort leaf agent>" not in skill_text:
+    fail("English visible routing protocol is missing")
+if "in the language of the user's current request" not in skill_text:
+    fail("routing notices do not follow the current request language")
 for obsolete_segment_counter in (
     "Segment <index>/<total>",
     "Segment 1/1",
@@ -79,19 +83,24 @@ for obsolete_segment_counter in (
     for path in (ROOT / "SKILL.md", ROOT / "README.md", ROOT / "README.zh-CN.md"):
         if obsolete_segment_counter in path.read_text(encoding="utf-8"):
             fail(f"visible Segment counter remains in {path.name}: {obsolete_segment_counter}")
-for lite_contract in (
-    "Use Router Lite by default",
+for default_path_contract in (
+    "Use the default fail-open benefit-gated path",
     "router_lite.py decide",
+    "Pass `--no-subagents` only when the user explicitly disables child agents",
+    "automatically create or reuse a model-specific leaf agent",
+    "Call `router_lite.py plan` and collaboration lifecycle tools only",
+    "recommended route as actual model use",
     "The coordinator never changes its own model",
     "no Restore step",
+    "## Direct tool concurrency",
+    "## Automatic benefit-gated subagent mode",
     "within 15 seconds",
-    "Do not rebuild an envelope",
     "Treat every ledger error as a non-blocking warning",
     "## Strict compatibility mode",
     "Never silently enter strict mode",
 ):
-    if lite_contract not in skill_text:
-        fail(f"Router Lite contract is missing: {lite_contract}")
+    if default_path_contract not in skill_text:
+        fail(f"default routing contract is missing: {default_path_contract}")
 for distribution_text, label in (
     (skill_text, "SKILL.md"),
     ((ROOT / "README.md").read_text(encoding="utf-8"), "README.md"),
@@ -102,30 +111,58 @@ for distribution_text, label in (
         fail(f"obsolete compression wording is exposed in {label}")
 readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
 readme_zh_text = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+for lifecycle_contract in (
+    "The recommendation does not switch the current task's model",
+    "creates no child-agent cards",
+    "no additional user permission prompt is required",
+    "`completed` is terminal",
+    "reuse never crosses user requests",
+    "`--no-subagents` is the explicit opt-out",
+    "Visible routing notices follow the language of the current request",
+    "interrupts every optional or otherwise unneeded child still genuinely `running`",
+    "no collaboration operation for deleting completed child-agent UI history",
+):
+    if lifecycle_contract not in readme_text:
+        fail(f"English executor lifecycle contract is missing: {lifecycle_contract}")
+for lifecycle_contract in (
+    "Router 不能主动切换它们",
+    "不会产生独立推理流或子智能体卡片",
+    "不需要额外询问用户许可",
+    "`completed` 是正常终态",
+    "复用也不会跨用户请求",
+    "`--no-subagents` 是明确退出开关",
+    "所有可见路由提示都会跟随当前请求的语言",
+    "中断所有仍真实 `running` 但已非必需的子智能体",
+    "没有删除已完成子智能体 UI 历史的操作",
+):
+    if lifecycle_contract not in readme_zh_text:
+        fail(f"Chinese executor lifecycle contract is missing: {lifecycle_contract}")
 for phrase in (
-    "Automatic model routing", "Current route is sufficient or work is short → run locally",
-    "Adaptive parallelism", "Net benefit → run in parallel and refill on completion",
+    "Automatic model routing", "Recommendation differs and route benefit clears overhead",
+    "Low-overhead concurrency", "run concurrently in the coordinator",
     "What changed in v0.2",
 ):
     if phrase not in readme_text:
-        fail(f"English Router Lite overview or release note is missing: {phrase}")
+        fail(f"English routing overview or release note is missing: {phrase}")
 for phrase in (
-    "自动选择模型", "当前模型够用或任务很短 → 主线程直接完成",
-    "自动适配并发", "有净收益 → 并发执行，完成即补位",
+    "自动选择模型", "建议不同且路由收益超过开销",
+    "低开销并发", "在主线程中并发",
     "v0.2 更新重点",
 ):
     if phrase not in readme_zh_text:
-        fail(f"Chinese Router Lite overview or release note is missing: {phrase}")
+        fail(f"Chinese routing overview or release note is missing: {phrase}")
 for model_contract in (
     "Luna/medium", "Luna/high", "Luna/xhigh", "Luna/max",
-    "Terra/high", "Sol/medium", "Sol/high", "Sol/xhigh",
+    "Terra/high", "Sol/low", "Sol/medium", "Sol/high", "Sol/xhigh",
     "Never select Ultra automatically",
     "GPT-5.5 is allowed only after the complete GPT-5.6 family is proven unavailable",
 ):
     if model_contract not in skill_text:
-        fail(f"Lite model gradient is missing: {model_contract}")
+        fail(f"model gradient is missing: {model_contract}")
 for parallel_contract in (
-    "## Useful parallelism", "roughly 90 seconds each",
+    "## Direct tool concurrency", "same coordinator model and effort",
+    "## Automatic benefit-gated subagent mode", "does not need to grant separate permission",
+    "--no-subagents", "roughly 90 seconds each",
     "non-overlapping write scopes", "verified free worker capacity",
     "both 30 seconds and 15%", "Order ready tasks longest-first",
     "at most four total tasks including the coordinator",
@@ -133,7 +170,7 @@ for parallel_contract in (
     "Never claim speedup without a controlled serial comparison",
 ):
     if parallel_contract not in skill_text:
-        fail(f"Lite parallel contract is missing: {parallel_contract}")
+        fail(f"parallel contract is missing: {parallel_contract}")
 state_machine = (ROOT / "references" / "execution-state-machine.md").read_text(encoding="utf-8")
 for invariant in (
     "one immutable `route_id`",
@@ -229,23 +266,62 @@ for contract in (
     'LITE_PROTOCOL = "router-lite-v2"', '"action": "local"',
     '"action": "parallel" if parallel', '"restore_required": False',
     '"fail_open": True', 'startup_failure_takeover_seconds',
+    '"route-benefit-not-proven"', '"subagent_policy"',
+    '"automatic-benefit-gated"', '"automatic_creation": not disabled',
+    '"automatic_reuse": not disabled', '"user_permission_required": False',
+    '"delegation_gate"', '"tool_concurrency"',
+    '"creates_child_agents": False', '"same_model_and_effort": True',
+    '"--no-subagents"', '"--allow-subagents"',
     'ledger-best-effort', 'DEFAULT_MAX_TOTAL_TASKS = 4',
     'DEFAULT_MIN_PARALLEL_SECONDS = 90',
     'DEFAULT_MIN_DELEGATE_SECONDS = 90',
     'DEFAULT_FRESH_EXECUTOR_SECONDS = 40',
     'DEFAULT_REUSED_EXECUTOR_SECONDS = 10',
-    'DEFAULT_MAX_REUSES_PER_EXECUTOR = 1',
+    'DEFAULT_MAX_REUSES_PER_EXECUTOR = 2',
     'DEFAULT_SPAWN_STAGGER_SECONDS = 8',
     'DEFAULT_MIN_PARALLEL_SAVINGS_RATIO = 0.15',
     '"startup-aware-local-fast-path"', '"dispatch_now"',
     '"executor_lanes"', '"reuse_policy"', '"same-request-only"',
-    '"--reuse-candidates-json"',
+    'result["action"] = "reuse"', '"reuse_target"',
+    '"--reuse-candidates-json"', '"--request-id"', '"--repository"',
+    '"--permissions-fingerprint"', '"--sandbox-fingerprint"',
+    '"repository_realpath"', '"fresh_context_required"',
+    'def executor_lifecycle_decision(',
+    '"terminal_states"', '"interruptible_state"',
+    '"completion_authority"', '"refresh_status_after_wait_update"',
+    '"refresh_status_before_parent_final"', '"wait_timeout_is_stall"',
+    '"parent_final_requires_no_required_running_executors"',
+    '"parent_final_requires_all_owned_children_terminal"',
+    '"parent_final_stops_new_dispatch"',
+    '"parent_final_disables_reuse"',
+    '"parent_final_clears_reuse_registry"',
+    '"parent_final_interrupts_unneeded_running_children"',
+    '"parent_final_interrupts_optional_stragglers"',
+    '"parent_final_rechecks_status_after_interrupt"',
+    '"parent_final_scope": "current-task-tree-only"',
+    '"delete_child_agent_ui_history_supported": False',
+    '"on_stale_parent_running_after_child_complete"',
+    '"stalled_after_seconds"', '"activity_resets_stall_timer"',
+    '"on_stall"', '"on_completed"',
+    '"clear_reuse_registry_on_new_request"',
+    '"delete_or_interrupt_completed_on_new_request"',
+    '"protocol_only": True',
 ):
     if contract not in lite_text:
-        fail(f"Router Lite implementation contract is missing: {contract}")
+        fail(f"routing implementation contract is missing: {contract}")
+for misleading_lifecycle_contract in (
+    '"max_wait_seconds"', '"terminate_idle_on_request_end"',
+    '"terminate_when_reuse_ineligible"',
+):
+    if misleading_lifecycle_contract in lite_text:
+        fail(
+            "misleading executor lifecycle contract remains: "
+            f"{misleading_lifecycle_contract}"
+        )
 for contract in (
     "35.5–39.6 seconds", "2.7–9.4 seconds",
-    "One follow-up per executor", "recheck the live agent",
+    "Two follow-ups per executor", "recheck identity, live state, and ownership",
+    'boolean "same" claims are not identity',
 ):
     if contract not in parallel_reference:
         fail(f"executor reuse reference is missing: {contract}")
@@ -264,6 +340,7 @@ for key in (
     "ultra_requires_explicit_user_enable",
     "ultra_disables_router_parallelism",
     "luna_high_precedes_max_for_moderate_depth",
+    "luna_large_lanes_allow_normal_consequence",
     "full_matrix_remains_explicit_override_only",
     "luna_medium_is_mechanical_floor",
     "terra_high_is_latency_specialist",
@@ -331,12 +408,14 @@ for tier, model in models.items():
             fail(f"executor must be workspace-write: {executor_name}")
         instructions = executor.get("developer_instructions", "")
         for phrase in (
-            "Accept a direct Lite task", "do not require route IDs, hashes, tickets",
+            "Accept a direct routed task", "do not require route IDs, hashes, tickets",
             "do not route or delegate", "Treat the task capsule as self-contained",
-            "Stop when acceptance is proven", "Never create a top-level Codex task",
+            "immediately send exactly one final reply", "do not continue validation",
+            "do not request approval", "return a limited result",
+            "Never create a top-level Codex task",
         ):
             if phrase not in instructions:
-                fail(f"executor Lite guard is missing from {executor_name}: {phrase}")
+                fail(f"executor routing guard is missing from {executor_name}: {phrase}")
         if f"`{executor.get('name')}`" not in preset_mapping:
             fail(f"executor preset mapping is missing: {executor_name}")
         executor_count += 1

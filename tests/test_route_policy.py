@@ -339,13 +339,42 @@ class RoutePolicyTests(unittest.TestCase):
             "benchmark-prior:ordinary_default",
         )
 
+    def test_compact_cross_file_reasoning_uses_luna_high(self):
+        route = POLICY.select_route(
+            "apply", task_kind="ordinary", risk="normal", size="normal",
+            ambiguity="low", coupling="medium", verification="mixed",
+            consequence="normal", current=current("gpt-5.6-luna", "high"),
+        )
+        self.assertEqual(
+            (route["recommended"]["model"], route["recommended"]["effort"]),
+            ("gpt-5.6-luna", "high"),
+        )
+        self.assertEqual(
+            route["recommended"]["source"],
+            "benchmark-prior:ordinary_default",
+        )
+
+    def test_high_coupling_bounded_ordinary_work_uses_sol_medium(self):
+        route = POLICY.select_route(
+            "apply", task_kind="ordinary", risk="normal", size="normal",
+            ambiguity="medium", coupling="high", verification="mixed",
+            consequence="normal", current=current("gpt-5.6-luna", "high"),
+        )
+        self.assertEqual(
+            (route["recommended"]["model"], route["recommended"]["effort"]),
+            ("gpt-5.6-sol", "medium"),
+        )
+
     def test_unusually_deep_deterministic_work_prefers_luna_max(self):
-        for task_kind, size in (("ordinary", "large"), ("complex", "large")):
-            with self.subTest(task_kind=task_kind, size=size):
+        for task_kind, consequence in (
+            ("ordinary", "low"), ("ordinary", "normal"),
+            ("complex", "low"), ("complex", "normal"),
+        ):
+            with self.subTest(task_kind=task_kind, consequence=consequence):
                 route = POLICY.select_route(
-                    "apply", task_kind=task_kind, risk="low", size=size,
-                    ambiguity="low", coupling="medium",
-                    verification="deterministic", consequence="low",
+                    "apply", task_kind=task_kind, risk="low", size="large",
+                    ambiguity="medium", coupling="medium",
+                    verification="deterministic", consequence=consequence,
                     current=current("gpt-5.6-sol", "medium"),
                 )
                 self.assertEqual(
@@ -364,9 +393,9 @@ class RoutePolicyTests(unittest.TestCase):
             consequence="normal", current=current("gpt-5.6-sol", "high"),
         )
         large = POLICY.select_route(
-            "apply", task_kind="ordinary", risk="low", size="large",
-            ambiguity="low", coupling="medium", verification="judgment",
-            consequence="low", current=current("gpt-5.6-sol", "high"),
+            "apply", task_kind="ordinary", risk="normal", size="large",
+            ambiguity="medium", coupling="medium", verification="judgment",
+            consequence="normal", current=current("gpt-5.6-sol", "high"),
         )
         self.assertEqual(
             (normal["recommended"]["model"], normal["recommended"]["effort"]),
@@ -402,7 +431,7 @@ class RoutePolicyTests(unittest.TestCase):
             ("gpt-5.6-terra", "high"),
         )
 
-    def test_luna_max_does_not_replace_sol_for_high_coupling(self):
+    def test_high_coupling_bounded_work_stays_with_sol(self):
         route = POLICY.select_route(
             "apply", task_kind="ordinary", risk="low", size="normal",
             ambiguity="low", coupling="high", verification="deterministic",
@@ -410,7 +439,7 @@ class RoutePolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             (route["recommended"]["model"], route["recommended"]["effort"]),
-            ("gpt-5.6-sol", "high"),
+            ("gpt-5.6-sol", "medium"),
         )
 
     def test_high_risk_cannot_hide_behind_lower_consequence(self):
@@ -648,7 +677,7 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertEqual(route["routing_evidence"]["status"], "active")
         self.assertEqual(
             route["routing_evidence"]["snapshot_id"],
-            "gpt56-routing-evidence-2026-07-31-r3",
+            "gpt56-routing-evidence-2026-07-31-r5",
         )
 
     def test_stale_evidence_falls_back_without_network(self):
@@ -706,6 +735,19 @@ class RoutePolicyTests(unittest.TestCase):
                 "chatbench-proxy-boundary-missing",
                 route["routing_evidence"]["reason"],
             )
+
+    def test_evidence_without_new_lane_boundaries_is_invalid(self):
+        for key, reason in (
+            ("luna_large_lanes_allow_normal_consequence", "luna-large-boundary-missing"),
+        ):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "evidence.json"
+                data = json.loads(POLICY.DEFAULT_EVIDENCE_PATH.read_text())
+                data["policy"][key] = False
+                path.write_text(json.dumps(data))
+                route = POLICY.select_route("apply", current=current(), evidence_path=path)
+                self.assertEqual(route["routing_evidence"]["status"], "invalid")
+                self.assertIn(reason, route["routing_evidence"]["reason"])
 
     def test_evidence_requires_exactly_eight_automatic_lanes(self):
         with tempfile.TemporaryDirectory() as directory:

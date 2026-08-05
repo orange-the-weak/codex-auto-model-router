@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Auto Model Router"
-  short_description: "为 GPT-5.6 轻量选模、分配推理强度与有用并发"
-  default_prompt: "Use $codex-auto-model-router in Router Lite mode: select the lowest sufficient GPT-5.6 route, keep short work local, safely reuse a compatible same-request executor once, parallelize only when activation-aware net benefit is positive, fail open locally, and never auto-select Ultra."
+  short_description: "为 GPT-5.6 推荐模型与推理强度，默认单智能体并发工具"
+  default_prompt: "Use $codex-auto-model-router to choose the lowest sufficient GPT-5.6 route, prefer safe direct tool concurrency, and automatically use a bounded model-specific leaf agent when its route benefit clearly exceeds coordination overhead."

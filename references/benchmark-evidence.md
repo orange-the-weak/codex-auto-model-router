@@ -1,6 +1,6 @@
 # Benchmark evidence and routing implications
 
-Snapshot: `gpt56-routing-evidence-2026-07-31-r3`. The machine-readable source is
+Snapshot: `gpt56-routing-evidence-2026-07-31-r5`. The machine-readable source is
 [`benchmark-evidence.json`](benchmark-evidence.json). It expires after 90 days; a stale,
 missing, or invalid snapshot disables evidence-derived lanes and falls back to the
 deterministic task policy. Apply never fetches the network.
@@ -101,14 +101,13 @@ and 5.6 seconds, while CursorBench gives medium a 3.4-point quality advantage. C
 does not publish a Luna/low snapshot; that cell remains missing rather than inferred.
 These values are proxy context only, not Codex task wall-clock measurements.
 
-The updated automatic frontier removes three weak defaults. Luna/medium scores 47.7%
+The updated automatic frontier keeps eight lanes and removes weak defaults. Luna/medium scores 47.7%
 versus Luna/low at 37.6%; with Luna already using only 4% of Sol's Codex credits, the
 10.1-point quality loss is not justified as an automatic saving. Terra/low scores 46.9%
 at a $0.42 API-cost proxy, while Luna/medium scores 47.7% at $0.08. Terra/medium improves
-to 50.3%, but Luna/high reaches 56.8% at $0.16. Terra remains useful at high: it scores
-54.2% versus Sol/low at 52.6%, costs $0.71 versus $1.01 on CursorBench, and ChatBench's
-API response proxy is about 6.3 seconds versus 11.1 seconds. This does not prove Codex
-wall-clock speed, but it supports one explicit latency-specialist Terra lane.
+to 50.3%, but Luna/high reaches 56.8% at $0.16. Terra/high remains useful as an explicit
+latency-specialist lane; its ChatBench API response proxy is about 6.3 seconds. This does
+not prove Codex wall-clock speed.
 
 Therefore:
 
@@ -116,17 +115,19 @@ Therefore:
 - use Luna/high as the ordinary bounded default;
 - use Luna/xhigh for large bounded scan/review work when broader coverage is useful but
   Luna/max startup, step count, and token expansion are not;
-- raise to Luna/max only for genuinely deep or large deterministic work whose latency
-  budget can absorb the much larger token and step count;
+- raise to Luna/max for genuinely deep or large deterministic work with low-to-normal
+  consequence whose latency budget can absorb the much larger token and step count;
 - use Terra/high only when fast return is explicitly prioritized and the task remains
   below a Sol complexity or consequence boundary;
-- use Sol/medium for bounded complex work;
-- use Sol/high for high ambiguity, high coupling, or high consequences; judgment alone
-  does not cross this boundary;
+- use Sol/medium for bounded complex work and ordinary high-coupling work with clear
+  deterministic or mixed verification;
+- use Sol/high for high ambiguity, high consequences, complex high coupling, or
+  judgment-heavy high coupling; judgment alone does not cross this boundary;
 - use Sol/xhigh only after a classified reasoning/verification failure on comparable
   complex work or when the user explicitly asks.
 
-These are the eight automatic lanes. The complete low-through-max matrix remains available
+These are the eight automatic lanes. Sol/low remains available only by explicit user
+override or compatibility testing. The complete low-through-max matrix remains available
 for explicit user overrides and compatibility experiments; automatic removal is not a
 claim that the underlying model-effort combinations are unsupported.
 
@@ -143,11 +144,11 @@ GPT-5.6 execution, an original GPT-5.5 setting is audit metadata, not a Restore 
 
 ## Efficiency hypothesis
 
-Against an all-Sol/medium baseline, the illustrative mix is 25% mechanical, 40% bounded
-ordinary, 5% latency-priority ordinary, 25% bounded complex, and 5% uncertain or
-high-consequence work. It reduces the weighted Artificial Analysis TTFT proxy by about 9%,
-the ChatBench response proxy by about 19%, and the Cursor cost proxy by about 62%. The
-Intelligence Index output proxy rises by about 92% because Luna/high produces much more
+Against an all-Sol/medium baseline, the illustrative mix is 20% mechanical, 40% bounded
+ordinary, 5% latency-priority ordinary, 30% bounded complex, and
+5% uncertain or high-consequence work. It reduces the weighted Artificial Analysis TTFT
+proxy by about 6%, the ChatBench response proxy by about 16%, and the Cursor cost proxy by
+about 57%. The Intelligence Index output proxy rises by about 92% because Luna/high produces much more
 output; that may improve quality but is not counted as a speed gain. None of these are
 Codex end-to-end measurements, and API cost is not Codex subscription cost. The conservative
 planning estimate is therefore **10–20% faster AI-work turnaround** for a similar mixed

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "snapshot_id": "gpt56-routing-evidence-2026-07-31-r3",
+  "snapshot_id": "gpt56-routing-evidence-2026-07-31-r5",
   "observed_at": "2026-07-31",
   "expires_after_days": 90,
   "runtime_network_required": false,
@@ -18,6 +18,7 @@
     "full_matrix_remains_explicit_override_only": true,
     "luna_medium_is_mechanical_floor": true,
     "luna_high_precedes_max_for_moderate_depth": true,
+    "luna_large_lanes_allow_normal_consequence": true,
     "terra_high_is_latency_specialist": true,
     "chatbench_category_scores_are_proxy_only": true
   },
@@ -230,10 +231,10 @@
   },
   "efficiency_hypothesis": {
     "baseline": "all applicable AI work uses gpt-5.6-sol/medium",
-    "illustrative_task_mix_percent": {"mechanical_default": 25, "ordinary_default": 40, "latency_priority": 5, "complex_bounded": 25, "complex_uncertain_or_high_consequence": 5},
-    "weighted_api_ttft_proxy_reduction_percent": 9,
-    "weighted_chatbench_response_proxy_reduction_percent": 19,
-    "weighted_cursor_cost_proxy_reduction_percent": 62,
+    "illustrative_task_mix_percent": {"mechanical_default": 20, "ordinary_default": 40, "latency_priority": 5, "complex_bounded": 30, "complex_uncertain_or_high_consequence": 5},
+    "weighted_api_ttft_proxy_reduction_percent": 6,
+    "weighted_chatbench_response_proxy_reduction_percent": 16,
+    "weighted_cursor_cost_proxy_reduction_percent": 57,
     "weighted_index_output_proxy_change_percent": 92,
     "estimated_codex_turnaround_improvement_percent": {"low": 10, "high": 20},
     "status": "heuristic; higher output volume may improve quality but is not a speed gain, and tool execution and verification time are not represented by API proxies"

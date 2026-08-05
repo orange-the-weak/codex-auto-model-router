@@ -2,37 +2,34 @@
 
 [![Validate](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml/badge.svg)](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml)
 
-**A lightweight GPT-5.6 model and reasoning router for OpenAI Codex.** It selects Sol, Terra, or Luna, chooses low through max reasoning, and uses bounded parallel agents only when they should actually help.
+**A lightweight GPT-5.6 model and reasoning router for OpenAI Codex.** It recommends Sol, Terra, or Luna and low through max reasoning, prefers low-overhead direct tool concurrency, and automatically uses a model-specific leaf when the route benefit is clearly larger than its overhead.
 
 [简体中文](README.zh-CN.md) · [Routing feedback](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=routing-feedback.yml) · [Bug report](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=bug-report.yml)
 
 GPT-5.6 gives Codex many useful model and reasoning combinations. Choosing one for every task quickly became its own chore. I built this Skill to make that choice automatic—and then learned that a router which blocks the real work is worse than no router at all.
 
-Version 2 therefore defaults to a fail-open Lite architecture: choose quickly, delegate once when useful, and keep bookkeeping out of the critical path. This is my first open-source project; practical feedback is genuinely welcome.
+Version 2 therefore uses a fail-open, benefit-gated default: choose quickly, keep bookkeeping out of the critical path, and create a bounded subagent automatically when model-switch benefit outweighs startup and aggregation cost. This is my first open-source project; practical feedback is genuinely welcome.
 
 **Automatic model routing**
 
 ```text
 Request
 └─ Re-evaluate the task itself
-   ├─ Mechanical, ordinary, or bounded scan → Luna
+   ├─ Mechanical, ordinary, scan, or deterministic deep work → Luna
    ├─ Explicit latency priority → Terra
-   └─ Complex, ambiguous, or consequential → Sol
+   └─ Complex, coupled, ambiguous, or consequential → Sol
       ↓
-   Current route is sufficient or work is short → run locally
-   Otherwise → start or safely reuse a matching executor
+   Recommendation matches or switching does not pay → run locally
+   Recommendation differs and route benefit clears overhead → use that model's leaf agent
 ```
 
-**Adaptive parallelism**
+**Low-overhead concurrency**
 
 ```text
 Task
-├─ Independent, substantial, non-conflicting subtasks?
-│  ├─ No → run serially
-│  └─ Yes → check free capacity and startup/aggregation cost
-│     ├─ No net benefit → run serially
-│     └─ Net benefit → run in parallel and refill on completion
-└─ Shared files, build resources, or external actions → run serially
+├─ Independent, safe tool/process calls → run concurrently in the coordinator
+├─ Reasoning-dependent or conflicting work → run serially
+└─ Independent reasoning with clear net route benefit → automatic agent mode
 ```
 
 ## Quick start
@@ -51,30 +48,36 @@ cd codex-auto-model-router
 
 Restart Codex after installation.
 
-## Router Lite
+## How it works
 
 Every applicable request follows one of three paths:
 
 | Path | Behavior |
 |---|---|
-| Fast | The current route already matches, or the work is cheaper than agent startup; execute locally. |
-| Delegate | Start or safely reuse one explicitly selected internal agent; the coordinator keeps its model. |
-| Parallel | Run only worthwhile independent tasks that fit verified free capacity. |
+| Local | Recommend a route, then complete the work in the current coordinator. |
+| Tool concurrency | Run independent safe tool or process calls together without creating child agents. |
+| Benefit-gated subagents | Automatically delegate, reuse, or use multi-model reasoning when route benefit clearly exceeds bounded overhead. |
 
-There is no model Restore, plan hash, cursor, environment guard, or blocking ledger on the default path. If routing or agent startup fails, ordinary work continues locally once. The legacy strict state machine remains available only when the user explicitly requests strict auditing or replay protection.
+There is no model Restore, plan hash, cursor, environment guard, or blocking ledger on the default path. Routing or executor startup failure does not block ordinary work. The legacy strict state machine remains available only when the user explicitly requests strict auditing or replay protection.
 
-Tiny mechanical edits, deterministic tool-bound chains, and bounded work estimated below 90 seconds stay local when the current verified GPT-5.6 route is already sufficient. A weaker current route never replaces the recommendation, and an explicit user choice always wins.
+Visible routing notices follow the language of the current request. English prompts receive English labels, Chinese prompts receive Chinese labels, and model, effort, and reason values remain unchanged.
 
-Delegated agents receive a self-contained task capsule and stop as soon as acceptance is proven. Within the same request, an idle agent may be reused once only when repository, route, permissions, and ownership still match. Reuse never crosses user requests.
+The recommendation does not switch the current task's model. A routed leaf is a separate task running the recommended model, not a change to the already-running coordinator. Direct tool concurrency shares the coordinator's model and reasoning effort; it creates no child-agent cards or independent reasoning streams.
 
-Automatic parallelism requires independent work, non-overlapping writes, verified capacity, and positive net benefit after activation and aggregation. Local probes separated the old 40-second estimate into 35.5–39.6 seconds to a fresh first tool versus 2.7–9.4 seconds when reusing the same agent. Planning therefore uses conservative 40-second fresh and 10-second reused priors, requires at least 30 seconds and 15% benefit, and refills compatible agents immediately. These are local planning estimates, not a platform SLA or speedup claim.
+Safe direct concurrency includes independent file reads, searches, metadata queries, and tests that do not share build state. Reasoning-dependent calls, overlapping writes, Git mutation, deployment, approvals, and shared simulator, device, or build resources remain serial.
+
+Subagent mode is automatic when route-fit, quality, latency, or resource benefit clearly exceeds bounded startup and aggregation overhead; no additional user permission prompt is required. Users can explicitly disable it with `--no-subagents`. Delegated agents keep bounded lifecycle safeguards: `completed` is terminal, child `task_complete` overrides stale parent `running`, a timeout alone is not a stall, and reuse never crosses user requests.
+
+Before the coordinator's final response, any subagent run stops new dispatch, disables reuse, clears the current-request reuse registry, refreshes the current task tree, interrupts every optional or otherwise unneeded child still genuinely `running`, and refreshes once more. The coordinator finalizes only after every child owned by that request is terminal. This can end current-task children, but Codex exposes no collaboration operation for deleting completed child-agent UI history; historical cards may remain visible and are never reported as cleared.
+
+The CLI enables benefit-gated subagents by default. `--no-subagents` is the explicit opt-out. The legacy `--allow-subagents` flag remains accepted for wrapper compatibility but is not permission and is no longer required. Executor presets are selected automatically only after the benefit gate clears; they are never prewarmed or queued speculatively.
 
 ## What changed in v0.2
 
-- Router Lite removes Restore, hashes, state gates, and blocking ledgers from normal work.
-- Short or deterministic work stays local when the current GPT-5.6 route is sufficient.
-- Parallel planning now distinguishes fresh and reused executors, schedules route-aware lanes, and refills completed compatible agents without a new task cold start.
-- Reuse is limited to one safe follow-up in the same request; route changes, stale ownership, failures, and sensitive external actions stay fresh or local.
+- The default path automatically uses a model-specific leaf when switching benefit clearly exceeds bounded overhead.
+- Independent safe tools and processes may run concurrently without extra model contexts or child-agent UI entries.
+- `--no-subagents` explicitly disables delegate, reuse, and agent-parallel plans; no permission prompt is otherwise required.
+- Recommendations are clearly separated from the current task's observed model.
 - Ultra remains opt-in, and fallback stays inside GPT-5.6 while any Sol, Terra, or Luna route is available.
 
 ## Model gradient
@@ -98,7 +101,7 @@ Routing is calibrated with offline public coding-agent evidence from OpenAI, Art
 
 See [benchmark evidence](references/benchmark-evidence.md) and the [machine-readable snapshot](references/benchmark-evidence.json). The snapshot is optional at runtime; missing, invalid, or stale evidence falls back to deterministic rules without blocking work.
 
-Usage history is written after execution on a best-effort basis. It records observed model mix and concurrency without making analytics a prerequisite for the project result.
+Only observed execution is recorded; a recommendation is never written as actual model use. Benefit-gated subagent mode returns a machine-readable spawn contract: an explicit executor type must use `fork_turns="none"`, and a contract mismatch falls back locally without retry. History never becomes a prerequisite for the project result.
 
 ## Development
 

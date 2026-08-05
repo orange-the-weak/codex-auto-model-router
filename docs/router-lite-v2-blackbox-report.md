@@ -1,4 +1,6 @@
-# Router Lite v2 Codex App black-box validation
+# Default routing path v2 Codex App black-box validation
+
+> Historical evidence note: these measurements describe an earlier automatic-delegation design. The current Router still prefers direct tool concurrency, but uses the measured child-agent startup and lifecycle costs as priors for an automatic net-benefit gate. `--no-subagents` is the explicit opt-out; no extra permission prompt is required.
 
 Date: 2026-08-03
 Environment: Codex Desktop 0.146.0-alpha.9.2 on macOS
@@ -10,7 +12,7 @@ This test exercises the native Codex task interface. It does not simulate model 
 | Scenario | Project-tool wait | Wall time | Result | Router errors shown | Extra non-cached input |
 |---|---:|---:|---|---:|---:|
 | Tiny SwiftUI copy edit, original Delegate behavior | 42.5 s | 51.6 s | Completed by local takeover | 0 | 5,469 |
-| Tiny SwiftUI copy edit, Lite cost fast path | 5.0 s | 5.4 s | Completed locally | 0 | 1,664 |
+| Tiny SwiftUI copy edit, startup-aware local path | 5.0 s | 5.4 s | Completed locally | 0 | 1,664 |
 | Let Be Timer incremental build, install, and launch | 37.4 s | 128.7 s to launch | Build succeeded; app installed and visible | 0 Router errors | 36,340 |
 | Three-source read-only research | 5.8 s to first dispatch | 85.2 s to two usable results; 223.4 s before cancelling one straggler | Two agents completed concurrently | 0 | 134,541 including all three agents |
 | Deliberately invalid executor type | 8.5 s to local completion | 8.5 s | Coordinator took over | 1 deliberate scheduler rejection | 3,092 |
@@ -22,7 +24,7 @@ All four requested scenarios completed, so task completion was 4/4. Router decis
 1. Tiny work must not pay an agent-startup tax. A tiny deterministic mechanical task now stays on the current verified GPT-5.6 route unless the user explicitly overrides it.
 2. Deterministic tool-bound chains such as build/install can stay local for the same reason. The first iOS run proved the project chain, while the post-test policy check selected `tool-bound-local-fast-path` without another build.
 3. A successful asynchronous agent start is not a failure merely because no result arrives within 15 seconds. The 15-second takeover applies only to explicit creation rejection or reported startup failure.
-4. Parallel source research needs a straggler policy. The OpenAI and CursorBench agents finished in 68.5 s and 74.1 s, while the unresolved ChatBench agent consumed 65,879 non-cached input tokens before cancellation. Lite now marks results required or optional, stops optional stragglers after required acceptance passes, and permits only one alternate recovery attempt by default.
+4. Parallel source research needs a straggler policy. The OpenAI and CursorBench agents finished in 68.5 s and 74.1 s, while the unresolved ChatBench agent consumed 65,879 non-cached input tokens before cancellation. The default path now marks results required or optional, stops optional stragglers after required acceptance passes, and permits only one alternate recovery attempt by default.
 5. Cached input dominated the agent sessions and is intentionally not treated as equivalent to non-cached token cost.
 
 ## Scope and limits
@@ -90,6 +92,6 @@ A fourth pass separated fresh task materialization from model/tool latency. Each
 
 Fresh context materialization was stable at 31.3–31.6 seconds across the three routes. Most of the old “40-second cold start” was therefore new-task context initialization, not model reasoning. Reusing the same executor inside the same user request removed that fixed delay; median time to first tool fell from 39.6 seconds to 2.7 seconds. This is still one run per route and does not establish a platform SLA.
 
-Router Lite now models fresh and reused activation separately with conservative 40-second and 10-second priors. It may reuse an idle executor once only inside the same user request, with exact repository, model, effort, permission, sandbox, and ownership compatibility. Eligibility is checked again immediately before the follow-up. New requests, route changes, stale ownership, failed tasks, and sensitive external actions always use a fresh executor or stay local.
+The default path now models fresh and reused activation separately with conservative 40-second and 10-second priors. It may reuse an idle executor once only inside the same user request, with exact repository, model, effort, permission, sandbox, and ownership compatibility. Eligibility is checked again immediately before the follow-up. New requests, route changes, stale ownership, failed tasks, and sensitive external actions always use a fresh executor or stay local.
 
 The implementation review itself then reused the existing Sol/high probe executor. The continued task reached context readiness in 0.06 seconds and its first repository tool in 7.0 seconds, providing a forward check of the chosen 10-second planning prior. A policy black-box pair also kept two fresh 90-second tasks serial (22-second estimated saving) while accepting two prequalified reused 90-second tasks (52-second estimated saving). Both figures remain planning estimates rather than measured end-to-end speedup.

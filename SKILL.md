@@ -1,30 +1,33 @@
 ---
 name: codex-auto-model-router
-description: Select an efficient GPT-5.6 Sol, Terra, or Luna model and low-through-max reasoning for Codex project work, with optional useful parallel leaf agents and best-effort usage history. Use for code changes, tests, reviews, routed implementation, model recommendations, usage queries, and retuning. Default to the fail-open Lite path; use the legacy strict state machine only when the user explicitly requests strict ledger auditing. Never auto-select Ultra or create a new top-level Codex task.
+description: Recommend and execute an efficient GPT-5.6 Sol, Terra, or Luna route with low-through-max reasoning for Codex project work. Prefer bounded direct tool concurrency, but automatically create or reuse a model-specific leaf agent when route-fit benefit clearly exceeds startup and aggregation overhead; no extra user permission is required. Use for code changes, tests, reviews, routed implementation, model recommendations, usage queries, and retuning. Use the legacy strict state machine only when the user explicitly requests strict ledger auditing. Never auto-select Ultra or create a new top-level Codex task.
 ---
 
 # Codex Auto Model Router
 
-Use Router Lite by default. Keep the coordinator on its current model, choose a route once, and execute through the current task or an explicitly selected leaf agent. A Router, ledger, model-capability, or agent-startup failure must not block ordinary project work.
+Use the default fail-open benefit-gated path. Keep the coordinator on its current model, choose a recommended route once, and execute directly when that route is already sufficient or executor overhead would dominate. When a different model or effort provides clear route-fit benefit that outweighs bounded startup and aggregation cost, automatically create or reuse a model-specific leaf agent without asking for extra permission. A Router, ledger, model-capability, or executor-startup failure must not block ordinary project work.
 
 Do not route simple questions, copy confirmation, explanation, or read-only lookup that needs no project execution. Do not commit, push, deploy, upload, or send messages unless the user separately requests it.
 
 ## Default workflow
 
 1. Classify the smallest useful task with `task_kind=mechanical|ordinary|complex`, `risk`, `size`, and only material ambiguity, coupling, verification, consequence, latency, or prior-failure signals. Include a conservative `estimated_seconds` when the work is bounded enough to estimate.
-2. Run `python3 scripts/router_lite.py decide ... --estimated-seconds <n>` once. Use its model, effort, action, and `agent_type` as authoritative advice; omit the estimate instead of inventing one.
-3. Show one line before execution:
-   `Codex 自动路由｜任务：<name>｜模型：<model>｜推理：<effort>｜<reason>`
+2. Run `python3 scripts/router_lite.py decide ... --estimated-seconds <n>` once. Use only the documented enum values; compatibility aliases are fail-open protection, not preferred input. Pass `--no-subagents` only when the user explicitly disables child agents. Treat `recommended_route` as advice until a returned `delegate` or `reuse` action is actually dispatched and observed.
+3. Show one line before execution in the language of the user's current request. Do not hard-code Chinese for an English request or English for a Chinese request. Use:
+   - Chinese: `Codex 自动路由｜任务：<name>｜建议：<model>/<effort>｜执行：<当前主模型|子智能体 model/effort>｜<reason>`
+   - English: `Codex auto route | Task: <name> | Recommendation: <model>/<effort> | Execution: <current coordinator|model/effort leaf agent> | <reason>`
+   - For another language, translate the labels concisely while preserving the model, effort, and reason values.
 4. Execute by action:
-   - `local`: continue in the coordinator. Do not create an agent. Tiny mechanical work, deterministic tool-bound chains, and estimated work below the default 90-second delegation break-even stay local when the current verified GPT-5.6 route is an accepted route or fallback.
-   - `delegate`: after the one visible routing line, immediately start exactly one bounded leaf agent with the returned `agent_type`. During a multi-task request, reuse an eligible idle leaf with the exact route through `followup_task`; otherwise spawn a fresh leaf. Do not insert file reads, ledger work, more planning, or per-leaf commentary before dispatch. Give it the goal, relevant paths/decisions, acceptance, constraints, validation budget, stop condition, and at most one recovery attempt unless the user requires more. Treat every fresh or reused capsule as self-contained: do not load global memory, unrelated project history, or extra sources unless the task explicitly requires them. Do not send a plan, hash, cursor, environment guard, ledger path, or full chat.
+   - `local`: continue in the coordinator. Do not claim that the recommended model or effort actually ran.
+   - Directly run independent safe tool or process calls concurrently when their results do not determine one another and they do not share mutable files, build state, simulators, devices, approval boundaries, or external side effects. Prefer one programmatic tool call with bounded `Promise.all` orchestration when supported. This concurrency uses the coordinator's same model and reasoning effort and creates no child-agent UI entries. Keep reasoning-dependent steps sequential.
    - `native-ultra`: only after an explicit user request for Ultra; never add Router-managed parallelism.
-5. If agent creation is explicitly rejected or reports a startup failure, continue locally within 15 seconds. Do not treat normal asynchronous execution as a startup failure. Do not rebuild an envelope, retry through another model, or expose internal routing diagnostics unless the requested action is dangerous.
-6. After the project result is ready, call `router_lite.py record` when useful. Treat every ledger error as a non-blocking warning and normally omit it from the user response.
+   - `reuse` or `delegate`: use the returned model-specific leaf only when `delegation_gate.benefit_clear=true`. No separate permission question is required. Follow the bounded lifecycle below.
+5. Prefer direct tool concurrency when it is enough. Call `router_lite.py plan` and collaboration lifecycle tools only for real independent reasoning work whose measured or conservatively estimated net benefit clears the gate.
+6. Do not record a recommended route as actual model use. Record only verified execution metadata after an observed leaf run or when the current task's model is directly observed. Treat every ledger error as a non-blocking warning and normally omit it from the user response.
 
-The coordinator never changes its own model for Lite execution, so Lite has no Restore step.
+The coordinator never changes its own model. A leaf executor is a separate reasoning stream, not a model switch inside the current conversation, so there is no Restore step.
 
-Lite still evaluates every applicable request. It may intentionally keep a sufficient current verified GPT-5.6 route and report `tiny-local-fast-path`, `tool-bound-local-fast-path`, or `startup-aware-local-fast-path`. A weaker current route never replaces the selected route, and a user model override always wins.
+The Router still evaluates every applicable request. It may report `tiny-local-fast-path`, `tool-bound-local-fast-path`, `startup-aware-local-fast-path`, `route-benefit-not-proven`, or `subagents-disabled-by-user`. A recommendation never proves actual model use, and a user model override remains the preferred recommendation.
 
 ## Model gradient
 
@@ -32,18 +35,37 @@ Use the offline policy in `route_policy.py`; task evidence and explicit user ove
 
 - Luna/medium: deterministic mechanical work.
 - Luna/high: ordinary bounded implementation and normal research.
-- Luna/xhigh: large bounded scans or reviews.
-- Luna/max: large deterministic deep work with low consequence.
+- Luna/xhigh: large bounded scans or reviews with low-to-normal consequence.
+- Luna/max: large deterministic deep work with low-to-normal consequence.
 - Terra/high: explicit latency priority.
+- Sol/low: explicit user override or compatibility testing only; never automatic.
 - Sol/medium: bounded complex work.
 - Sol/high: high ambiguity, coupling, or consequence.
 - Sol/xhigh: classified reasoning/verification failure on complex work or explicit choice.
 
 Never select Ultra automatically. Keep fallback inside GPT-5.6 whenever any GPT-5.6 executor is available. GPT-5.5 is allowed only after the complete GPT-5.6 family is proven unavailable, and that fallback must be disclosed once.
 
-## Useful parallelism
+## Direct tool concurrency
 
-Use `router_lite.py plan --tasks-json ...` only when one request has real independent boundaries. Automatic parallelism requires:
+Prefer concurrency without child agents when it can perform the work. Group only independent, safe, bounded tool or process calls. Start them together in one coordinator tool turn when the interface supports it, cap the batch to the observed tool/runtime capacity, collect all results, and then resume model reasoning once. Typical candidates are independent file reads, repository searches, metadata queries, and tests that do not share build state. Keep writes to overlapping paths, Git mutation, deployments, approval-requiring actions, and shared simulator/device/build resources serial.
+
+Direct tool concurrency does not create a second reasoning stream. Every result is interpreted by the same coordinator model and effort. If one result determines the next command or requires semantic judgment, keep that sequence serial. Never describe concurrent commands as multi-model execution or claim speedup without a controlled serial comparison.
+
+## Automatic benefit-gated subagent mode
+
+Enter this mode automatically when the selected model or effort differs and route-fit, quality, latency, or resource benefit clearly exceeds bounded startup and aggregation overhead. The user does not need to grant separate permission: a leaf agent is a normal routing mechanism, not an external side effect. Honor an explicit request to avoid child agents by passing `--no-subagents` and staying local. The legacy `--allow-subagents` flag remains accepted only for caller compatibility and is not an authorization gate.
+
+Run `router_lite.py decide ...` for a single routed leaf or `router_lite.py plan ...` for independent parallel reasoning. Use `reuse` and `delegate` only when the emitted benefit gate permits them. An explicit `agent_type` always requires `fork_turns="none"`; never combine it with full-history inheritance. Give each leaf a bounded self-contained capsule with the goal, relevant paths/decisions, acceptance, constraints, validation budget, stop condition, and at most one recovery attempt. When acceptance is proven, the leaf sends one final result and ends the current turn immediately. It must not continue validating, add commentary, or wait for parent confirmation. If elevated permission is required, the leaf returns a limited result instead of requesting approval.
+
+If agent creation is rejected, violates the spawn contract, or reports a startup failure, continue locally within 15 seconds. Do not retry a contract mismatch, rebuild an envelope, or treat normal asynchronous execution as a startup failure. After a delegated or reused result is ready, call `router_lite.py record` once with observed execution metadata.
+
+Before the coordinator sends its final response, enter a bounded finalization phase for the current task tree: stop new dispatch, disable reuse, clear the current-request reuse registry, and refresh live child status. Accept `completed`, `failed`, and `interrupted` as terminal. Interrupt every optional, superseded, or otherwise unneeded child that is still genuinely `running`, then refresh once after the interrupt. If a required result is still needed, wait for that result or complete it locally without duplicating writes, then interrupt the now-unneeded child. Do not send the parent final response until every child owned by this request is terminal. If interruption fails or status cannot be verified, report that limitation instead of claiming cleanup.
+
+This cleanup is limited to the current task tree. Collaboration tools do not expose deletion of completed child-agent UI history, so never claim to remove or clear historical cards. Do not interrupt a completed child merely to change its display state.
+
+### Agent parallelism safeguards
+
+Use `router_lite.py plan --tasks-json ...` only when one request has real independent boundaries and the estimated net benefit clears the automatic gate. Agent parallelism requires:
 
 - at least two ready tasks expected to take roughly 90 seconds each;
 - independent acceptance criteria and non-overlapping write scopes;
@@ -52,7 +74,9 @@ Use `router_lite.py plan --tasks-json ...` only when one request has real indepe
 
 Use conservative first-action priors of 40 seconds for a fresh executor and 10 seconds for a compatible reused executor, plus 10 seconds initial coordination, 8 seconds for each additional back-to-back dispatch, and 10 seconds aggregation. Local black-box probes measured 31.3–31.6 seconds of fixed fresh-task context initialization, 35.5–39.6 seconds to a fresh first tool, and 2.7–9.4 seconds to a reused first tool; these are planning data, not a platform SLA. Pass only coordinator-prequalified candidates through `--reuse-candidates-json`. Two fresh 90-second tasks remain candidates, while two compatible reused 90-second tasks may clear the benefit gate.
 
-Reuse is an in-memory optimization, never a persistent pool. Clear candidates on every new user request. A candidate must belong to this request and repository, match model and effort exactly, use the same permissions and sandbox, be idle with no pending tool call, have a successful accepted result, and own no unresolved write scope or conflict key. Do not reuse an interrupted, failed, external-action, authentication, deployment, or sensitive-data leaf. Recheck immediately before `followup_task`; on a race, spawn fresh or continue locally. Allow one follow-up per executor by default, and send a new self-contained capsule to limit context contamination.
+Reuse is an in-memory optimization, never a persistent pool. Clear candidates on every new user request. Bind each candidate to exact request ID, repository realpath, permission fingerprint, sandbox fingerprint, model, and effort; boolean "same" claims are insufficient. Require an idle leaf with no pending tool call, an accepted result, released ownership, and explicit false attestations for interruption, failure, prior failure, independent review, authentication, deployment, external action, sensitive data, and high consequence. Missing or mismatched identity only rejects that candidate. Recheck immediately before `followup_task`; on a race, spawn fresh or continue locally. Allow two follow-ups per executor by default, and send a new self-contained capsule each time. Set `fresh_context_required` for blind or independent review.
+
+`router_lite.py` emits coordination protocol only; it does not claim to call native collaboration tools. Treat `completed` as a normal terminal state and never interrupt it. Parent/UI state may lag behind a child terminal event: refresh live status after a wait update and once before the parent final response, and reconcile an observed child `task_complete` over a stale parent `running` label. A wait timeout alone is not a stall. Suggest `interrupt_agent` during execution only after that refresh while an executor remains `running` with no reasoning, tool, or test activity beyond the `last_activity`-based stall threshold. Every such activity refreshes the timer. A completed executor may still pass same-request reuse prequalification until parent finalization begins; finalization disables reuse, clears the registry, and makes every still-running unneeded child interruptible regardless of the ordinary stall threshold.
 
 Default to at most four total tasks including the coordinator, then reduce to observed capacity. Do not create a waiting agent queue. Use the returned route-aware executor lanes. Order ready tasks longest-first, dispatch the complete initial batch immediately after one compact notice, and refill a compatible lane as soon as its result arrives. Do not insert ledger/state work or commentary between individual dispatches. Name agents from their content, not random or ordinal labels. If capacity is unknown, run one leaf as a probe or stay serial.
 
@@ -62,11 +86,9 @@ Treat the supplied stop condition, validation budget, and recovery count as hard
 
 The coordinator owns dependencies, conflicts, waiting, and aggregation. Leaf agents may not delegate. On the first failure, start nothing else, drain active agents, and continue locally only when doing so cannot duplicate or conflict with writes or external actions.
 
-Before dispatch, show:
-`Codex 自动路由｜并发：<total including coordinator> 个任务｜调度：完成即补位`
+Before dispatch, show the notice in the user's current language. Chinese: `Codex 自动路由｜并发：<total including coordinator> 个任务｜调度：完成即补位`. English: `Codex auto route | Concurrency: <total including coordinator> tasks | Scheduling: refill on completion`.
 
-Before a reused follow-up, show at most once per executor:
-`Codex 自动路由｜执行器：复用 <name>｜模型：<model>｜推理：<effort>｜同请求内续派`
+Before a reused follow-up, show at most once per executor in the user's current language. Chinese: `Codex 自动路由｜执行器：复用 <name>｜模型：<model>｜推理：<effort>｜同请求内续派`. English: `Codex auto route | Executor: reuse <name> | Model: <model> | Reasoning: <effort> | same-request follow-up`.
 
 At completion, summarize concurrency only from observed timing. Never claim speedup without a controlled serial comparison.
 
@@ -85,4 +107,4 @@ Strict mode may use hashes, claims, tickets, finish, and Restore. Even there, le
 
 ## User-facing result
 
-Lead with the project outcome. Mention the selected route once, relevant checks, and remaining project risk. Do not expose hashes, IDs, state gates, environment flags, model identity warnings, or ledger failures during normal successful work.
+Lead with the project outcome. Mention the recommended route once, distinguish it from the observed current model, and report relevant checks and remaining project risk. Do not expose hashes, IDs, state gates, environment flags, model identity warnings, or ledger failures during normal successful work.

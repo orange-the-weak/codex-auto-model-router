@@ -170,6 +170,8 @@ def load_benchmark_evidence(path=None, today=None):
             raise ValueError("luna-medium-floor-missing")
         if policy.get("luna_high_precedes_max_for_moderate_depth") is not True:
             raise ValueError("luna-high-boundary-missing")
+        if policy.get("luna_large_lanes_allow_normal_consequence") is not True:
+            raise ValueError("luna-large-boundary-missing")
         if policy.get("terra_high_is_latency_specialist") is not True:
             raise ValueError("terra-high-boundary-missing")
         if policy.get("chatbench_category_scores_are_proxy_only") is not True:
@@ -516,9 +518,35 @@ def recommended_route(
         lane = "complex_failed_escalation"
     elif (
         signals["consequence"] == "high" or signals["ambiguity"] == "high"
-        or signals["coupling"] == "high"
+        or (
+            signals["coupling"] == "high"
+            and (
+                task_kind == "complex"
+                or signals["verification"] == "judgment"
+            )
+        )
     ):
         lane = "complex_uncertain_or_high_consequence"
+    elif (
+        task_kind in ("ordinary", "complex")
+        and size == "large"
+        and signals["ambiguity"] in ("low", "medium")
+        and signals["coupling"] in ("low", "medium")
+        and signals["consequence"] in ("low", "normal")
+        and signals["verification"] == "deterministic"
+        and latency_priority != "high"
+    ):
+        lane = "bounded_deep_deterministic"
+    elif (
+        task_kind == "ordinary"
+        and size == "large"
+        and signals["ambiguity"] in ("low", "medium")
+        and signals["coupling"] in ("low", "medium")
+        and signals["consequence"] in ("low", "normal")
+        and signals["verification"] in ("mixed", "judgment")
+        and latency_priority != "high"
+    ):
+        lane = "bounded_scan"
     elif (
         task_kind == "ordinary"
         and size != "tiny"
@@ -529,24 +557,16 @@ def recommended_route(
     ):
         if task_kind == "ordinary" and latency_priority == "high":
             lane = "latency_priority"
-        elif (
-            task_kind == "ordinary" and size == "large"
-            and signals["verification"] == "judgment"
-        ):
-            lane = "bounded_scan"
-        elif size == "large":
-            lane = "bounded_deep_deterministic"
         else:
             lane = "ordinary_default"
     elif (
-        task_kind == "complex" and size == "large"
-        and signals["ambiguity"] == "low"
-        and signals["coupling"] in ("low", "medium")
-        and signals["verification"] == "deterministic"
-        and signals["consequence"] == "low"
-        and latency_priority != "high"
+        task_kind == "ordinary"
+        and signals["coupling"] == "high"
+        and signals["ambiguity"] in ("low", "medium")
+        and signals["verification"] in ("deterministic", "mixed")
+        and signals["consequence"] in ("low", "normal")
     ):
-        lane = "bounded_deep_deterministic"
+        lane = "complex_bounded"
     elif task_kind == "complex":
         lane = "complex_bounded"
     elif task_kind == "mechanical":

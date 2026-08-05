@@ -1,6 +1,6 @@
 # Usage ledger
 
-Router Lite records usage only after the project result and treats every write failure as non-blocking. Use `router_lite.py record` for normal work. The claims, hashes, route contracts, and strict finish protocol below are legacy strict-mode features; never make them prerequisites for a normal Apply task.
+The default routing path records usage only after the project result and treats every write failure as non-blocking. Use `router_lite.py record` for normal work. The claims, hashes, route contracts, and strict finish protocol below are legacy strict-mode features; never make them prerequisites for a normal Apply task.
 
 Store project-local history at `.codex/model-routing-history.jsonl`. Keep one compact JSON object per line. Do not store prompts, source code, secrets, or conversation text.
 

@@ -4,6 +4,8 @@ Use this reference to choose the lowest sufficient Codex model and reasoning eff
 
 These criteria primarily route follow-on execution tasks. Assess and Retune default to `GPT-5.6 Sol` / `high` for stable policy analysis; an explicit user model or effort override still wins.
 
+The route is advisory until execution is observed. A Skill cannot change the model or reasoning effort of an already-running main conversation. Prefer the current coordinator and safe direct tool concurrency when sufficient; automatically use a model-specific leaf when route-fit benefit clearly exceeds bounded startup and aggregation overhead. This does not require extra user permission, but it creates a separate task rather than switching the main conversation. Never report the recommendation as observed execution.
+
 ## Model tiers
 
 | Tier | Best fit | Common examples | Avoid when |
@@ -37,7 +39,7 @@ Score each task qualitatively; do not invent false numeric precision.
 5. **Consequence:** Would failure be cosmetic, reversible, user-visible, production-impacting, or security/data-loss sensitive?
 6. **Latency priority:** Does the user explicitly need a fast return, or can deeper reasoning trade latency for fewer revisions?
 
-Automatic routing uses exactly eight lanes. Use Luna/medium as the floor for mechanical work and Luna/high for ordinary bounded work, including normal-size read-only evidence scans. Use Luna/xhigh for a large bounded scan/review when coverage matters but max's much larger startup and token expansion do not. Raise to Luna/max only for genuinely large deterministic deep work with low consequence and acceptable latency. Use Terra/high only when `latency_priority=high` and the task does not cross a Sol boundary. Route bounded complex work to Sol/medium. `verification=judgment` alone is not a Sol/high trigger; high ambiguity, coupling, or consequence is. Use Sol/xhigh only after a classified reasoning/verification failure on comparable complex work or by explicit user request. Infrastructure and unclassified failures do not escalate.
+Automatic routing uses exactly eight lanes. Use Luna/medium as the mechanical floor and Luna/high for ordinary bounded work. Use Luna/xhigh for large bounded scans or reviews with low-to-normal consequence when coverage matters but max's much larger startup and token expansion do not. Use Luna/max for genuinely large deterministic deep work with low-to-normal consequence and acceptable latency. Use Terra/high only when `latency_priority=high` and the task does not cross a Sol boundary. Route bounded complex work and ordinary high-coupling deterministic/mixed work to Sol/medium. `verification=judgment` alone is not a Sol/high trigger; high ambiguity, high consequence, complex high coupling, or judgment-heavy high coupling is. Use Sol/xhigh only after a classified reasoning/verification failure on comparable complex work or by explicit user request. Sol/low remains available only through explicit user override or compatibility testing. Infrastructure and unclassified failures do not escalate.
 
 ## Escalation ladder
 
@@ -63,6 +65,7 @@ Capability fallback preserves lane intent, not the effort label: Luna/high or Lu
 | Large or genuinely deep deterministic implementation where latency is acceptable | Luna max |
 | UI iteration or interactive diagnosis where fast return is explicit | Terra high |
 | Bounded feature inside one subsystem with deterministic checks | Luna high |
+| Compact cross-file diagnosis with clear acceptance and bounded output | Luna high |
 | Multi-file refactor with stable tests and unchanged architecture | Luna high or Luna max by depth |
 | Bounded cross-file diagnosis with stable verification | Sol medium |
 | Unclear bug spanning async state, persistence, networking, or lifecycle | Sol high |
@@ -80,7 +83,7 @@ Capability fallback preserves lane intent, not the effort label: Luna/high or Lu
 - Use one segment by default; add a boundary only when a dependent stage needs a materially different route or verification contract.
 - Re-evaluate each applicable Apply request independently. Treat model-switch latency as small relative to route fit; move both downward from an unnecessarily strong route and upward from an insufficient route.
 - Preserve adjacent task boundaries even when routes match. Merge only an explicit semantic `merge_group` with identical route source and task evidence. Use the 4/4 standard budget, expand to 6/6 only for a concrete complex or large basis, and require a user override above that up to 8/8.
-- Parallelize only useful independent work. Automatically use at most 4 leaf executors and reduce from observed `agents.max_threads` plus dependency-independent width. Permit a user request above 4 only when both runtime capacity and useful ready work are confirmed; never pre-create a waiting executor queue. Prefer read-heavy parallelism; require disjoint write scopes and serialize shared mutation through conflict keys.
+- Parallelize safe independent tool or process calls directly in the coordinator when they are sufficient; they share its model and reasoning effort. Use leaf executors automatically when model-route or overlap benefit clears the bounded cost gate, unless the user explicitly disables them. Use at most 4 leaf executors automatically and reduce from observed `agents.max_threads` plus dependency-independent width. Permit a user request above 4 only when both runtime capacity and useful ready work are confirmed; never pre-create a waiting executor queue. Prefer read-heavy parallelism; require disjoint write scopes and serialize shared mutation through conflict keys.
 - Balance tail latency with coarse short/normal/long estimates and critical-path-priority wait-any scheduling. Merge only compatible short siblings; split a long Segment only across genuine independent ownership and verification boundaries.
 
 ## Efficiency estimate
@@ -102,7 +105,7 @@ Prefer measured repository-specific timing or evaluation evidence when it exists
    - Optimized normal lane: 10–25%.
    - Escalation lane: -10–0% direct speed improvement.
 3. Weight the lower and upper bounds by the task mix. Clamp the overall range to 0–60% and round each bound to the nearest 5 percentage points.
-4. Subtract observed Lite classification, leaf-agent startup, and aggregation time. The coordinator does not switch or Restore. If overhead is not measured, state that the estimate excludes it and do not claim a measured gain.
+4. Subtract observed routing classification, leaf-agent startup, and aggregation time. The coordinator does not switch or Restore. If overhead is not measured, state that the estimate excludes it and do not claim a measured gain.
 5. Explain the task-mix assumptions and identify the two or three changes contributing most to the result.
 
 Exclude unavoidable external waiting such as dependency downloads, network services, simulator or device delays, approval waits, and full builds unless the repository contains measured evidence showing that the proposed workflow changes them. Do not present generic model-tier marketing claims as benchmarks. If evidence is too weak to estimate the task mix, report `预计增效：暂无法可靠估算` and state what evidence is missing instead of inventing a percentage.
