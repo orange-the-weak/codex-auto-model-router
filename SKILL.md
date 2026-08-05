@@ -1,6 +1,6 @@
 ---
 name: codex-auto-model-router
-description: Recommend and execute an efficient GPT-5.6 Sol, Terra, or Luna route with low-through-max reasoning for Codex project work. Prefer bounded direct tool concurrency, but automatically create or reuse a model-specific leaf agent when route-fit benefit clearly exceeds startup and aggregation overhead; no extra user permission is required. Use for code changes, tests, reviews, routed implementation, model recommendations, usage queries, and retuning. Use the legacy strict state machine only when the user explicitly requests strict ledger auditing. Never auto-select Ultra or create a new top-level Codex task.
+description: Recommend and execute an efficient GPT-5.6 Sol, Terra, or Luna route with low-through-max reasoning for Codex project work. Prefer bounded direct tool concurrency, but automatically create or reuse a model-specific leaf agent when route-fit benefit clearly exceeds startup and aggregation overhead; no extra user permission is required. Use for code changes, tests, reviews, routed implementation, model recommendations, usage queries, retuning, and requests to disable, exit, restore, or check this Skill for the current project. Use the legacy strict state machine only when the user explicitly requests strict ledger auditing. Never auto-select Ultra or create a new top-level Codex task.
 ---
 
 # Codex Auto Model Router
@@ -9,14 +9,26 @@ Use the default fail-open benefit-gated path. Keep the coordinator on its curren
 
 Do not route simple questions, copy confirmation, explanation, or read-only lookup that needs no project execution. Do not commit, push, deploy, upload, or send messages unless the user separately requests it.
 
+## Project exit and restore
+
+If the user asks to exit, disable, stop using, restore, re-enable, or check this Skill for the current project, handle that request before normal routing:
+
+- Exit: run `python3 <skill-dir>/scripts/router_lite.py project-disable --repository <project-root>`.
+- Restore: run `python3 <skill-dir>/scripts/router_lite.py project-enable --repository <project-root>`.
+- Status: run `python3 <skill-dir>/scripts/router_lite.py project-status --repository <project-root>`.
+
+`project-disable` adds one managed `[[skills.config]]` entry to the trusted project's `.codex/config.toml`, preserves unrelated settings, and disables this Skill by its absolute `SKILL.md` path. Normal `decide`, `plan`, and `record` commands also inspect that entry and return `action=disabled` immediately, so an already-loaded task stops routing without waiting for a restart. Restart Codex before the next task so project configuration can prevent normal Skill loading. Do not edit global `~/.codex/config.toml` for a project exit. `--no-subagents` is only a per-command agent opt-out and is not a project exit.
+
+After a successful exit, stop all Router classification, notices, delegation, reuse, planning, and ledger actions for that project. Only the explicit restore or status entry remains available. If Codex still injects already-loaded Skill text in the current conversation, do not treat that as permission to resume routing.
+
 ## Default workflow
 
-1. Classify the smallest useful task with `task_kind=mechanical|ordinary|complex`, `risk`, `size`, and only material ambiguity, coupling, verification, consequence, latency, or prior-failure signals. Include a conservative `estimated_seconds` when the work is bounded enough to estimate.
+1. Let `decide` check project exit state first. If it returns `action=disabled`, stop using this Skill for the project. Otherwise classify the smallest useful task with `task_kind=mechanical|ordinary|complex`, `risk`, `size`, and only material ambiguity, coupling, verification, consequence, latency, or prior-failure signals. Include a conservative `estimated_seconds` when the work is bounded enough to estimate.
 2. Run `python3 scripts/router_lite.py decide ... --estimated-seconds <n>` once. Use only the documented enum values; compatibility aliases are fail-open protection, not preferred input. Pass `--no-subagents` only when the user explicitly disables child agents. Treat `recommended_route` as advice until a returned `delegate` or `reuse` action is actually dispatched and observed.
-3. Show one line before execution in the language of the user's current request. Do not hard-code Chinese for an English request or English for a Chinese request. Use:
-   - Chinese: `Codex 自动路由｜任务：<name>｜建议：<model>/<effort>｜执行：<当前主模型|子智能体 model/effort>｜<reason>`
-   - English: `Codex auto route | Task: <name> | Recommendation: <model>/<effort> | Execution: <current coordinator|model/effort leaf agent> | <reason>`
-   - For another language, translate the labels concisely while preserving the model, effort, and reason values.
+3. Show one line before execution in the language of the user's current request. Keep English as the only canonical template and translate it naturally when the request uses another language:
+   - Local: `Codex auto route | Task: <name> | Recommendation: <model>/<effort> | Execution: current coordinator <model>/<effort> | No automatic switch: <execution_reason>`
+   - Delegated: `Codex auto route | Task: <name> | Recommendation: <model>/<effort> | Execution: leaf agent <model>/<effort> | Switch reason: <execution_reason>`
+   - Render `main-model-fixed-leaf-startup-cost-exceeds-benefit` as `main conversation model is fixed; leaf startup cost exceeds expected benefit`. Translate that explanation instead of exposing the machine token.
 4. Execute by action:
    - `local`: continue in the coordinator. Do not claim that the recommended model or effort actually ran.
    - Directly run independent safe tool or process calls concurrently when their results do not determine one another and they do not share mutable files, build state, simulators, devices, approval boundaries, or external side effects. Prefer one programmatic tool call with bounded `Promise.all` orchestration when supported. This concurrency uses the coordinator's same model and reasoning effort and creates no child-agent UI entries. Keep reasoning-dependent steps sequential.
@@ -86,9 +98,9 @@ Treat the supplied stop condition, validation budget, and recovery count as hard
 
 The coordinator owns dependencies, conflicts, waiting, and aggregation. Leaf agents may not delegate. On the first failure, start nothing else, drain active agents, and continue locally only when doing so cannot duplicate or conflict with writes or external actions.
 
-Before dispatch, show the notice in the user's current language. Chinese: `Codex 自动路由｜并发：<total including coordinator> 个任务｜调度：完成即补位`. English: `Codex auto route | Concurrency: <total including coordinator> tasks | Scheduling: refill on completion`.
+Before dispatch, render the canonical English notice in the user's current language: `Codex auto route | Concurrency: <total including coordinator> tasks | Scheduling: refill on completion`.
 
-Before a reused follow-up, show at most once per executor in the user's current language. Chinese: `Codex 自动路由｜执行器：复用 <name>｜模型：<model>｜推理：<effort>｜同请求内续派`. English: `Codex auto route | Executor: reuse <name> | Model: <model> | Reasoning: <effort> | same-request follow-up`.
+Before a reused follow-up, render the canonical English notice in the user's current language at most once per executor: `Codex auto route | Executor: reuse <name> | Model: <model> | Reasoning: <effort> | same-request follow-up`.
 
 At completion, summarize concurrency only from observed timing. Never claim speedup without a controlled serial comparison.
 

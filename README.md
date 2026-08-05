@@ -48,6 +48,25 @@ cd codex-auto-model-router
 
 Restart Codex after installation.
 
+## Exit for one project
+
+Tell Codex “stop using this Skill in the current project,” or run:
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-auto-model-router/scripts/router_lite.py" project-disable --repository .
+```
+
+This preserves unrelated settings and adds one managed `[[skills.config]]` entry to the project's `.codex/config.toml`. Router commands stop immediately; restart Codex before the next task so a trusted project can prevent normal Skill loading. The setting applies only to that project and does not change global `~/.codex/config.toml`.
+
+Restore or inspect it with:
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-auto-model-router/scripts/router_lite.py" project-enable --repository .
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-auto-model-router/scripts/router_lite.py" project-status --repository .
+```
+
+`--no-subagents` is different: it disables child agents for one Router command but does not exit the Skill. Project-scoped configuration follows Codex's official [`config.toml` behavior](https://developers.openai.com/codex/config-reference/).
+
 ## How it works
 
 Every applicable request follows one of three paths:
@@ -61,6 +80,8 @@ Every applicable request follows one of three paths:
 There is no model Restore, plan hash, cursor, environment guard, or blocking ledger on the default path. Routing or executor startup failure does not block ordinary work. The legacy strict state machine remains available only when the user explicitly requests strict auditing or replay protection.
 
 Visible routing notices follow the language of the current request. English prompts receive English labels, Chinese prompts receive Chinese labels, and model, effort, and reason values remain unchanged.
+
+When execution stays local despite a different recommendation, the notice gives the concise reason: `main conversation model is fixed; leaf startup cost exceeds expected benefit`. Delegated execution similarly labels the switch reason, so a recommendation is never confused with observed model use. The Skill stores only the English canonical template and translates it to the user's current language at runtime.
 
 The recommendation does not switch the current task's model. A routed leaf is a separate task running the recommended model, not a change to the already-running coordinator. Direct tool concurrency shares the coordinator's model and reasoning effort; it creates no child-agent cards or independent reasoning streams.
 

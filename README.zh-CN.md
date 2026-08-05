@@ -48,6 +48,25 @@ cd codex-auto-model-router
 
 安装后重启 Codex。
 
+## 退出当前项目
+
+直接告诉 Codex“当前项目不再使用这个 Skill”，或运行：
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-auto-model-router/scripts/router_lite.py" project-disable --repository .
+```
+
+该命令会保留其他设置，只在当前项目的 `.codex/config.toml` 中加入一条受管理的 `[[skills.config]]` 禁用项。Router 命令会立即停止；随后重启 Codex，可信项目就能在后续任务中阻止该 Skill 正常加载。它只影响当前项目，不修改全局 `~/.codex/config.toml`。
+
+恢复或查看状态：
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-auto-model-router/scripts/router_lite.py" project-enable --repository .
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-auto-model-router/scripts/router_lite.py" project-status --repository .
+```
+
+`--no-subagents` 含义不同：它只针对一次 Router 命令禁用子智能体，不会退出整个 Skill。项目配置遵循 Codex 官方的 [`config.toml` 机制](https://developers.openai.com/codex/config-reference/)。
+
 ## 工作方式
 
 每个适用请求只走三条路径之一：
@@ -61,6 +80,8 @@ cd codex-auto-model-router
 默认路径不使用 Restore、计划哈希、游标、环境变量门禁或阻塞式台账。路由或执行器启动失败不会阻塞普通工作。旧的严格状态机只在用户明确要求严格审计或防重放时启用。
 
 所有可见路由提示都会跟随当前请求的语言：英文请求使用英文标签，中文请求使用中文标签；模型、推理强度和原因值保持不变。
+
+当建议路由不同但仍由主线程执行时，提示会简洁说明主对话模型已固定、子智能体启动成本高于预期收益。实际委派时则写出切换原因，避免把推荐模型误认为已经执行的模型。Skill 内只保存英文规范模板，运行时再按用户当前语言自然翻译。
 
 Skill 加载时，本轮主对话的模型和推理强度已经确定，因此 Router 不能主动切换它们。`recommended_route` 在实际委派前只是建议；委派后由独立叶子任务运行建议模型，并不改变已经开始的主对话。用户在 UI 选模或修改配置通常只影响后续任务或请求。直接工具并发仍共享当前主模型和推理强度，不会产生独立推理流或子智能体卡片。
 

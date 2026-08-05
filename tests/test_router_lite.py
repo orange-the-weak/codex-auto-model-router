@@ -101,6 +101,7 @@ class RouterLiteTests(unittest.TestCase):
             result = self.output(LITE.decide, self.args(task_kind="mechanical"))
         self.assertEqual(result["action"], "local")
         self.assertFalse(result["restore_required"])
+        self.assertEqual(result["execution_reason"], "current-route-already-matches")
 
     def test_mismatched_route_automatically_uses_agent_without_switch_or_hash(self):
         current = {"status": "verified", "thread_id": "t", "model": "gpt-5.6-sol", "effort": "high"}
@@ -114,6 +115,10 @@ class RouterLiteTests(unittest.TestCase):
         self.assertEqual(result["subagent_policy"]["mode"], "automatic-benefit-gated")
         self.assertFalse(result["subagent_policy"]["user_permission_required"])
         self.assertTrue(result["delegation_gate"]["benefit_clear"])
+        self.assertEqual(
+            result["execution_reason"],
+            "model-specific-leaf-benefit-clears-overhead",
+        )
         self.assertNotIn("plan_hash", result)
         self.assertNotIn("route_id", result)
 
@@ -141,6 +146,10 @@ class RouterLiteTests(unittest.TestCase):
         self.assertFalse(result["subagent_policy"]["automatic_reuse"])
         self.assertFalse(result["subagent_policy"]["user_permission_required"])
         self.assertTrue(result["subagent_policy"]["disabled_by_user"])
+        self.assertEqual(
+            result["execution_reason"],
+            "main-thread-model-fixed-and-subagents-disabled",
+        )
         self.assertTrue(result["tool_concurrency"]["allowed"])
         self.assertFalse(result["tool_concurrency"]["creates_child_agents"])
         self.assertTrue(result["tool_concurrency"]["same_model_and_effort"])
@@ -205,6 +214,130 @@ class RouterLiteTests(unittest.TestCase):
         self.assertEqual(result["action"], "local")
         self.assertEqual(result["reason"], "route-benefit-not-proven")
         self.assertFalse(result["delegation_gate"]["benefit_clear"])
+        self.assertEqual(
+            result["execution_reason"],
+            "main-model-fixed-leaf-startup-cost-exceeds-benefit",
+        )
+
+    def test_project_disable_enable_and_status_are_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "project"
+            root.mkdir()
+            (root / ".git").mkdir()
+            skill = Path(directory) / "skills" / "router" / "SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text("---\nname: router\n---\n", encoding="utf-8")
+            command_args = SimpleNamespace(repository=root, skill_path=skill)
+
+            disabled = self.output(LITE.project_disable, command_args)
+            disabled_again = self.output(LITE.project_disable, command_args)
+            status = self.output(LITE.project_status, command_args)
+            self.assertTrue(disabled["changed"])
+            self.assertFalse(disabled["enabled"])
+            self.assertFalse(disabled_again["changed"])
+            self.assertFalse(status["enabled"])
+            config = root / ".codex" / "config.toml"
+            config_text = config.read_text(encoding="utf-8")
+            self.assertEqual(config_text.count(LITE.PROJECT_EXIT_BEGIN), 1)
+            self.assertIn("[[skills.config]]", config_text)
+            self.assertIn("enabled = false", config_text)
+
+            enabled = self.output(LITE.project_enable, command_args)
+            enabled_again = self.output(LITE.project_enable, command_args)
+            self.assertTrue(enabled["changed"])
+            self.assertTrue(enabled["enabled"])
+            self.assertFalse(enabled_again["changed"])
+            self.assertTrue(enabled_again["enabled"])
+
+    def test_project_exit_preserves_existing_project_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".git").mkdir()
+            config = root / ".codex" / "config.toml"
+            config.parent.mkdir()
+            original = "[features]\nweb_search = true\n"
+            config.write_text(original, encoding="utf-8")
+            skill = root / "external-skill" / "SKILL.md"
+            skill.parent.mkdir()
+            skill.write_text("---\nname: router\n---\n", encoding="utf-8")
+            command_args = SimpleNamespace(repository=root, skill_path=skill)
+
+            self.output(LITE.project_disable, command_args)
+            self.assertTrue(config.read_text(encoding="utf-8").startswith(original))
+            self.output(LITE.project_enable, command_args)
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    def test_disabled_project_short_circuits_decide_plan_and_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".git").mkdir()
+            skill = root / "skill" / "SKILL.md"
+            skill.parent.mkdir()
+            skill.write_text("---\nname: router\n---\n", encoding="utf-8")
+            self.output(
+                LITE.project_disable,
+                SimpleNamespace(repository=root, skill_path=skill),
+            )
+
+            decision = self.output(
+                LITE.decide,
+                self.args(repository=root, no_runtime_detection=True),
+            )
+            planned = self.output(
+                LITE.plan,
+                self.plan_args(
+                    [{"task_name": "work", "estimated_seconds": 180}],
+                    repository=root,
+                    no_runtime_detection=True,
+                ),
+            )
+            recorded = self.output(
+                LITE.record,
+                SimpleNamespace(
+                    repository=root,
+                    ledger=root / "ledger.jsonl",
+                    event_id=None,
+                    model="gpt-5.6-luna",
+                    effort="high",
+                    task_class="ordinary",
+                    outcome="completed",
+                    source="task-metadata",
+                    duration_seconds=1,
+                    concurrency=1,
+                ),
+            )
+            self.assertEqual(decision["action"], "disabled")
+            self.assertEqual(planned["action"], "disabled")
+            self.assertFalse(recorded["recorded"])
+            self.assertFalse((root / "ledger.jsonl").exists())
+
+    def test_cli_project_exit_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".git").mkdir()
+            command = [
+                "python3", str(ROOT / "scripts" / "router_lite.py"),
+            ]
+            common = [
+                "--repository", str(root),
+                "--skill-path", str(ROOT / "SKILL.md"),
+            ]
+            disabled = subprocess.run(
+                command + ["project-disable"] + common,
+                text=True, capture_output=True, check=False,
+            )
+            status = subprocess.run(
+                command + ["project-status"] + common,
+                text=True, capture_output=True, check=False,
+            )
+            enabled = subprocess.run(
+                command + ["project-enable"] + common,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(disabled.returncode, 0)
+            self.assertFalse(json.loads(disabled.stdout)["enabled"])
+            self.assertFalse(json.loads(status.stdout)["enabled"])
+            self.assertTrue(json.loads(enabled.stdout)["enabled"])
 
     def test_executor_permission_and_immediate_final_contract(self):
         current = {

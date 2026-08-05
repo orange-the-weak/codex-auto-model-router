@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import time
+import tomllib
 from pathlib import Path
 from pathlib import PurePosixPath
 
@@ -20,6 +21,9 @@ import route_policy as policy
 
 
 LITE_PROTOCOL = "router-lite-v2"
+SKILL_NAME = "codex-auto-model-router"
+PROJECT_EXIT_BEGIN = "# BEGIN codex-auto-model-router project exit"
+PROJECT_EXIT_END = "# END codex-auto-model-router project exit"
 DEFAULT_MAX_TOTAL_TASKS = 4
 DEFAULT_MIN_PARALLEL_SECONDS = 90
 DEFAULT_MIN_DELEGATE_SECONDS = 90
@@ -76,6 +80,161 @@ def _risk_value(value):
 
 def _size_value(value):
     return {"small": "normal", "medium": "normal"}.get(value, value)
+
+
+def _project_root(value=None):
+    candidate = Path(value or Path.cwd()).expanduser().resolve()
+    if not candidate.is_dir():
+        raise ValueError("repository must be an existing directory")
+    for directory in (candidate, *candidate.parents):
+        if (directory / ".git").exists():
+            return directory
+    return candidate
+
+
+def _default_skill_path():
+    codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    installed = codex_home / "skills" / SKILL_NAME / "SKILL.md"
+    if installed.is_file():
+        return installed.resolve()
+    return (Path(__file__).resolve().parents[1] / "SKILL.md").resolve()
+
+
+def _normalized_skill_path(value, config_path):
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = config_path.parent / path
+    path = path.resolve()
+    return path if path.name == "SKILL.md" else path / "SKILL.md"
+
+
+def _project_skill_state(repository=None, skill_path=None):
+    root = _project_root(repository)
+    config_path = root / ".codex" / "config.toml"
+    target = Path(skill_path or _default_skill_path()).expanduser().resolve()
+    if target.name != "SKILL.md":
+        target /= "SKILL.md"
+    text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    managed = PROJECT_EXIT_BEGIN in text and PROJECT_EXIT_END in text
+    matching_entries = []
+    if text.strip():
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            if managed:
+                return {
+                    "enabled": False,
+                    "managed": True,
+                    "repository": str(root),
+                    "config_path": str(config_path),
+                    "skill_path": str(target),
+                    "warning": f"project-config-invalid:{type(exc).__name__}",
+                }
+            raise ValueError("project .codex/config.toml is invalid") from exc
+        entries = data.get("skills", {}).get("config", [])
+        if not isinstance(entries, list):
+            raise ValueError("project skills.config must be an array")
+        matching_entries = [
+            entry for entry in entries
+            if isinstance(entry, dict)
+            and isinstance(entry.get("path"), str)
+            and _normalized_skill_path(entry["path"], config_path) == target
+        ]
+    disabled = managed or any(entry.get("enabled") is False for entry in matching_entries)
+    return {
+        "enabled": not disabled,
+        "managed": managed,
+        "repository": str(root),
+        "config_path": str(config_path),
+        "skill_path": str(target),
+        "warning": None,
+    }
+
+
+def _project_disabled_result(state):
+    return {
+        "protocol": LITE_PROTOCOL,
+        "action": "disabled",
+        "reason": "project-skill-disabled",
+        "execution_reason": "project-skill-disabled",
+        "project_skill_enabled": False,
+        "project_exit": state,
+        "recommended_route": None,
+        "agent_type": None,
+        "spawn_contract": None,
+        "reuse_target": None,
+        "restore_required": False,
+        "fail_open": True,
+    }
+
+
+def _managed_project_exit_block(skill_path):
+    encoded_path = json.dumps(str(Path(skill_path).resolve()), ensure_ascii=False)
+    return (
+        f"{PROJECT_EXIT_BEGIN}\n"
+        "[[skills.config]]\n"
+        f"path = {encoded_path}\n"
+        "enabled = false\n"
+        f"{PROJECT_EXIT_END}\n"
+    )
+
+
+def _write_project_config(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def project_disable(args):
+    state = _project_skill_state(args.repository, args.skill_path)
+    if state["managed"] or not state["enabled"]:
+        result = {**state, "action": "project-disable", "changed": False}
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return
+    config_path = Path(state["config_path"])
+    existing = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    updated = existing + separator + _managed_project_exit_block(state["skill_path"])
+    _write_project_config(config_path, updated)
+    result = _project_skill_state(state["repository"], state["skill_path"])
+    result.update({
+        "action": "project-disable",
+        "changed": True,
+        "takes_effect": "immediately-for-router-commands-and-after-codex-restart-for-skill-loading",
+    })
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+
+def project_enable(args):
+    state = _project_skill_state(args.repository, args.skill_path)
+    if not state["managed"]:
+        result = {**state, "action": "project-enable", "changed": False}
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return
+    config_path = Path(state["config_path"])
+    text = config_path.read_text(encoding="utf-8")
+    start = text.index(PROJECT_EXIT_BEGIN)
+    end = text.index(PROJECT_EXIT_END, start) + len(PROJECT_EXIT_END)
+    if end < len(text) and text[end] == "\n":
+        end += 1
+    updated = text[:start] + text[end:]
+    if updated and not updated.endswith("\n"):
+        updated += "\n"
+    _write_project_config(config_path, updated)
+    result = _project_skill_state(state["repository"], state["skill_path"])
+    result.update({
+        "action": "project-enable",
+        "changed": True,
+        "takes_effect": "immediately-for-router-commands-and-after-codex-restart-for-skill-loading",
+    })
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+
+def project_status(args):
+    result = _project_skill_state(args.repository, args.skill_path)
+    result.update({"action": "project-status", "changed": False})
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
 def _route_is_sufficient(current, selected):
@@ -238,6 +397,19 @@ def _decision(args, task=None, current=None):
             actual_effort = effort
     agent_type = None if action != "delegate" else AGENT_TYPES.get((model, effort))
     lifecycle_contract = _lifecycle_contract(args)
+    if action == "local":
+        if reason == "already-matched":
+            execution_reason = "current-route-already-matches"
+        elif reason == "subagents-disabled-by-user":
+            execution_reason = "main-thread-model-fixed-and-subagents-disabled"
+        else:
+            execution_reason = (
+                "main-model-fixed-leaf-startup-cost-exceeds-benefit"
+            )
+    elif action == "delegate":
+        execution_reason = "model-specific-leaf-benefit-clears-overhead"
+    else:
+        execution_reason = reason
     return {
         "protocol": LITE_PROTOCOL,
         "action": action,
@@ -256,6 +428,7 @@ def _decision(args, task=None, current=None):
         ),
         "recommended_route": {"model": model, "effort": effort},
         "reason": reason,
+        "execution_reason": execution_reason,
         "current": current,
         "native_ultra": ultra,
         "subagent_policy": subagent_policy,
@@ -428,6 +601,14 @@ def executor_lifecycle_decision(
 
 
 def decide(args):
+    project_state = _project_skill_state(getattr(args, "repository", None))
+    if not project_state["enabled"]:
+        print(json.dumps(
+            _project_disabled_result(project_state),
+            ensure_ascii=False,
+            sort_keys=True,
+        ))
+        return
     result = _decision(args)
     max_reuses = int(getattr(args, "max_executor_reuses", DEFAULT_MAX_REUSES_PER_EXECUTOR))
     if not 0 <= max_reuses <= 3:
@@ -479,6 +660,7 @@ def decide(args):
             result["action"] = "reuse"
             result["reuse_target"] = candidate["agent_task_name"]
             result["reason"] = "safe-same-request-reuse"
+            result["execution_reason"] = "compatible-leaf-reuse-clears-overhead"
             result["reused_executor_seconds"] = reused_seconds
             result["spawn_contract"] = None
             result["record_contract"]["required_after_execution"] = True
@@ -713,6 +895,14 @@ def _executor_schedule(
 
 
 def plan(args):
+    project_state = _project_skill_state(getattr(args, "repository", None))
+    if not project_state["enabled"]:
+        print(json.dumps(
+            _project_disabled_result(project_state),
+            ensure_ascii=False,
+            sort_keys=True,
+        ))
+        return
     try:
         tasks = json.loads(args.tasks_json)
     except json.JSONDecodeError as exc:
@@ -938,6 +1128,12 @@ def plan(args):
 
 
 def record(args):
+    project_state = _project_skill_state(getattr(args, "repository", None))
+    if not project_state["enabled"]:
+        result = _project_disabled_result(project_state)
+        result.update({"recorded": False})
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return
     event = {
         "event": "execution",
         "event_id": args.event_id or f"lite-{time.time_ns()}",
@@ -1029,6 +1225,11 @@ def _add_reuse_arguments(parser):
     )
 
 
+def _add_project_arguments(parser):
+    parser.add_argument("--repository", type=Path, default=Path.cwd())
+    parser.add_argument("--skill-path", type=Path, default=_default_skill_path())
+
+
 def parser():
     root = FailOpenArgumentParser()
     commands = root.add_subparsers(dest="command", required=True)
@@ -1078,7 +1279,17 @@ def parser():
     recorder.add_argument("--source", choices=ledger.SOURCES, default="task-metadata")
     recorder.add_argument("--duration-seconds", type=float)
     recorder.add_argument("--concurrency", type=int)
+    recorder.add_argument("--repository", type=Path, default=Path.cwd())
     recorder.set_defaults(func=record)
+    disabler = commands.add_parser("project-disable")
+    _add_project_arguments(disabler)
+    disabler.set_defaults(func=project_disable)
+    enabler = commands.add_parser("project-enable")
+    _add_project_arguments(enabler)
+    enabler.set_defaults(func=project_enable)
+    status = commands.add_parser("project-status")
+    _add_project_arguments(status)
+    status.set_defaults(func=project_status)
     return root
 
 

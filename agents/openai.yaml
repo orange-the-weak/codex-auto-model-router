@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Auto Model Router"
-  short_description: "为 GPT-5.6 推荐模型与推理强度，默认单智能体并发工具"
-  default_prompt: "Use $codex-auto-model-router to choose the lowest sufficient GPT-5.6 route, prefer safe direct tool concurrency, and automatically use a bounded model-specific leaf agent when its route benefit clearly exceeds coordination overhead."
+  short_description: "自动选择 GPT-5.6 路由，支持项目级退出与恢复"
+  default_prompt: "Use $codex-auto-model-router to choose the lowest sufficient GPT-5.6 route, honor project-level exit settings, prefer safe direct tool concurrency, and explain why execution stays on the current coordinator when no model-specific leaf is used."

@@ -69,10 +69,12 @@ if not 25 <= len(values.get("short_description", "")) <= 64:
     fail("openai.yaml short_description length is invalid")
 if "$codex-auto-model-router" not in values.get("default_prompt", ""):
     fail("openai.yaml default prompt does not invoke the skill")
-if "Codex 自动路由｜任务：<name>｜建议：<model>/<effort>｜执行：<当前主模型|子智能体 model/effort>" not in skill_text:
-    fail("visible routing protocol is missing")
-if "Codex auto route | Task: <name> | Recommendation: <model>/<effort> | Execution: <current coordinator|model/effort leaf agent>" not in skill_text:
+if "Codex auto route | Task: <name> | Recommendation: <model>/<effort> | Execution: current coordinator <model>/<effort> | No automatic switch: <execution_reason>" not in skill_text:
     fail("English visible routing protocol is missing")
+if "English as the only canonical template" not in skill_text:
+    fail("routing notices must keep a single canonical language")
+if "main conversation model is fixed; leaf startup cost exceeds expected benefit" not in skill_text:
+    fail("local execution notice is missing the root cold-start explanation")
 if "in the language of the user's current request" not in skill_text:
     fail("routing notices do not follow the current request language")
 for obsolete_segment_counter in (
@@ -98,6 +100,11 @@ for default_path_contract in (
     "Treat every ledger error as a non-blocking warning",
     "## Strict compatibility mode",
     "Never silently enter strict mode",
+    "## Project exit and restore",
+    "project-disable",
+    "project-enable",
+    "project-status",
+    "After a successful exit, stop all Router classification",
 ):
     if default_path_contract not in skill_text:
         fail(f"default routing contract is missing: {default_path_contract}")
@@ -121,6 +128,8 @@ for lifecycle_contract in (
     "Visible routing notices follow the language of the current request",
     "interrupts every optional or otherwise unneeded child still genuinely `running`",
     "no collaboration operation for deleting completed child-agent UI history",
+    "## Exit for one project",
+    "main conversation model is fixed; leaf startup cost exceeds expected benefit",
 ):
     if lifecycle_contract not in readme_text:
         fail(f"English executor lifecycle contract is missing: {lifecycle_contract}")
@@ -134,6 +143,9 @@ for lifecycle_contract in (
     "所有可见路由提示都会跟随当前请求的语言",
     "中断所有仍真实 `running` 但已非必需的子智能体",
     "没有删除已完成子智能体 UI 历史的操作",
+    "## 退出当前项目",
+    "主对话模型已固定、子智能体启动成本高于预期收益",
+    "只保存英文规范模板",
 ):
     if lifecycle_contract not in readme_zh_text:
         fail(f"Chinese executor lifecycle contract is missing: {lifecycle_contract}")
@@ -270,6 +282,9 @@ for contract in (
     '"automatic-benefit-gated"', '"automatic_creation": not disabled',
     '"automatic_reuse": not disabled', '"user_permission_required": False',
     '"delegation_gate"', '"tool_concurrency"',
+    'PROJECT_EXIT_BEGIN', 'def project_disable(', 'def project_enable(',
+    'def project_status(', '"action": "disabled"',
+    '"execution_reason": "project-skill-disabled"',
     '"creates_child_agents": False', '"same_model_and_effort": True',
     '"--no-subagents"', '"--allow-subagents"',
     'ledger-best-effort', 'DEFAULT_MAX_TOTAL_TASKS = 4',
