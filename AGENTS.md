@@ -17,7 +17,7 @@
 
 ## Editing and verification
 
-- Keep routing profiles in `scripts/routing_profiles.py`; preserve balanced defaults and explicit override precedence. Built-in profiles must not automatically select Astra above medium. Both Lite and strict CLI check project opt-out before loading profiles. Prompt hooks remain opt-in and must preserve unrelated hook configuration.
+- Keep routing profiles in `scripts/routing_profiles.py`; preserve balanced defaults and explicit override precedence. Existing built-in profiles must not automatically select Astra above medium. The explicitly selected `pro` profile is the sole built-in exception: Astra/xhigh only for extreme/high-consequence tasks or classified reasoning/verification failure of the corresponding Sol branch at observed xhigh effort. `plus` never automatically selects or falls back to Astra. Generated reports cannot override these opt-in policies. Never infer profile selection from account, subscription, entitlement, or available models. Both Lite and strict CLI check project opt-out before loading profiles. Prompt hooks remain opt-in and must preserve unrelated hook configuration.
 
 - Preserve unrelated worktree changes. Use `apply_patch` for edits.
 - Keep public English and Chinese documentation aligned with the distributed Skill and installed behavior.

@@ -617,7 +617,8 @@ def _validated_capability_decision(decision, plan, segment, execution_route):
     available = decision.get("available_models")
     if decision.get("availability_complete") is not True or not isinstance(available, list):
         raise ValueError("GPT-5.6 fallback requires a complete capability model list")
-    resolved = policy.resolve_family_fallback(target[0], target[1], available)
+    resolved = policy.resolve_family_fallback(
+        target[0], target[1], available, routing_profile=segment.get("routing_profile"))
     if (
         resolved.get("execution", {}).get("model") != execution_route[0]
         or resolved.get("execution", {}).get("effort") != execution_route[1]

@@ -52,10 +52,12 @@ def automatic_effort(model, effort, explicit_effort=False, failed_reasoning=Fals
     return effort
 
 
-def resolve(model, effort, available=None, explicit=False, explicit_effort=False, failed_reasoning=False):
+def resolve(model, effort, available=None, explicit=False, explicit_effort=False, failed_reasoning=False,
+            excluded_models=()):
     if available is not None and (not isinstance(available, list) or any(not isinstance(m, str) for m in available)):
         raise ValueError("available models must be a complete list of model IDs")
     chain = [model] if explicit else [model, *MODELS.get(model, {}).get("fallbacks", [])]
+    chain = [candidate for candidate in chain if candidate not in excluded_models]
     chosen = model if available is None else next((m for m in chain if m in available
         and effort in MODELS.get(m, {"efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]})["efforts"]), None)
     execution_effort = automatic_effort(chosen, effort, explicit_effort, failed_reasoning) if chosen else None

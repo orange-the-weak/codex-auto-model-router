@@ -50,15 +50,22 @@ cd codex-auto-model-router
 
 ## 路由配置档
 
-`balanced` 保留默认路由；`economy` 让更多有界任务使用 Luna；`quality` 让普通任务和扫描优先使用 Sol。所有内置配置中，Astra 默认 low，推理或验证失败后可升至 medium；更高强度必须显式指定，包括用户配置的任务档位覆盖。
+`balanced` 保留默认路由；`economy` 让更多有界任务使用 Luna；`quality` 让普通任务和扫描优先使用 Sol。这三个现有配置中，Astra 默认 low，推理或验证失败后可升至 medium；更高强度必须显式指定，包括用户配置的任务档位覆盖。
+
+可选的 `plus` 和 `pro` 必须由用户显式选择。它们是路由偏好，不检测订阅，也不强制设置服务层级。安装保留已有选择和默认行为。保存的选择持续有效，直到用户明确切换；`--profile` 只覆盖本次调用。账号信息、订阅权益和可用模型都不会自动选择配置。
+
+- Plus：轻量机械任务用 GPT-6 Luna/high，默认 Luna/xhigh，有界复杂任务用 GPT-6.1 Sol/high，更深任务用 Sol/xhigh。不会自动选择或回退到 Astra，但保留显式覆盖。
+- Pro：沿用两个 Luna 档；复杂的严格限定实现、既有项目迭代、UI 或谨慎维护用 GPT-5.6 Sol/xhigh；大型仓库、自主调查、复杂规划或深入跨模块任务用 GPT-6.1 Sol/xhigh。只有对应 Sol/xhigh 分支发生实质性失败，或任务确属极难／高后果，才允许 GPT-6 Astra/xhigh。不会经过 Astra medium/high 中间档。选择 Pro 意味着明确允许最高档可能显著增加预算消耗。
 
 ```bash
 python3 scripts/router_lite.py profile-show --repository .
 python3 scripts/router_lite.py profile-set quality --scope project --repository .
 python3 scripts/router_lite.py decide --profile economy --repository .
+python3 scripts/router_lite.py profile-set plus --scope project --repository .
+python3 scripts/router_lite.py decide --profile pro --task-kind complex --task-subtype ui --repository .
 ```
 
-全局设置、TOML 档位覆盖和优先级见[路由配置说明](references/routing-profiles.md)。配置档和可选提示钩子改编自 [David Soff](https://github.com/Davidsoff) 的 PR #4 与 #6。
+Pro 按失败升级时，需使用 `--prior-failure --prior-failure-kind reasoning`（或 `verification`），并提供实际观测到的 `--prior-failure-model` 和 `--prior-failure-effort xhigh`。模型或强度证据缺失、不匹配，Luna 失败以及基础设施失败，都不能触发 Astra。普通的有界实现仍从 Luna 开始；一般复杂度或歧义也必须先走 Sol。自动生成或缓存报告中的建议会按所选配置重新分类；用户明确指定的模型和强度仍优先。任务子类型、全局设置、TOML 档位覆盖和优先级见[路由配置说明](references/routing-profiles.md)。配置档和可选提示钩子改编自 [David Soff](https://github.com/Davidsoff) 的 PR #4 与 #6。
 
 ## 退出当前项目
 
@@ -126,7 +133,7 @@ CLI 默认启用收益门槛委派；`--no-subagents` 是明确退出开关。�
 | 高歧义、高耦合或高后果 | Astra / low |
 | 复杂推理或验证已有失败 | Astra / medium |
 
-Astra 默认 low，自动升级最多 medium；high、xhigh、max 仅在用户显式指定强度时使用。其他模型回退到 Astra 时同样遵守此限制，只指定 Astra 不代表允许更高强度。
+现有默认配置中，Astra 默认 low，自动升级最多 medium；high、xhigh、max 仅在用户显式指定强度或配置档位覆盖时使用。上文明确选择 Pro 后的最高档是唯一内置例外。只指定 Astra 不代表允许更高强度。Plus/Pro 的可用性回退不会把非 Astra 建议提升为 Astra。
 
 当前默认使用 GPT-6 Luna、GPT-6.1 Sol 与 GPT-6 Astra，兼容 GPT-6 Sol 和显式 GPT-5.6 路由；Terra/high 保留为旧版低延迟路线。Ultra 与 GPT-5.5 回退仅属于旧兼容模式。可显式请求“更新模型目录”；只读检查发现新模型时提示审核，不自动改路由、不创建后台定时任务。详见[模型更新说明](references/model-updates.md)。
 

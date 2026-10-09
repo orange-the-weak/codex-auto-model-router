@@ -36,6 +36,28 @@ ROUTING_PROFILES["quality"] = {
 for lane in ("ordinary_default", "bounded_scan", "bounded_deep_deterministic"):
     ROUTING_PROFILES["quality"][lane]["model"] = "gpt-6.1-sol"
 
+# These are explicit policy choices, never inferred account entitlements. Keep
+# the existing three profiles and the default selection exactly as they were.
+PLAN_PROFILES = ("plus", "pro")
+SCOPED_TASK_SUBTYPES = ("scoped_implementation", "existing_iteration", "ui", "careful_maintenance")
+DEEP_TASK_SUBTYPES = ("large_repo", "autonomous_investigation", "complex_planning", "deep_multi_module")
+TASK_SUBTYPES = ("general", *SCOPED_TASK_SUBTYPES, *DEEP_TASK_SUBTYPES, "extreme")
+PRO_BUDGET_WARNING = (
+    "Pro opts into GPT-6 Astra/xhigh for extreme/high-consequence tasks or a "
+    "substantive failure of the corresponding Sol/xhigh branch; this can use substantially more budget."
+)
+ROUTING_PROFILES["plus"] = {
+    lane: {"model": "gpt-6-luna", "effort": "xhigh"} for lane in TASK_LANES}
+ROUTING_PROFILES["plus"]["mechanical_default"]["effort"] = "high"
+for lane in ("complex_bounded", "complex_uncertain", "high_consequence", "complex_failed_escalation"):
+    ROUTING_PROFILES["plus"][lane] = {
+        "model": "gpt-6.1-sol", "effort": "high" if lane == "complex_bounded" else "xhigh"}
+ROUTING_PROFILES["pro"] = {
+    lane: dict(route) for lane, route in ROUTING_PROFILES["plus"].items()}
+ROUTING_PROFILES["pro"]["complex_bounded"] = {"model": "gpt-5.6-sol", "effort": "xhigh"}
+for lane in ("high_consequence", "complex_failed_escalation"):
+    ROUTING_PROFILES["pro"][lane] = {"model": "gpt-6-astra", "effort": "xhigh"}
+
 # Role changes in the reviewed catalog propagate without renaming lanes.
 for table in ROUTING_PROFILES.values():
     for route in table.values():
@@ -65,6 +87,67 @@ def lane_for(source, risk=None, consequence=None):
     if lane == "complex_uncertain_or_high_consequence":
         return "high_consequence" if risk == "high" or consequence == "high" else "complex_uncertain"
     return lane
+
+
+def task_evidence(task_subtype=None, prior_failure=False, prior_failure_model=None, prior_failure_effort=None):
+    subtype = task_subtype or "general"
+    if subtype not in TASK_SUBTYPES:
+        raise ValueError("unsupported task_subtype")
+    if prior_failure_model is not None:
+        if not prior_failure:
+            raise ValueError("prior_failure_model requires prior_failure=true")
+        prior_failure_model = require_routable_model(normalize_model(prior_failure_model))
+    if prior_failure_effort is not None:
+        if not prior_failure:
+            raise ValueError("prior_failure_effort requires prior_failure=true")
+        prior_failure_effort = normalize_effort(prior_failure_effort)
+    return subtype, prior_failure_model, prior_failure_effort
+
+
+def profile_lane(config, lane, task_kind, size, signals, failure_kind,
+                 task_subtype=None, prior_failure_model=None, prior_failure_effort=None):
+    """Refine only the opt-in profiles using actual task and failure evidence."""
+    subtype, failed_model, failed_effort = task_evidence(
+        task_subtype, signals["prior_failure"], prior_failure_model, prior_failure_effort)
+    if config["profile"] not in PLAN_PROFILES:
+        return lane
+    substantive_failure = signals["prior_failure"] and failure_kind in ("reasoning", "verification")
+    if config["profile"] == "plus":
+        if subtype == "extreme" or signals["consequence"] == "high":
+            return "high_consequence"
+        if subtype in DEEP_TASK_SUBTYPES:
+            return "complex_uncertain"
+        if substantive_failure:
+            return "complex_failed_escalation" if failed_model in ("gpt-5.6-sol", "gpt-6.1-sol", "gpt-6-sol") else "complex_bounded"
+        return lane
+    if subtype == "extreme" or signals["consequence"] == "high":
+        return "high_consequence"
+    deep = subtype in DEEP_TASK_SUBTYPES or (
+        subtype not in SCOPED_TASK_SUBTYPES and (
+            signals["ambiguity"] == "high" or signals["coupling"] == "high"
+            or (task_kind == "complex" and size == "large")))
+    sol_lane = "complex_uncertain" if deep else "complex_bounded"
+    corresponding_sol = "gpt-6.1-sol" if deep else "gpt-5.6-sol"
+    if substantive_failure and failed_model == corresponding_sol and failed_effort == "xhigh":
+        return "complex_failed_escalation"
+    if substantive_failure or task_kind == "complex" or deep or lane.startswith("complex_"):
+        return sol_lane
+    return lane
+
+
+def configured_effort(config, lane):
+    """Explicit lane edits and the narrowly opted-in Pro top tier authorize effort."""
+    route = config["routes"][lane]
+    return config["route_sources"][lane] in ("global", "project") or (
+        config["profile"] == "pro"
+        and lane in ("high_consequence", "complex_failed_escalation")
+        and route == {"model": "gpt-6-astra", "effort": "xhigh"})
+
+
+def fallback_exclusions(profile, model):
+    # Availability is not task evidence and must never promote a Sol/Luna
+    # recommendation into Astra. Explicitly selected Astra remains possible.
+    return ("gpt-6-astra",) if profile in PLAN_PROFILES and model != "gpt-6-astra" else ()
 
 
 def routing_config_paths(repository=None, environ=None):
@@ -159,6 +242,7 @@ def resolve_routing_config(repository=None, profile_override=None, environ=None)
             sources[lane] = scope
     return {
         "profile": profile,
+        **({"budget_warning": PRO_BUDGET_WARNING} if profile == "pro" else {}),
         "routes": routes,
         "route_sources": sources,
         "config_paths": {scope: str(path) for scope, path in paths.items()},
@@ -234,4 +318,5 @@ def set_routing_profile(profile, scope="project", repository=None, environ=None)
     finally:
         if temporary.exists():
             temporary.unlink()
-    return {"scope": scope, "profile": profile, "config_path": str(path), "changed": updated != existing}
+    return {"scope": scope, "profile": profile, "config_path": str(path), "changed": updated != existing,
+            **({"budget_warning": PRO_BUDGET_WARNING} if profile == "pro" else {})}

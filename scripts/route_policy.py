@@ -318,7 +318,7 @@ def is_gpt56_model(value):
     return value in MODELS
 
 
-def resolve_family_fallback(target_model, target_effort, available_models=None):
+def resolve_family_fallback(target_model, target_effort, available_models=None, routing_profile=None):
     """Resolve pre-execution availability without leaving GPT-5.6 prematurely."""
     target_model = normalize_model(target_model)
     target_effort = normalize_effort(target_effort)
@@ -326,7 +326,8 @@ def resolve_family_fallback(target_model, target_effort, available_models=None):
         if target_effort not in catalog.MODELS[target_model]["efforts"]:
             raise ValueError("unsupported catalog reasoning effort")
         return catalog.resolve(target_model, target_effort, available_models,
-                               explicit_effort=True)
+                               explicit_effort=True,
+                               excluded_models=profiles.fallback_exclusions(routing_profile, target_model))
     _validate_ultra_route(
         target_model, target_effort, explicit=target_effort == "ultra", mode="apply"
     )
@@ -503,11 +504,14 @@ def recommended_route(
     ambiguity=None, coupling=None, verification=None, consequence=None,
     prior_failure=False, evidence=None, latency_priority=None,
     prior_failure_kind=None, routing_config=None,
+    task_subtype=None, prior_failure_model=None, prior_failure_effort=None,
 ):
+    profiles.task_evidence(task_subtype, prior_failure, prior_failure_model, prior_failure_effort)
     if mode == "apply" and (report_model is not None or report_effort is not None):
         if report_model is None or report_effort is None:
             raise ValueError("report route requires both model and effort")
-        return report_model, report_effort, "report"
+        if routing_config is None or routing_config["profile"] not in profiles.PLAN_PROFILES:
+            return report_model, report_effort, "report"
 
     signals = _task_signals(
         task_kind, risk, size, ambiguity, coupling, verification,
@@ -590,10 +594,13 @@ def recommended_route(
     selected = lanes[lane]
     if routing_config is not None:
         resolved_lane = profiles.lane_for("policy:" + lane, risk, signals["consequence"])
+        resolved_lane = profiles.profile_lane(
+            routing_config, resolved_lane, task_kind, size, signals, failure_kind,
+            task_subtype, prior_failure_model, prior_failure_effort)
         selected = dict(routing_config["routes"][resolved_lane])
         selected["effort"] = catalog.automatic_effort(
             selected["model"], selected["effort"],
-            routing_config["route_sources"][resolved_lane] in ("global", "project"),
+            profiles.configured_effort(routing_config, resolved_lane),
             signals["prior_failure"] and failure_kind in ("reasoning", "verification"))
         return selected["model"], selected["effort"], "profile-policy:" + resolved_lane
     source = (
@@ -638,6 +645,9 @@ def select_route(
     latency_priority=None,
     prior_failure_kind=None,
     routing_config=None,
+    task_subtype=None,
+    prior_failure_model=None,
+    prior_failure_effort=None,
 ):
     report_model = normalize_model(report_model)
     report_effort = normalize_effort(report_effort)
@@ -646,6 +656,7 @@ def select_route(
         mode, task_kind, risk, size, report_model, report_effort,
         ambiguity, coupling, verification, consequence, prior_failure, evidence,
         latency_priority, prior_failure_kind, routing_config,
+        task_subtype, prior_failure_model, prior_failure_effort,
     )
 
     explicit_override = model_override is not None or effort_override is not None
@@ -658,7 +669,9 @@ def select_route(
     if explicit_override:
         source = "user-override"
     target_effort = catalog.automatic_effort(
-        target_model, target_effort, effort_override is not None or report_effort is not None,
+        target_model, target_effort, effort_override is not None or (
+            report_effort is not None and (
+                routing_config is None or routing_config["profile"] not in profiles.PLAN_PROFILES)),
         prior_failure and prior_failure_kind in ("reasoning", "verification")) if routing_config is None or source == "user-override" else target_effort
     _validate_ultra_route(
         target_model, target_effort, explicit=explicit_override, mode=mode
@@ -684,6 +697,9 @@ def select_route(
     return {
         "route_id": str(uuid.uuid4()),
         "mode": mode,
+        **({"routing_profile": routing_config["profile"],
+            **({"budget_warning": routing_config["budget_warning"]} if "budget_warning" in routing_config else {})}
+           if routing_config and routing_config["profile"] in profiles.PLAN_PROFILES else {}),
         "recommended": {"model": target_model, "effort": target_effort, "source": source},
         "execution": {
             "model": execution_model,
@@ -761,7 +777,7 @@ def _merge_signature(segment):
     return tuple(segment.get(field) for field in (
         "model", "effort", "reason", "task_kind", "risk", "ambiguity",
         "coupling", "verification", "consequence", "prior_failure",
-        "prior_failure_kind", "latency_priority", "merge_group",
+        "prior_failure_kind", "prior_failure_model", "prior_failure_effort", "task_subtype", "routing_profile", "latency_priority", "merge_group",
     ))
 
 
@@ -845,6 +861,8 @@ def context_capsule(plan, segment_id):
         "attempt_id": segment.get("attempt_id"),
         "model": segment.get("model"),
         "effort": segment.get("effort"),
+        **{key: segment[key] for key in ("routing_profile", "task_subtype", "prior_failure_model", "prior_failure_effort")
+           if key in segment},
         "goal": segment.get("goal"),
         "depends_on": segment.get("depends_on", []),
         "acceptance": segment.get("acceptance", []),
@@ -1009,6 +1027,8 @@ def _validate_parallel_segment_schema(segments, require_semantic_id=False):
         )
         if segment.get("prior_failure_kind") not in (None, failure_kind):
             raise ValueError(f"segment {segment_id} has invalid prior failure evidence")
+        profiles.task_evidence(segment.get("task_subtype"), segment.get("prior_failure", False),
+                               segment.get("prior_failure_model"), segment.get("prior_failure_effort"))
         if segment.get("latency_priority") is not None:
             _latency_priority(segment.get("latency_priority"))
         if segment.get("merge_group") is not None:
@@ -1113,6 +1133,7 @@ def _merge_short_siblings(segments):
             item["task_kind"], item["risk"], item["ambiguity"],
             item["coupling"], item["verification"], item["consequence"],
             item["prior_failure"], item.get("prior_failure_kind"),
+            item.get("prior_failure_model"), item.get("prior_failure_effort"), item.get("task_subtype"), item.get("routing_profile"),
             item["latency_priority"], item["merge_group"],
             tuple(item["conflict_keys"]),
         )
@@ -2161,6 +2182,9 @@ def plan_apply_segments(
             latency_priority=latency_priority,
             prior_failure_kind=prior_failure_kind,
             routing_config=routing_config,
+            task_subtype=raw.get("task_subtype"),
+            prior_failure_model=raw.get("prior_failure_model"),
+            prior_failure_effort=raw.get("prior_failure_effort"),
         )
         segment_model = normalize_model(raw.get("model"))
         segment_effort = normalize_effort(raw.get("effort"))
@@ -2169,6 +2193,10 @@ def plan_apply_segments(
             raise ValueError(f"invalid route_source for segment {segment_id}")
         if route_source == "report" and ((segment_model is None) != (segment_effort is None)):
             raise ValueError(f"report route requires both model and effort for segment {segment_id}")
+        report_is_advisory = routing_config is not None and routing_config["profile"] in profiles.PLAN_PROFILES
+        if report_is_advisory and route_source == "report":
+            # A generated/cached report is evidence, not a user model pin.
+            segment_model = segment_effort = route_source = None
         if global_model and segment_model and global_model != segment_model:
             if route_source == "user-override":
                 raise ValueError(f"conflicting model overrides for segment {segment_id}")
@@ -2177,8 +2205,8 @@ def plan_apply_segments(
             if route_source == "user-override":
                 raise ValueError(f"conflicting effort overrides for segment {segment_id}")
             segment_effort = None
-        report_default_model = report_model if len(raw_segments) == 1 else None
-        report_default_effort = report_effort if len(raw_segments) == 1 else None
+        report_default_model = report_model if len(raw_segments) == 1 and not report_is_advisory else None
+        report_default_effort = report_effort if len(raw_segments) == 1 and not report_is_advisory else None
         explicit = any((global_model, global_effort)) or route_source == "user-override"
         target_model = global_model or segment_model or report_default_model or target_model
         target_effort = global_effort or segment_effort or report_default_effort or target_effort
@@ -2219,6 +2247,13 @@ def plan_apply_segments(
             "size": size,
             **signals,
             "prior_failure_kind": prior_failure_kind,
+            **({"task_subtype": raw["task_subtype"]} if raw.get("task_subtype") is not None else {}),
+            **({"prior_failure_model": profiles.normalize_model(raw["prior_failure_model"])}
+               if raw.get("prior_failure_model") is not None else {}),
+            **({"prior_failure_effort": raw["prior_failure_effort"]}
+               if raw.get("prior_failure_effort") is not None else {}),
+            **({"routing_profile": routing_config["profile"]}
+               if routing_config and routing_config["profile"] in profiles.PLAN_PROFILES else {}),
             "latency_priority": latency_priority,
             "merge_group": _merge_group(raw.get("merge_group"), segment_id),
             "acceptance": _segment_list(raw.get("acceptance"), "acceptance", segment_id),
@@ -2336,6 +2371,7 @@ def parser():
     root.add_argument("--current-effort", choices=RUNTIME_EFFORTS)
     root.add_argument("--mode", choices=("apply", "assess", "retune"))
     root.add_argument("--task-kind", choices=("mechanical", "ordinary", "complex"), default="ordinary")
+    root.add_argument("--task-subtype", choices=profiles.TASK_SUBTYPES)
     root.add_argument("--risk", choices=("low", "normal", "high"), default="normal")
     root.add_argument("--size", choices=("tiny", "normal", "large"), default="normal")
     root.add_argument("--ambiguity", choices=("low", "medium", "high"))
@@ -2347,6 +2383,8 @@ def parser():
         help="How strongly this task prioritizes fast return over deeper reasoning",
     )
     root.add_argument("--prior-failure", action="store_true")
+    root.add_argument("--prior-failure-model")
+    root.add_argument("--prior-failure-effort", choices=profiles.ROUTED_EFFORTS)
     root.add_argument(
         "--prior-failure-kind",
         choices=("reasoning", "verification", "infrastructure"),
@@ -2387,8 +2425,14 @@ def main():
         if args.target_model is None or args.target_effort is None:
             raise SystemExit("--resolve-fallback requires --target-model and --target-effort")
         try:
+            from router_lite import _project_skill_state
+            if not _project_skill_state(args.repository)["enabled"]:
+                print(json.dumps({"action": "disabled"}, sort_keys=True))
+                return
+            config = profiles.resolve_routing_config(args.repository, args.profile)
             result = resolve_family_fallback(
-                args.target_model, args.target_effort, args.available_model
+                args.target_model, args.target_effort, args.available_model,
+                routing_profile=config["profile"],
             )
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
@@ -2545,6 +2589,9 @@ def main():
             args.latency_priority,
             args.prior_failure_kind,
             profiles.resolve_routing_config(args.repository, args.profile),
+            args.task_subtype,
+            args.prior_failure_model,
+            args.prior_failure_effort,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

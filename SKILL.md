@@ -43,7 +43,16 @@ The Router still evaluates every applicable request. It may report `tiny-local-f
 
 ## Model gradient
 
-Use the configured `balanced` (default), `economy`, or `quality` profile. Read [routing-profiles.md](references/routing-profiles.md) for profile commands, lane overrides, precedence, and explicit Astra effort settings. Respect project opt-out before reading routing configuration. Never change a profile unless the user requests it. The optional global prompt hook is installed only with `--install-hook` / `-InstallHook`; it respects project opt-out and cannot switch the coordinator model.
+Use the configured `balanced` (default), `economy`, `quality`, or explicitly opted-in `plus` / `pro` profile. Read [routing-profiles.md](references/routing-profiles.md) for profile commands, lane overrides, precedence, and explicit Astra effort settings. Respect project opt-out before reading routing configuration. Never change a profile unless the user requests it; never infer it from account plan, entitlement, current model, or model availability. A saved selection persists until explicitly changed; `--profile` overrides only one invocation. These profile names are routing preferences, not subscription detection or service-tier enforcement. The optional global prompt hook is installed only with `--install-hook` / `-InstallHook`; it respects project opt-out and cannot switch the coordinator model.
+
+Optional plan policies leave all existing defaults unchanged:
+
+- Plus: GPT-6 Luna/high for light mechanical work, Luna/xhigh by default, GPT-6.1 Sol/high for bounded complexity, then Sol/xhigh for deeper or high-consequence work. Never automatically recommend or fall back to Astra; explicit model/effort or lane overrides still win.
+- Pro: the same Luna tiers, then GPT-5.6 Sol/xhigh for complex scoped implementation, existing iteration, UI, or careful maintenance; GPT-6.1 Sol/xhigh for large-repository, autonomous-investigation, complex-planning, or deep multi-module work. Use `--task-subtype` only for actual task evidence. Ordinary scoped work still starts on Luna.
+- Pro's top tier is GPT-6 Astra/xhigh, with no intermediate Astra medium/high step. Use it only for a genuinely `extreme` task, high consequence, or a substantive reasoning/verification failure of the corresponding Sol/xhigh branch. For failure escalation supply `--prior-failure`, `--prior-failure-kind reasoning|verification`, the observed `--prior-failure-model`, and `--prior-failure-effort xhigh`. Missing/wrong model or effort evidence, a Luna failure, or infrastructure failure cannot authorize Astra. Generic complexity, repository size, or ambiguity alone requires Sol first. Generated or cached report recommendations are reclassified under the selected Plus/Pro policy; only real user model/effort pins override it.
+- Selecting Pro explicitly opts into potentially substantially higher budget use at that top tier. Show the returned budget warning when selecting Pro. Availability fallback cannot promote a non-Astra Plus/Pro route to Astra; disclose degradation when an eligible Pro Astra route falls back. Preserve route/profile evidence in strict plans and reuse only an exact compatible route.
+
+The following gradient describes the existing default profiles:
 
 Use the reviewed `model-catalog.json` through `router_lite.py`; task evidence and explicit user overrides win. Read [model-updates.md](references/model-updates.md) for availability checks, explicit catalog updates, and non-blocking change hints. Legacy strict mode retains `route_policy.py` and GPT-5.6 evidence.
 
@@ -55,7 +64,7 @@ Use the reviewed `model-catalog.json` through `router_lite.py`; task evidence an
 - Sol/low: explicit user override or compatibility testing only; never automatic.
 - Sol/medium: bounded complex work.
 - Astra/low: high ambiguity, coupling, or consequence; default when Astra is requested without an effort.
-- Astra/medium: classified reasoning/verification failure. Astra high, xhigh and max require an explicit user effort request, including fallback and reuse.
+- Astra/medium: classified reasoning/verification failure. Outside the explicitly selected Pro top tier above, Astra high, xhigh and max require an explicit user effort request or configured lane override, including fallback and reuse.
 
 Current Lite defaults are GPT-6 Luna, GPT-6.1 Sol and GPT-6 Astra. Preserve explicit model choices; unavailable explicit models require local execution with a visible limitation, not silent substitution. Automatic Astra fallback must disclose capability degradation. Never select Ultra automatically; native Ultra and the GPT-5.5 family guard belong only to legacy compatibility mode.
 

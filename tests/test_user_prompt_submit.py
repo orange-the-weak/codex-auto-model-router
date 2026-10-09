@@ -25,6 +25,7 @@ class UserPromptSubmitTests(unittest.TestCase):
         shutil.copy2(ROOT / "SKILL.md", self.skill / "SKILL.md")
         self.project = self.base / "project"
         self.project.mkdir()
+        (self.project / ".git").mkdir()
 
     def tearDown(self):
         self.temp_dir.cleanup()

@@ -82,7 +82,10 @@ def select_lite_route(args, task, current):
             "task_kind", "risk", "size", "ambiguity", "coupling", "verification",
             "consequence", "prior_failure", "prior_failure_kind", "latency_priority")},
         model_override=None if new_model else override,
-        effort_override=None, current=current)
+        effort_override=None, current=current,
+        task_subtype=task.get("task_subtype", getattr(args, "task_subtype", None)),
+        prior_failure_model=task.get("prior_failure_model", getattr(args, "prior_failure_model", None)),
+        prior_failure_effort=task.get("prior_failure_effort", getattr(args, "prior_failure_effort", None)))
     route = selected["recommended"]
     config = getattr(args, "routing_config", None)
     if config is None and getattr(args, "model_policy", "current") == "current":
@@ -90,6 +93,17 @@ def select_lite_route(args, task, current):
             getattr(args, "repository", None), getattr(args, "profile", None))
     lane = profiles.lane_for(route["source"], task.get("risk", args.risk),
                              task.get("consequence", args.consequence))
+    if config is not None and not override:
+        signals = policy._task_signals(*[
+            task.get(key, getattr(args, key)) for key in (
+                "task_kind", "risk", "size", "ambiguity", "coupling", "verification",
+                "consequence", "prior_failure")])
+        lane = profiles.profile_lane(config, lane, task.get("task_kind", args.task_kind),
+            task.get("size", args.size), signals,
+            task.get("prior_failure_kind", args.prior_failure_kind),
+            task.get("task_subtype", getattr(args, "task_subtype", None)),
+            task.get("prior_failure_model", getattr(args, "prior_failure_model", None)),
+            task.get("prior_failure_effort", getattr(args, "prior_failure_effort", None)))
     configured_effort = False
     # Explicit legacy IDs remain pinned. The old strict mode never changes.
     if new_model:
@@ -98,7 +112,7 @@ def select_lite_route(args, task, current):
     elif not override and config is not None and lane in config["routes"]:
         route.update(config["routes"][lane])
         route["source"] = "profile-policy:" + lane
-        configured_effort = config["route_sources"][lane] in ("global", "project")
+        configured_effort = profiles.configured_effort(config, lane)
         if task.get("effort", args.effort) is not None:
             route["effort"] = policy.normalize_effort(task.get("effort", args.effort))
     elif not override and getattr(args, "model_policy", "current") == "current":
@@ -127,9 +141,12 @@ def select_lite_route(args, task, current):
         raise ValueError("unsupported catalog reasoning effort; no silent substitution")
     selected["fallback"] = catalog.resolve(route["model"], route["effort"],
         task.get("available_models", getattr(args, "available_model", None)), bool(override),
-        explicit_effort=explicit_effort, failed_reasoning=failed_reasoning)
+        explicit_effort=explicit_effort, failed_reasoning=failed_reasoning,
+        excluded_models=profiles.fallback_exclusions(config["profile"] if config else None, route["model"]))
     selected["execution"] = selected["fallback"]["execution"]
     selected["routing_profile"] = config["profile"] if config else "legacy"
+    if config and config.get("budget_warning"):
+        selected["budget_warning"] = config["budget_warning"]
     return selected
 
 
@@ -384,6 +401,7 @@ def _decision(args, task=None, current=None):
         and not task.get("prior_failure", args.prior_failure)
         and risk != "high"
         and consequence != "high"
+        and task.get("task_subtype", getattr(args, "task_subtype", None)) != "extreme"
         and current_is_sufficient
         and (
             (task_kind == "mechanical" and size == "tiny")
@@ -475,6 +493,7 @@ def _decision(args, task=None, current=None):
         "protocol": LITE_PROTOCOL,
         "action": action,
         "routing_profile": selected["routing_profile"],
+        **({"budget_warning": selected["budget_warning"]} if "budget_warning" in selected else {}),
         "model": actual_model,
         "effort": actual_effort,
         "agent_type": agent_type,
@@ -810,7 +829,7 @@ def _task_reuse_exclusions(task, args):
         exclusions.append("sensitive_data")
     if task.get("risk", args.risk) == "high" or task.get(
         "consequence", args.consequence
-    ) == "high":
+    ) == "high" or task.get("task_subtype", getattr(args, "task_subtype", None)) == "extreme":
         exclusions.append("high_consequence")
     if task.get("prior_failure", args.prior_failure):
         exclusions.append("prior_failure")
@@ -1239,6 +1258,8 @@ def _add_route_arguments(parser):
     parser.add_argument("--model-policy", choices=("current", "legacy"), default="current")
     parser.add_argument("--available-model", action="append", help="Complete observed execution surface; omit if unknown")
     parser.add_argument("--task-kind", choices=("mechanical", "ordinary", "complex"), default="ordinary")
+    parser.add_argument("--task-subtype", choices=profiles.TASK_SUBTYPES,
+                        help="Actual task subtype for opt-in Plus/Pro profiles; never an account inference")
     parser.add_argument(
         "--risk", type=_risk_value, choices=("low", "normal", "high"), default="normal"
     )
@@ -1252,6 +1273,9 @@ def _add_route_arguments(parser):
     parser.add_argument("--latency-priority", choices=("low", "normal", "high"))
     parser.add_argument("--prior-failure", action="store_true")
     parser.add_argument("--prior-failure-kind", choices=("unknown", "reasoning", "verification", "infrastructure"))
+    parser.add_argument("--prior-failure-model", help="Observed model responsible for the classified prior failure")
+    parser.add_argument("--prior-failure-effort", choices=profiles.ROUTED_EFFORTS,
+                        help="Observed reasoning effort of the failed executor; Pro escalation requires xhigh")
     parser.add_argument("--tool-bound", action="store_true")
     parser.add_argument("--estimated-seconds", type=int)
     parser.add_argument(

@@ -50,15 +50,22 @@ Restart Codex after installation. To also install the global prompt hook, opt in
 
 ## Routing profiles
 
-`balanced` preserves the default routes. `economy` favors Luna for more bounded work; `quality` favors Sol for ordinary work and scans. All built-in profiles keep Astra at low, or medium after a reasoning/verification failure. Higher Astra effort requires an explicit effort override (including a configured lane override).
+`balanced` preserves the default routes. `economy` favors Luna for more bounded work; `quality` favors Sol for ordinary work and scans. These existing profiles keep Astra at low, or medium after a reasoning/verification failure. Higher Astra effort requires an explicit effort override (including a configured lane override).
+
+Optional `plus` and `pro` profiles must be explicitly selected. They are routing preferences, not subscription detection or service-tier enforcement. Installation preserves existing selections and defaults. Saved selections persist until explicitly changed; `--profile` affects only that invocation. Account details, entitlements, and available models never select a profile.
+
+- Plus: GPT-6 Luna/high for light mechanical tasks, Luna/xhigh by default, GPT-6.1 Sol/high for bounded complexity, then Sol/xhigh for deeper work. No automatic Astra, including fallback; explicit overrides remain available.
+- Pro: the same Luna tiers, then GPT-5.6 Sol/xhigh for complex scoped implementation, existing iteration, UI, or careful maintenance, or GPT-6.1 Sol/xhigh for large-repository work, autonomous investigation, complex planning, or deep multi-module work. Only a substantive failure of the corresponding Sol/xhigh branch or genuinely extreme/high-consequence work permits GPT-6 Astra/xhigh. There is no intermediate Astra medium/high step. Selecting Pro opts into potentially substantially higher budget use.
 
 ```bash
 python3 scripts/router_lite.py profile-show --repository .
 python3 scripts/router_lite.py profile-set quality --scope project --repository .
 python3 scripts/router_lite.py decide --profile economy --repository .
+python3 scripts/router_lite.py profile-set plus --scope project --repository .
+python3 scripts/router_lite.py decide --profile pro --task-kind complex --task-subtype ui --repository .
 ```
 
-See [routing profiles](references/routing-profiles.md) for global settings, TOML lane overrides, and precedence. Profiles and the optional prompt hook are adapted from [David Soff's contributions](https://github.com/Davidsoff) in PRs #4 and #6.
+For Pro failure escalation, classify the failure with `--prior-failure --prior-failure-kind reasoning` (or `verification`) and supply the observed `--prior-failure-model` and `--prior-failure-effort xhigh`. Missing/wrong model or effort evidence, Luna failure, and infrastructure failure cannot authorize Astra. Ordinary scoped work remains on Luna; generic complexity or ambiguity alone requires Sol first. Generated/cached report recommendations are reclassified under the selected profile; explicit user pins still win. See [routing profiles](references/routing-profiles.md) for task subtypes, global settings, TOML lane overrides, and precedence. Profiles and the optional prompt hook are adapted from [David Soff's contributions](https://github.com/Davidsoff) in PRs #4 and #6.
 
 ## Exit for one project
 
@@ -126,7 +133,7 @@ The CLI enables benefit-gated subagents by default. `--no-subagents` is the expl
 | High ambiguity, coupling, or consequence | Astra / low |
 | Failed complex reasoning or verification | Astra / medium |
 
-Astra defaults to low; automatic escalation stops at medium. High, xhigh and max require an explicit user effort request. This also applies when another model falls back to Astra; choosing Astra alone does not opt into a higher effort.
+In the existing default profiles, Astra defaults to low; automatic escalation stops at medium. High, xhigh and max require an explicit user effort request or configured lane override. The explicitly selected Pro top tier above is the sole built-in exception. Choosing Astra alone does not opt into a higher effort. Plus/Pro fallback cannot promote a non-Astra recommendation to Astra.
 
 Current defaults: GPT-6 Luna, GPT-6.1 Sol and GPT-6 Astra; GPT-6 Sol and explicit GPT-5.6 routes remain compatible. Terra/high stays the legacy latency specialist. Ultra and GPT-5.5 fallback are legacy-mode features only. See [model updates](references/model-updates.md) for explicit updates, availability checks and read-only change hints. No background monitor or automatic catalog rewrite is installed.
 
