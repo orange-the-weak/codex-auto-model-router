@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "reviewed_at": "2026-10-03",
+  "reviewed_at": "2026-10-27",
   "models": {
     "gpt-6-astra": {
       "role": "frontier",
@@ -30,8 +30,8 @@
       "preset_stem": "codex_auto_model_executor_gpt61_sol",
       "fallbacks": [
         "gpt-6-sol",
-        "gpt-6-astra",
-        "gpt-5.6-sol"
+        "gpt-5.6-sol",
+        "gpt-6-astra"
       ]
     },
     "gpt-6-sol": {
@@ -49,6 +49,12 @@
         "gpt-6-astra",
         "gpt-5.6-sol"
       ]
+    },
+    "gpt-6.1-terra": {
+      "role": "specialist",
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "preset_stem": "codex_auto_model_executor_gpt61_terra",
+      "fallbacks": ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-terra"]
     },
     "gpt-6-luna": {
       "role": "efficient",
@@ -70,11 +76,14 @@
   "roles": {
     "frontier": "gpt-6-astra",
     "strong": "gpt-6.1-sol",
-    "efficient": "gpt-6-luna"
+    "efficient": "gpt-6-luna",
+    "specialist": "gpt-6.1-terra"
   },
   "sources": [
     "https://developers.openai.com/api/docs/models/gpt-6-astra",
-    "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+    "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+    "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+    "https://developers.openai.com/api/docs/models/gpt-6-luna"
   ],
   "notes": "Model availability must come from the current execution surface, not API documentation. Legacy GPT-5.6 routes remain explicit-compatible. Role choices are project policy, not benchmark equivalence."
 }

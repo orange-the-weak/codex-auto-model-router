@@ -72,57 +72,35 @@ AGENT_TYPES.update({
 
 
 def select_lite_route(args, task, current):
-    """Keep historical strict policy intact; map its signals to reviewed roles."""
+    """Use the shared policy once, then resolve availability for dispatch.
+
+Current model/effort defaults live only in routing_profiles. Explicit legacy
+model pins retain their historical effort defaults when no effort is supplied.
+"""
     if catalog.LOAD_ERROR:
         raise ValueError(catalog.LOAD_ERROR)
     override = task.get("model", args.model)
-    new_model = catalog.normalize(override)
+    config = getattr(args, "routing_config", None)
+    if getattr(args, "model_policy", "current") == "legacy":
+        config = None
+    elif config is None:
+        config = profiles.resolve_routing_config(
+            getattr(args, "repository", None), getattr(args, "profile", None))
+    legacy_pin = override is not None and catalog.normalize(override) is None
     selected = policy.select_route(
         "apply", **{key: task.get(key, getattr(args, key)) for key in (
             "task_kind", "risk", "size", "ambiguity", "coupling", "verification",
             "consequence", "prior_failure", "prior_failure_kind", "latency_priority")},
-        model_override=None if new_model else override,
-        effort_override=None, current=current)
+        model_override=override, effort_override=task.get("effort", args.effort),
+        current=current, routing_config=None if legacy_pin else config,
+        task_focus=task.get("task_focus", getattr(args, "task_focus", None)))
     route = selected["recommended"]
-    config = getattr(args, "routing_config", None)
-    if config is None and getattr(args, "model_policy", "current") == "current":
-        config = profiles.resolve_routing_config(
-            getattr(args, "repository", None), getattr(args, "profile", None))
-    lane = profiles.lane_for(route["source"], task.get("risk", args.risk),
-                             task.get("consequence", args.consequence))
-    configured_effort = False
-    # Explicit legacy IDs remain pinned. The old strict mode never changes.
-    if new_model:
-        route["model"] = new_model
-        route["source"] = "user-override"
-    elif not override and config is not None and lane in config["routes"]:
-        route.update(config["routes"][lane])
-        route["source"] = "profile-policy:" + lane
-        configured_effort = config["route_sources"][lane] in ("global", "project")
-        if task.get("effort", args.effort) is not None:
-            route["effort"] = policy.normalize_effort(task.get("effort", args.effort))
-    elif not override and getattr(args, "model_policy", "current") == "current":
-        old = route["model"]
-        if old == "gpt-5.6-sol":
-            role = "frontier" if route["effort"] in ("high", "xhigh", "max") else "strong"
-        else:
-            role = "efficient"
-        route["model"] = catalog.CATALOG["roles"][role]
-        # Preserve the measured legacy latency specialist; no new latency claims.
-        if old == "gpt-5.6-terra":
-            route["model"] = old
-        else:
-            route["source"] = "catalog-policy:" + route["source"]
-    if task.get("effort", args.effort) is not None:
-        route["effort"] = policy.normalize_effort(task.get("effort", args.effort))
-        if route["effort"] == "ultra" and not override:
-            route["model"] = "gpt-5.6-sol"
+    lane = route["source"].removeprefix("profile-policy:")
+    configured_effort = bool(config and route["source"].startswith("profile-policy:")
+        and config["route_sources"][lane] in ("global", "project"))
     explicit_effort = task.get("effort", args.effort) is not None or configured_effort
     failed_reasoning = bool(task.get("prior_failure", args.prior_failure)) and task.get(
         "prior_failure_kind", args.prior_failure_kind) in ("reasoning", "verification")
-    route["effort"] = catalog.automatic_effort(
-        route["model"], route["effort"], explicit_effort, failed_reasoning)
-    policy._validate_ultra_route(route["model"], route["effort"], explicit=explicit_effort, mode="apply")
     if route["model"] in catalog.MODELS and route["effort"] not in catalog.MODELS[route["model"]]["efforts"]:
         raise ValueError("unsupported catalog reasoning effort; no silent substitution")
     selected["fallback"] = catalog.resolve(route["model"], route["effort"],
@@ -319,7 +297,7 @@ def _route_is_sufficient(current, selected):
         return False
     candidates = [(target_model, target_effort)]
     source = selected["recommended"].get("source", "")
-    if target_model in policy.MODELS and source.startswith("benchmark-prior:"):
+    if target_model in policy.MODELS and source.startswith(("benchmark-prior:", "deterministic-policy:")):
         lane = source.split(":", 1)[1]
         candidates.extend(policy.LANE_FALLBACK_ROUTES.get(lane, ()))
     return any(
@@ -1239,6 +1217,8 @@ def _add_route_arguments(parser):
     parser.add_argument("--model-policy", choices=("current", "legacy"), default="current")
     parser.add_argument("--available-model", action="append", help="Complete observed execution surface; omit if unknown")
     parser.add_argument("--task-kind", choices=("mechanical", "ordinary", "complex"), default="ordinary")
+    parser.add_argument("--task-focus", choices=profiles.TASK_FOCUSES,
+                        help="Bounded visual/computer-use/writing/scoped-fix work; not an automatic UI classifier")
     parser.add_argument(
         "--risk", type=_risk_value, choices=("low", "normal", "high"), default="normal"
     )

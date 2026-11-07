@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Auto Model Router"
-  short_description: "Route Astra, Sol, or Luna with project-level opt-out"
-  default_prompt: "Use $codex-auto-model-router to choose the lowest sufficient reviewed catalog route, honor project-level exit settings, prefer safe direct tool concurrency, and explain why execution stays on the current coordinator when no model-specific leaf is used."
+  short_description: "Sol-first routing with Terra, Luna and capped Astra"
+  default_prompt: "Use $codex-auto-model-router to prefer GPT-6.1 Sol for project work, select Terra only for a bounded specialist focus, honor project-level opt-out and Astra budget limits, and execute locally or with a bounded leaf when its benefit clears overhead."

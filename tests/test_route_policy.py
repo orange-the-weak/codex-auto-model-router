@@ -26,6 +26,14 @@ def current(model="gpt-5.6-sol", effort="ultra"):
 
 
 class RoutePolicyTests(unittest.TestCase):
+    def setUp(self):
+        from datetime import date
+        from unittest.mock import patch
+        clock = type("EvidenceTestDate", (date,), {"today": classmethod(lambda cls: cls(2026, 8, 1))})
+        fixture = patch.object(POLICY, "date", clock)
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
     def segment(self, segment_id, task_kind="ordinary", risk="normal", size="normal", **extra):
         value = {
             "segment_id": segment_id,

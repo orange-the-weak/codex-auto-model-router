@@ -502,8 +502,9 @@ def recommended_route(
     mode, task_kind, risk, size, report_model=None, report_effort=None,
     ambiguity=None, coupling=None, verification=None, consequence=None,
     prior_failure=False, evidence=None, latency_priority=None,
-    prior_failure_kind=None, routing_config=None,
+    prior_failure_kind=None, routing_config=None, task_focus=None,
 ):
+    task_focus = profiles.normalize_task_focus(task_focus)
     if mode == "apply" and (report_model is not None or report_effort is not None):
         if report_model is None or report_effort is None:
             raise ValueError("report route requires both model and effort")
@@ -518,9 +519,10 @@ def recommended_route(
     failure_kind = _prior_failure_kind(prior_failure, prior_failure_kind)
 
     if mode in ("assess", "retune"):
-        # Router analysis is intentionally fixed at the user-approved route.
-        # select_route still applies an explicit user override afterwards.
-        return "gpt-5.6-sol", "high", "fixed-analysis-default"
+        # Current configured analysis follows the strong role; unconfigured
+        # programmatic callers retain the historical GPT-5.6 contract.
+        model = catalog.CATALOG["roles"]["strong"] if routing_config is not None else "gpt-5.6-sol"
+        return model, "high", "fixed-analysis-default"
 
     lanes = CANONICAL_ROUTING_LANES
     if (
@@ -590,6 +592,8 @@ def recommended_route(
     selected = lanes[lane]
     if routing_config is not None:
         resolved_lane = profiles.lane_for("policy:" + lane, risk, signals["consequence"])
+        if profiles.specialist_eligible(task_focus, task_kind, signals):
+            resolved_lane = "specialist_default"
         selected = dict(routing_config["routes"][resolved_lane])
         selected["effort"] = catalog.automatic_effort(
             selected["model"], selected["effort"],
@@ -638,6 +642,7 @@ def select_route(
     latency_priority=None,
     prior_failure_kind=None,
     routing_config=None,
+    task_focus=None,
 ):
     report_model = normalize_model(report_model)
     report_effort = normalize_effort(report_effort)
@@ -645,7 +650,7 @@ def select_route(
     target_model, target_effort, source = recommended_route(
         mode, task_kind, risk, size, report_model, report_effort,
         ambiguity, coupling, verification, consequence, prior_failure, evidence,
-        latency_priority, prior_failure_kind, routing_config,
+        latency_priority, prior_failure_kind, routing_config, task_focus,
     )
 
     explicit_override = model_override is not None or effort_override is not None
@@ -761,7 +766,7 @@ def _merge_signature(segment):
     return tuple(segment.get(field) for field in (
         "model", "effort", "reason", "task_kind", "risk", "ambiguity",
         "coupling", "verification", "consequence", "prior_failure",
-        "prior_failure_kind", "latency_priority", "merge_group",
+        "prior_failure_kind", "latency_priority", "merge_group", "task_focus",
     ))
 
 
@@ -845,6 +850,7 @@ def context_capsule(plan, segment_id):
         "attempt_id": segment.get("attempt_id"),
         "model": segment.get("model"),
         "effort": segment.get("effort"),
+        **({"task_focus": segment["task_focus"]} if "task_focus" in segment else {}),
         "goal": segment.get("goal"),
         "depends_on": segment.get("depends_on", []),
         "acceptance": segment.get("acceptance", []),
@@ -1009,6 +1015,7 @@ def _validate_parallel_segment_schema(segments, require_semantic_id=False):
         )
         if segment.get("prior_failure_kind") not in (None, failure_kind):
             raise ValueError(f"segment {segment_id} has invalid prior failure evidence")
+        profiles.normalize_task_focus(segment.get("task_focus"))
         if segment.get("latency_priority") is not None:
             _latency_priority(segment.get("latency_priority"))
         if segment.get("merge_group") is not None:
@@ -1114,6 +1121,7 @@ def _merge_short_siblings(segments):
             item["coupling"], item["verification"], item["consequence"],
             item["prior_failure"], item.get("prior_failure_kind"),
             item["latency_priority"], item["merge_group"],
+            item.get("task_focus"),
             tuple(item["conflict_keys"]),
         )
         groups.setdefault(key, []).append(item)
@@ -2161,6 +2169,7 @@ def plan_apply_segments(
             latency_priority=latency_priority,
             prior_failure_kind=prior_failure_kind,
             routing_config=routing_config,
+            task_focus=raw.get("task_focus"),
         )
         segment_model = normalize_model(raw.get("model"))
         segment_effort = normalize_effort(raw.get("effort"))
@@ -2219,6 +2228,7 @@ def plan_apply_segments(
             "size": size,
             **signals,
             "prior_failure_kind": prior_failure_kind,
+            **({"task_focus": raw["task_focus"]} if raw.get("task_focus") is not None else {}),
             "latency_priority": latency_priority,
             "merge_group": _merge_group(raw.get("merge_group"), segment_id),
             "acceptance": _segment_list(raw.get("acceptance"), "acceptance", segment_id),
@@ -2336,6 +2346,8 @@ def parser():
     root.add_argument("--current-effort", choices=RUNTIME_EFFORTS)
     root.add_argument("--mode", choices=("apply", "assess", "retune"))
     root.add_argument("--task-kind", choices=("mechanical", "ordinary", "complex"), default="ordinary")
+    root.add_argument("--task-focus", choices=profiles.TASK_FOCUSES,
+                      help="Concrete bounded specialist work; does not override complexity or risk")
     root.add_argument("--risk", choices=("low", "normal", "high"), default="normal")
     root.add_argument("--size", choices=("tiny", "normal", "large"), default="normal")
     root.add_argument("--ambiguity", choices=("low", "medium", "high"))
@@ -2545,6 +2557,7 @@ def main():
             args.latency_priority,
             args.prior_failure_kind,
             profiles.resolve_routing_config(args.repository, args.profile),
+            args.task_focus,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

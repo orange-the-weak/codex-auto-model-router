@@ -1,6 +1,6 @@
 ---
 name: codex-auto-model-router
-description: Recommend and execute an efficient Astra, Sol, or Luna route with GPT-5.6 compatibility with low-through-max reasoning for Codex project work. Prefer bounded direct tool concurrency, but automatically create or reuse a model-specific leaf agent when route-fit benefit clearly exceeds startup and aggregation overhead; no extra user permission is required. Use for code changes, tests, reviews, routed implementation, model recommendations, usage queries, retuning, and requests to disable, exit, restore, or check this Skill for the current project. Use the legacy strict state machine only when the user explicitly requests strict ledger auditing. Never auto-select Ultra or create a new top-level Codex task.
+description: Route Codex project work with GPT-6.1 Sol first, GPT-6.1 Terra for bounded visual/computer-use/writing work, Luna for focused low-budget tasks, and budget-capped Astra escalation. Recommend a model and effort, then execute locally or with a bounded leaf when the benefit exceeds overhead. Also handle project-level opt-out and routing configuration. Do not route simple explanations or read-only lookups; use strict auditing only when explicitly requested.
 ---
 
 # Codex Auto Model Router
@@ -45,19 +45,18 @@ The Router still evaluates every applicable request. It may report `tiny-local-f
 
 Use the configured `balanced` (default), `economy`, or `quality` profile. Read [routing-profiles.md](references/routing-profiles.md) for profile commands, lane overrides, precedence, and explicit Astra effort settings. Respect project opt-out before reading routing configuration. Never change a profile unless the user requests it. The optional global prompt hook is installed only with `--install-hook` / `-InstallHook`; it respects project opt-out and cannot switch the coordinator model.
 
-Use the reviewed `model-catalog.json` through `router_lite.py`; task evidence and explicit user overrides win. Read [model-updates.md](references/model-updates.md) for availability checks, explicit catalog updates, and non-blocking change hints. Legacy strict mode retains `route_policy.py` and GPT-5.6 evidence.
+Use the reviewed `model-catalog.json` through `router_lite.py`; task evidence and explicit user overrides win. The current matrix and processing layers are defined in [routing-profiles.md](references/routing-profiles.md), not by remapping historical GPT-5.6 recommendations. Read [model-updates.md](references/model-updates.md) for availability checks, explicit catalog updates, and non-blocking change hints.
 
 - Luna/medium: deterministic mechanical work.
-- Luna/high: ordinary bounded implementation and normal research.
-- Luna/xhigh: large bounded scans or reviews with low-to-normal consequence.
-- Luna/max: large deterministic deep work with low-to-normal consequence.
-- Terra/high: explicit latency priority.
-- Sol/low: explicit user override or compatibility testing only; never automatic.
-- Sol/medium: bounded complex work.
-- Astra/low: high ambiguity, coupling, or consequence; default when Astra is requested without an effort.
+- GPT-6.1 Sol/medium: ordinary implementation, research, and bounded complex work in balanced.
+- GPT-6.1 Sol/high: scans, deep deterministic work, uncertainty, coupling, or high consequence in balanced. Quality increases selected Sol lanes to high/xhigh, not to Astra.
+- GPT-6.1 Sol/low: explicit latency priority; a policy preference, not a measured latency guarantee.
+- GPT-6.1 Terra/medium (quality: high): an explicit `--task-focus visual|computer_use|writing|scoped_fix` for bounded, non-complex work without high ambiguity, coupling, consequence, or prior failure. Do not infer it merely from the word UI; complex UI engineering remains Sol-first. A task focus never grants tool/action permissions. Use per-task `task_focus` in plans.
+- Economy uses Luna/high for ordinary work and latency priority, Luna/xhigh for scans, and Luna/max for large deterministic work. It still uses Sol for complex or consequential work.
+- Astra/low: explicit model-only choice or availability fallback when Sol routes are unavailable.
 - Astra/medium: classified reasoning/verification failure. Astra high, xhigh and max require an explicit user effort request, including fallback and reuse.
 
-Current Lite defaults are GPT-6 Luna, GPT-6.1 Sol and GPT-6 Astra. Preserve explicit model choices; unavailable explicit models require local execution with a visible limitation, not silent substitution. Automatic Astra fallback must disclose capability degradation. Never select Ultra automatically; native Ultra and the GPT-5.5 family guard belong only to legacy compatibility mode.
+GPT-6.1 Sol is the primary project-work model. GPT-6.1 Terra is a specialist, and GPT-6 Luna remains the efficient model. GPT-6 Sol and GPT-5.6 routes remain compatibility choices, not preferred UI/maintenance lanes; GPT-5.6 Terra/high remains legacy-only. Preserve explicit model choices; unavailable explicit models require local execution with a visible limitation, not silent substitution. Automatic Astra fallback must disclose capability degradation. Never select Ultra automatically; native Ultra and the GPT-5.5 family guard belong only to legacy compatibility mode.
 
 ## Model catalog updates
 
@@ -118,7 +117,7 @@ Strict mode may use hashes, claims, tickets, finish, and Restore. Even there, le
 
 ## Assess, Query, Record, Retune
 
-- Assess and Retune use Sol/high unless the user overrides them. Save the full report to `docs/codex-model-routing-report.md`; keep chat output brief.
+- Configured Assess and Retune use GPT-6.1 Sol/high unless the user overrides them. Unconfigured legacy APIs retain GPT-5.6 Sol/high. Save the full report to `docs/codex-model-routing-report.md`; keep chat output brief.
 - Query and Record use local scripts and never create agents.
 - Use [routing-criteria.md](references/routing-criteria.md) when changing model assignments and [benchmark-evidence.md](references/benchmark-evidence.md) when changing evidence-derived lanes.
 - Use [usage-ledger.md](references/usage-ledger.md) for historical summaries. Recommendations are not proof of actual model use.

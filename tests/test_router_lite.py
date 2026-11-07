@@ -45,6 +45,14 @@ def reusable_candidate(name, model="gpt-5.6-luna", effort="high", **overrides):
 
 
 class RouterLiteTests(unittest.TestCase):
+    def test_expired_evidence_keeps_canonical_local_substitutes(self):
+        for source in ("benchmark-prior:ordinary_default", "deterministic-policy:ordinary_default"):
+            selected = {"execution": {"model": "gpt-5.6-luna", "effort": "high"},
+                        "recommended": {"source": source}}
+            substitute = LITE.policy.LANE_FALLBACK_ROUTES["ordinary_default"][0]
+            self.assertTrue(LITE._route_is_sufficient(
+                {"status": "verified", "model": substitute[0], "effort": substitute[1]}, selected))
+
     def args(self, **overrides):
         values = {
             "model_policy": "legacy",  # Preserve the pre-catalog compatibility contract.
@@ -932,7 +940,7 @@ class RouterLiteTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         payload = json.loads(result.stdout)
         self.assertNotIn("warning", payload)
-        self.assertEqual(payload["recommended_route"]["model"], "gpt-6-luna")
+        self.assertEqual(payload["recommended_route"]["model"], "gpt-6.1-sol")
 
     def test_cli_unknown_argument_fails_open_with_success_exit(self):
         result = subprocess.run(

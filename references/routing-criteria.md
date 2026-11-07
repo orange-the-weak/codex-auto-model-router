@@ -1,6 +1,6 @@
 # Routing criteria
 
-This reference describes the preserved GPT-5.6 compatibility policy. Default Lite execution maps its task signals to the reviewed Astra/Sol/Luna roles; see [model-updates.md](model-updates.md). Historical benchmark scores are not evidence for new model equivalence.
+This reference describes only the preserved GPT-5.6 compatibility policy. Current model choices come from the [Sol-first profile matrix](routing-profiles.md); Lite and configured strict execution share that policy without remapping historical model choices. Do not use the model/effort tables below as current defaults. Historical benchmark scores are not evidence for new model equivalence.
 
 Use this reference to choose the lowest sufficient Codex model and reasoning effort. Task evidence comes first; the versioned offline prior in [benchmark-evidence.md](benchmark-evidence.md) breaks ties and calibrates effort. It expires after 90 days and never creates a runtime network dependency.
 

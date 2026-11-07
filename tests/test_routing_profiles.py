@@ -45,6 +45,57 @@ class ProfileTests(unittest.TestCase):
                 if route["model"] == "gpt-6-astra":
                     self.assertIn(route["effort"], ("low", "medium"))
 
+    def test_sol_first_matrix_and_profile_boundaries(self):
+        expected = {
+            "economy": (("gpt-6-luna", "high"), "medium", "high"),
+            "balanced": (("gpt-6.1-sol", "medium"), "medium", "high"),
+            "quality": (("gpt-6.1-sol", "high"), "high", "xhigh"),
+        }
+        for profile, (ordinary, bounded, uncertain) in expected.items():
+            routes = self.config(profile)["routes"]
+            with self.subTest(profile=profile):
+                self.assertEqual(routes["ordinary_default"], dict(zip(("model", "effort"), ordinary)))
+                self.assertEqual(routes["complex_bounded"], {"model": "gpt-6.1-sol", "effort": bounded})
+                for lane in ("complex_uncertain", "high_consequence"):
+                    self.assertEqual(routes[lane], {"model": "gpt-6.1-sol", "effort": uncertain})
+                self.assertEqual(routes["complex_failed_escalation"], {"model": "gpt-6-astra", "effort": "medium"})
+
+    def test_shared_policy_matches_lite_across_profiles_and_lanes(self):
+        cases = ({"task_kind": "mechanical"}, {}, {"size": "large"},
+                 {"size": "large", "verification": "deterministic"},
+                 {"latency_priority": "high"}, {"task_kind": "complex"},
+                 {"ambiguity": "high"}, {"risk": "high"},
+                 {"task_kind": "complex", "prior_failure": True, "prior_failure_kind": "reasoning"},
+                 {"task_kind": "complex", "prior_failure": True, "prior_failure_kind": "infrastructure"})
+        for profile in PROFILES.ROUTING_PROFILES:
+            config = self.config(profile)
+            for signals in cases:
+                with self.subTest(profile=profile, signals=signals):
+                    lite = LITE._decision(self.args(routing_config=config, **signals), current={})
+                    strict = POLICY.select_route("apply", routing_config=config, **signals)
+                    self.assertEqual(lite["recommended_route"], {k: strict["recommended"][k] for k in ("model", "effort")})
+                    if signals.get("prior_failure_kind") == "infrastructure":
+                        self.assertNotEqual(lite["recommended_route"]["model"], "gpt-6-astra")
+
+    def test_configured_analysis_prefers_sol_61_without_changing_legacy(self):
+        for mode in ("assess", "retune"):
+            current = POLICY.select_route(mode, routing_config=self.config())
+            legacy = POLICY.select_route(mode)
+            self.assertEqual((current["recommended"]["model"], current["recommended"]["effort"]), ("gpt-6.1-sol", "high"))
+            self.assertEqual(legacy["recommended"]["model"], "gpt-5.6-sol")
+
+    def test_shared_policy_preserves_explicit_efforts_and_astra_model_only_guard(self):
+        for profile in PROFILES.ROUTING_PROFILES:
+            config = self.config(profile)
+            for model in ("gpt-6.1-sol", "astra"):
+                for effort in (None, *PROFILES.ROUTED_EFFORTS):
+                    with self.subTest(profile=profile, model=model, effort=effort):
+                        lite = LITE._decision(self.args(routing_config=config, model=model, effort=effort), current={})
+                        strict = POLICY.select_route("apply", routing_config=config, model_override=model, effort_override=effort)
+                        self.assertEqual(lite["recommended_route"], {k: strict["recommended"][k] for k in ("model", "effort")})
+                        if model == "astra" and effort is None:
+                            self.assertEqual(lite["execution_route"]["effort"], "low")
+
     def test_current_catalog_fallback_rejects_ultra(self):
         with self.assertRaises(ValueError):
             POLICY.resolve_family_fallback("astra", "ultra")
@@ -98,7 +149,7 @@ class ProfileTests(unittest.TestCase):
     def test_effort_only_keeps_profile_model_and_astra_model_only_stays_low(self):
         config = self.config("economy")
         result = LITE._decision(self.args(routing_config=config, task_kind="complex", effort="medium"), current={})
-        self.assertEqual(result["recommended_route"], {"model": "gpt-6-luna", "effort": "medium"})
+        self.assertEqual(result["recommended_route"], {"model": "gpt-6.1-sol", "effort": "medium"})
         result = LITE._decision(self.args(routing_config=config, model="astra"), current={})
         self.assertEqual(result["recommended_route"]["effort"], "low")
 
@@ -116,10 +167,10 @@ class ProfileTests(unittest.TestCase):
         config = self.config("quality")
         linear = POLICY.plan_apply_segments([segment], routing_config=config)
         parallel = POLICY.plan_parallel_segments([dict(segment, depends_on=[])], routing_config=config)
-        self.assertEqual((linear["segments"][0]["model"], linear["segments"][0]["effort"]), ("gpt-6-astra", "low"))
-        self.assertEqual(parallel["segments"][0]["effort"], "low")
+        self.assertEqual((linear["segments"][0]["model"], linear["segments"][0]["effort"]), ("gpt-6.1-sol", "xhigh"))
+        self.assertEqual(parallel["segments"][0]["effort"], "xhigh")
         self.write(self.project_file, 'schema_version=1\nprofile="economy"\n')
-        self.assertEqual(linear["segments"][0]["model"], "gpt-6-astra")
+        self.assertEqual(linear["segments"][0]["model"], "gpt-6.1-sol")
 
     def test_invalid_config_fails_open_and_disabled_skips_config(self):
         self.write(self.project_file, 'invalid = [')

@@ -1,4 +1,8 @@
-"""Routing profiles adapted from David Soff's PR #6; current catalog remains authoritative."""
+"""Current route tables and configuration; legacy task classification is shared.
+
+Profiles were adapted from David Soff's PR #6. The reviewed catalog owns model
+roles/availability; this module alone owns current default model/effort choices.
+"""
 import json
 import os
 import re
@@ -12,34 +16,57 @@ DEFAULT_ROUTING_PROFILE = "balanced"
 TASK_LANES = {lane: {} for lane in (
     "mechanical_default", "ordinary_default", "bounded_scan",
     "bounded_deep_deterministic", "latency_priority", "complex_bounded",
-    "complex_uncertain", "high_consequence", "complex_failed_escalation")}
+    "complex_uncertain", "high_consequence", "complex_failed_escalation",
+    "specialist_default")}
 ROUTED_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+TASK_FOCUSES = ("general", "visual", "computer_use", "writing", "scoped_fix")
+
+
+def normalize_task_focus(value):
+    value = "general" if value is None else value
+    if value not in TASK_FOCUSES:
+        raise ValueError("unsupported task_focus")
+    return value
+
+
+def specialist_eligible(focus, task_kind, signals):
+    """A concrete bounded focus, not generic difficulty or UI vocabulary."""
+    return (normalize_task_focus(focus) != "general" and task_kind != "complex"
+            and signals["ambiguity"] != "high" and signals["coupling"] != "high"
+            and signals["consequence"] != "high" and not signals["prior_failure"])
+
 ROUTING_PROFILES = {
     "balanced": {
         "mechanical_default": {"model": "gpt-6-luna", "effort": "medium"},
-        "ordinary_default": {"model": "gpt-6-luna", "effort": "high"},
-        "bounded_scan": {"model": "gpt-6-luna", "effort": "xhigh"},
-        "bounded_deep_deterministic": {"model": "gpt-6-luna", "effort": "max"},
-        "latency_priority": {"model": "gpt-5.6-terra", "effort": "high"},
+        "ordinary_default": {"model": "gpt-6.1-sol", "effort": "medium"},
+        "bounded_scan": {"model": "gpt-6.1-sol", "effort": "high"},
+        "bounded_deep_deterministic": {"model": "gpt-6.1-sol", "effort": "high"},
+        "latency_priority": {"model": "gpt-6.1-sol", "effort": "low"},
         "complex_bounded": {"model": "gpt-6.1-sol", "effort": "medium"},
-        "complex_uncertain": {"model": "gpt-6-astra", "effort": "low"},
-        "high_consequence": {"model": "gpt-6-astra", "effort": "low"},
+        "complex_uncertain": {"model": "gpt-6.1-sol", "effort": "high"},
+        "high_consequence": {"model": "gpt-6.1-sol", "effort": "high"},
         "complex_failed_escalation": {"model": "gpt-6-astra", "effort": "medium"},
+        "specialist_default": {"model": "gpt-6.1-terra", "effort": "medium"},
     }
 }
 ROUTING_PROFILES["economy"] = {
     lane: dict(route) for lane, route in ROUTING_PROFILES["balanced"].items()}
-for lane in ("complex_bounded", "complex_uncertain"):
+for lane in ("ordinary_default", "latency_priority"):
     ROUTING_PROFILES["economy"][lane] = {"model": "gpt-6-luna", "effort": "high"}
+ROUTING_PROFILES["economy"]["bounded_scan"] = {"model": "gpt-6-luna", "effort": "xhigh"}
+ROUTING_PROFILES["economy"]["bounded_deep_deterministic"] = {"model": "gpt-6-luna", "effort": "max"}
 ROUTING_PROFILES["quality"] = {
     lane: dict(route) for lane, route in ROUTING_PROFILES["balanced"].items()}
-for lane in ("ordinary_default", "bounded_scan", "bounded_deep_deterministic"):
-    ROUTING_PROFILES["quality"][lane]["model"] = "gpt-6.1-sol"
+ROUTING_PROFILES["quality"]["specialist_default"]["effort"] = "high"
+for lane in ("ordinary_default", "complex_bounded"):
+    ROUTING_PROFILES["quality"][lane]["effort"] = "high"
+for lane in ("complex_uncertain", "high_consequence", "bounded_deep_deterministic"):
+    ROUTING_PROFILES["quality"][lane]["effort"] = "xhigh"
 
 # Role changes in the reviewed catalog propagate without renaming lanes.
 for table in ROUTING_PROFILES.values():
     for route in table.values():
-        role = {"gpt-6-luna": "efficient", "gpt-6.1-sol": "strong", "gpt-6-astra": "frontier"}.get(route["model"])
+        role = {"gpt-6-luna": "efficient", "gpt-6.1-sol": "strong", "gpt-6-astra": "frontier", "gpt-6.1-terra": "specialist"}.get(route["model"])
         if role:
             route["model"] = catalog.CATALOG["roles"].get(role, route["model"])
 

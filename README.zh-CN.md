@@ -2,7 +2,7 @@
 
 [![Validate](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml/badge.svg)](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml)
 
-**面向 OpenAI Codex 的轻量 Astra/Sol/Luna 模型与推理强度路由器。** 推荐 Astra、Sol 或 Luna（保留 GPT-5.6 兼容），以及 low 到 max 推理；优先通过直接工具并发降低开销，并在模型切换收益明确高于协调成本时自动使用对应模型的叶子智能体。
+**面向 OpenAI Codex、优先使用 GPT-6.1 Sol 的模型与推理强度路由器。** Sol 承担主要项目工作，GPT-6.1 Terra 处理有界专项任务，GPT-6 Luna 处理轻量和低预算任务，Astra 提供有预算上限的升级；优先工具并发，只在收益明确超过开销时使用对应模型的叶子智能体。
 
 [English](README.md) · [路由反馈](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=routing-feedback.yml) · [问题反馈](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=bug-report.yml)
 
@@ -15,9 +15,9 @@ GPT-5.6 给 Codex 带来了很多有用的模型和推理组合，但每次都�
 ```text
 当前请求
 └─ 只根据这次任务重新评估
-   ├─ 机械、普通、扫描或确定性深度任务 → Luna
-   ├─ 明确追求低延迟 → Terra
-   └─ 有界复杂任务 → Sol；高歧义、高后果任务 → Astra
+   ├─ 机械任务 → Luna；economy 的普通任务和扫描也使用 Luna
+   ├─ 普通、复杂或高后果项目任务 → GPT-6.1 Sol
+   └─ 已分类的复杂推理／验证失败 → Astra，自动最高 medium
       ↓
    建议一致或切换不划算 → 主线程直接完成
    建议不同且路由收益超过开销 → 使用对应模型的叶子智能体
@@ -50,7 +50,7 @@ cd codex-auto-model-router
 
 ## 路由配置档
 
-`balanced` 保留默认路由；`economy` 让更多有界任务使用 Luna；`quality` 让普通任务和扫描优先使用 Sol。所有内置配置中，Astra 默认 low，推理或验证失败后可升至 medium；更高强度必须显式指定，包括用户配置的任务档位覆盖。
+`balanced` 优先使用 GPT-6.1 Sol 完成普通和复杂项目任务；`economy` 的普通任务和扫描使用 Luna，但复杂或高后果任务仍使用 Sol；`quality` 提高部分 Sol 档位的推理强度，不直接跳到 Astra。完整矩阵及处理顺序见[路由配置说明](references/routing-profiles.md)。已有配置档选择和自定义覆盖保持不变，不引入 Plus/Pro 策略。
 
 ```bash
 python3 scripts/router_lite.py profile-show --repository .
@@ -118,17 +118,15 @@ CLI 默认启用收益门槛委派；`--no-subagents` 是明确退出开关。�
 | 任务 | 默认路由 |
 |---|---|
 | 确定性机械任务 | Luna / medium |
-| 普通有界任务 | Luna / high |
-| 大型有界扫描或审查 | Luna / xhigh |
-| 大型确定性深度任务 | Luna / max |
-| 明确追求低延迟 | Terra / high |
-| 有界复杂任务 | Sol / medium |
-| 高歧义、高耦合或高后果 | Astra / low |
+| 普通或有界复杂任务 | GPT-6.1 Sol / medium |
+| 大型扫描、深度任务、高歧义、高耦合或高后果 | GPT-6.1 Sol / high |
+| 明确追求低延迟 | GPT-6.1 Sol / low |
 | 复杂推理或验证已有失败 | Astra / medium |
+| 明确的有界视觉、电脑操作、写作或限定代码修复 | GPT-6.1 Terra / medium |
 
 Astra 默认 low，自动升级最多 medium；high、xhigh、max 仅在用户显式指定强度时使用。其他模型回退到 Astra 时同样遵守此限制，只指定 Astra 不代表允许更高强度。
 
-当前默认使用 GPT-6 Luna、GPT-6.1 Sol 与 GPT-6 Astra，兼容 GPT-6 Sol 和显式 GPT-5.6 路由；Terra/high 保留为旧版低延迟路线。Ultra 与 GPT-5.5 回退仅属于旧兼容模式。可显式请求“更新模型目录”；只读检查发现新模型时提示审核，不自动改路由、不创建后台定时任务。详见[模型更新说明](references/model-updates.md)。
+上表为 balanced 配置。仅对实际有界专项工作使用 `--task-focus visual|computer_use|writing|scoped_fix`；复杂、高歧义、高耦合、高后果或已有失败的任务不会自动选择 Terra。quality 使用 Terra/high，普通 UI 工程仍优先 Sol。任务困难本身不再触发 Astra：显式只选 Astra 时默认 low，已分类的复杂推理／验证失败可升至 medium。GPT-6 Sol 和 GPT-5.6 仅作回退或显式兼容选择，GPT-5.6 Terra/high 仅保留在旧兼容模式。当前低延迟档位是策略偏好，不是实测速度保证。Ultra 与 GPT-5.5 回退仅属于旧兼容模式。可显式请求“更新模型目录”，不自动改目录、不创建后台定时任务。详见[模型更新说明](references/model-updates.md)。
 
 ## 测评与台账
 

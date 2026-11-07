@@ -25,10 +25,12 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(result["model"], "gpt-6-astra")
             self.assertEqual(result["agent_type"], f"codex_auto_model_executor_gpt6_astra_{effort}")
 
-    def test_high_consequence_and_reasoning_failure_use_astra(self):
-        for extra in ({"risk": "high"}, {"prior_failure": True, "prior_failure_kind": "reasoning"}):
-            result = LITE._decision(self.args(task_kind="complex", **extra), current={})
-            self.assertEqual(result["recommended_route"]["model"], "gpt-6-astra")
+    def test_sol_first_with_astra_reserved_for_reasoning_failure(self):
+        result = LITE._decision(self.args(task_kind="complex", risk="high"), current={})
+        self.assertEqual(result["recommended_route"], {"model": "gpt-6.1-sol", "effort": "high"})
+        result = LITE._decision(self.args(task_kind="complex", prior_failure=True,
+            prior_failure_kind="reasoning"), current={})
+        self.assertEqual(result["recommended_route"], {"model": "gpt-6-astra", "effort": "medium"})
 
     def test_explicit_astra_is_not_silently_replaced(self):
         result = LITE._decision(self.args(model="astra", available_model=["gpt-6.1-sol"]), current={})
@@ -37,7 +39,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(result["reason"], "explicit-model-unavailable")
 
     def test_astra_cost_guard_including_fallback(self):
-        for model in (None, "astra", "gpt-6-astra"):
+        for model in ("astra", "gpt-6-astra"):
             result = LITE._decision(self.args(model=model, risk="high"), current={})
             self.assertEqual(result["execution_route"]["effort"], "low")
         result = LITE._decision(self.args(task_kind="complex", prior_failure=True,
@@ -49,7 +51,8 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(result["execution"]["effort"], "max")
 
     def test_automatic_astra_fallback_discloses_downgrade(self):
-        result = LITE._decision(self.args(risk="high", available_model=["gpt-6.1-sol"]), current={})
+        result = LITE._decision(self.args(task_kind="complex", prior_failure=True,
+            prior_failure_kind="verification", available_model=["gpt-6.1-sol"]), current={})
         self.assertEqual(result["execution_route"]["model"], "gpt-6.1-sol")
         self.assertTrue(result["fallback"]["quality_degraded"])
 
@@ -75,9 +78,9 @@ class CatalogTests(unittest.TestCase):
         result = self.run_plan(["gpt-6.1-sol"])
         self.assertEqual(result["action"], "parallel")
         for task in result["tasks"]:
-            self.assertEqual(task["leaf_agent_type"], "codex_auto_model_executor_gpt61_sol_high")
+            self.assertEqual(task["leaf_agent_type"], "codex_auto_model_executor_gpt61_sol_medium")
         for lane in result["executor_lanes"]:
-            self.assertEqual(lane["route"], ["gpt-6.1-sol", "high"])
+            self.assertEqual(lane["route"], ["gpt-6.1-sol", "medium"])
 
     def test_plan_no_models_no_dispatch(self):
         result = self.run_plan([])
@@ -92,7 +95,7 @@ class CatalogTests(unittest.TestCase):
         self.assertNotIn("blocked", result.get("dispatch_now", []))
 
     def test_reuse_uses_resolved_model(self):
-        candidate = reusable_candidate("sol_leaf", model="gpt-6.1-sol")
+        candidate = reusable_candidate("sol_leaf", model="gpt-6.1-sol", effort="medium")
         args = self.args(available_model=["gpt-6.1-sol"], no_runtime_detection=True,
                          reuse_candidates_json=json.dumps([candidate]))
         out = io.StringIO()
@@ -130,9 +133,18 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(result["execution"]["model"], "gpt-6-astra")
         self.assertFalse(result["availability_complete"])
 
+    def test_sol_fallback_prefers_compatible_sol_before_astra(self):
+        for available, expected in ((["gpt-6-sol", "gpt-5.6-sol", "gpt-6-astra"], "gpt-6-sol"),
+                                    (["gpt-5.6-sol", "gpt-6-astra"], "gpt-5.6-sol"),
+                                    (["gpt-6-astra"], "gpt-6-astra")):
+            result = LITE.catalog.resolve("gpt-6.1-sol", "high", available)
+            self.assertEqual(result["execution"]["model"], expected)
+            if expected == "gpt-6-astra":
+                self.assertEqual(result["execution"]["effort"], "low")
+
     def test_current_policy_is_cli_default(self):
         args = LITE.parser().parse_args(["decide", "--no-runtime-detection", "--risk", "high"])
-        self.assertEqual(LITE._decision(args)["recommended_route"]["model"], "gpt-6-astra")
+        self.assertEqual(LITE._decision(args)["recommended_route"]["model"], "gpt-6.1-sol")
 
     def test_explicit_legacy_still_supported(self):
         result = LITE._decision(self.args(model="gpt-5.6-sol", effort="high"), current={})

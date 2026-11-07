@@ -11,8 +11,9 @@ def load(path=PATH):
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if data.get("schema_version") != 1:
         raise ValueError("unsupported model catalog schema")
-    if set(data["roles"]) != {"frontier", "strong", "efficient"}:
-        raise ValueError("catalog requires three capability roles")
+    roles = set(data["roles"])
+    if not {"frontier", "strong", "efficient"} <= roles or roles - {"frontier", "strong", "efficient", "specialist"}:
+        raise ValueError("catalog requires frontier/strong/efficient and permits a specialist role")
     for model, entry in data["models"].items():
         if not model.startswith("gpt-") or not entry["efforts"]:
             raise ValueError("invalid catalog model")

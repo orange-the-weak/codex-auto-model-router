@@ -2,7 +2,7 @@
 
 [![Validate](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml/badge.svg)](https://github.com/orange-the-weak/codex-auto-model-router/actions/workflows/validate.yml)
 
-**A lightweight Astra/Sol/Luna model and reasoning router for OpenAI Codex.** It recommends Astra, Sol, or Luna (with GPT-5.6 compatibility) and low through max reasoning, prefers low-overhead direct tool concurrency, and automatically uses a model-specific leaf when the route benefit is clearly larger than its overhead.
+**A Sol-first model and reasoning router for OpenAI Codex.** GPT-6.1 Sol is the default for project work, GPT-6.1 Terra covers bounded specialist work, GPT-6 Luna covers focused low-budget tasks, and Astra provides budget-capped escalation. It prefers direct tool concurrency and uses a model-specific leaf only when the route benefit clearly outweighs overhead.
 
 [简体中文](README.zh-CN.md) · [Routing feedback](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=routing-feedback.yml) · [Bug report](https://github.com/orange-the-weak/codex-auto-model-router/issues/new?template=bug-report.yml)
 
@@ -15,9 +15,9 @@ Version 2 therefore uses a fail-open, benefit-gated default: choose quickly, kee
 ```text
 Request
 └─ Re-evaluate the task itself
-   ├─ Mechanical, ordinary, scan, or deterministic deep work → Luna
-   ├─ Explicit latency priority → Terra
-   └─ Bounded complex → Sol; highly ambiguous or consequential → Astra
+   ├─ Mechanical work → Luna; economy also uses Luna for ordinary work and scans
+   ├─ Ordinary / complex / consequential work → GPT-6.1 Sol
+   └─ Classified complex reasoning/verification failure → Astra, at most medium
       ↓
    Recommendation matches or switching does not pay → run locally
    Recommendation differs and route benefit clears overhead → use that model's leaf agent
@@ -50,7 +50,7 @@ Restart Codex after installation. To also install the global prompt hook, opt in
 
 ## Routing profiles
 
-`balanced` preserves the default routes. `economy` favors Luna for more bounded work; `quality` favors Sol for ordinary work and scans. All built-in profiles keep Astra at low, or medium after a reasoning/verification failure. Higher Astra effort requires an explicit effort override (including a configured lane override).
+`balanced` uses GPT-6.1 Sol first for ordinary and complex work. `economy` uses Luna for ordinary work and scans but keeps Sol for complex or consequential work. `quality` raises selected Sol efforts instead of jumping directly to Astra. The full matrix and decision pipeline live in [routing profiles](references/routing-profiles.md). Existing profile selections and custom overrides are preserved; Plus/Pro policies are not included.
 
 ```bash
 python3 scripts/router_lite.py profile-show --repository .
@@ -118,17 +118,15 @@ The CLI enables benefit-gated subagents by default. `--no-subagents` is the expl
 | Work | Default route |
 |---|---|
 | Deterministic mechanical work | Luna / medium |
-| Ordinary bounded work | Luna / high |
-| Large bounded scans or reviews | Luna / xhigh |
-| Large deterministic deep work | Luna / max |
-| Explicit latency priority | Terra / high |
-| Bounded complex work | Sol / medium |
-| High ambiguity, coupling, or consequence | Astra / low |
+| Ordinary or bounded complex work | GPT-6.1 Sol / medium |
+| Large scans, deep work, high ambiguity, coupling, or consequence | GPT-6.1 Sol / high |
+| Explicit latency priority | GPT-6.1 Sol / low |
 | Failed complex reasoning or verification | Astra / medium |
+| Explicit bounded visual, computer-use, writing, or scoped-fix focus | GPT-6.1 Terra / medium |
 
 Astra defaults to low; automatic escalation stops at medium. High, xhigh and max require an explicit user effort request. This also applies when another model falls back to Astra; choosing Astra alone does not opt into a higher effort.
 
-Current defaults: GPT-6 Luna, GPT-6.1 Sol and GPT-6 Astra; GPT-6 Sol and explicit GPT-5.6 routes remain compatible. Terra/high stays the legacy latency specialist. Ultra and GPT-5.5 fallback are legacy-mode features only. See [model updates](references/model-updates.md) for explicit updates, availability checks and read-only change hints. No background monitor or automatic catalog rewrite is installed.
+This is the balanced matrix. Use `--task-focus visual|computer_use|writing|scoped_fix` only for actual bounded work; complexity, high ambiguity/coupling/consequence, or prior failure prevent automatic Terra routing. Quality uses Terra/high. Generic UI engineering stays Sol-first. Task difficulty alone does not select Astra; explicit Astra choices default to low, while classified complex reasoning/verification failures may escalate to medium. GPT-6 Sol and GPT-5.6 remain fallback/explicit compatibility choices; GPT-5.6 Terra/high stays legacy-only. Current latency choices are policy preferences, not measured guarantees. Ultra and GPT-5.5 fallback are legacy-mode features only. See [model updates](references/model-updates.md). No background monitor or automatic catalog rewrite is installed.
 
 ## Evidence and history
 
